@@ -1,6 +1,7 @@
 .venv/
 .vscode/
 __pycache__/
+__marimo__/
 *.pyc
 
 data/
