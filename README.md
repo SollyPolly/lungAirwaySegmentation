@@ -59,8 +59,12 @@ Install the notebook dependencies:
 
 ```powershell
 python -m pip install --upgrade pip
-pip install marimo nibabel numpy plotly scipy scikit-image
+pip install -r requirements.txt
 ```
+
+If you are using GPU acceleration for the feature-extraction script, you may
+want to install a CUDA-matched PyTorch build first, then run
+`pip install -r requirements.txt`.
 
 ## Open The Notebook
 
