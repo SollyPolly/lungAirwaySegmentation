@@ -5,5 +5,5 @@ __marimo__/
 *.pyc
 
 data/
+
 CT_FM_Feature_Extractor/
-features/

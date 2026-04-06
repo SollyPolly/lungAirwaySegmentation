@@ -1,0 +1,33 @@
+{
+  "train_case": "1",
+  "val_case": "1",
+  "processed_root": "D:\\Code\\Imperial\\lungAirwaySegmentation\\data\\processed",
+  "train_image_path": "D:\\Code\\Imperial\\lungAirwaySegmentation\\data\\processed\\1\\1_ct_processed.nii.gz",
+  "train_label_path": "D:\\Code\\Imperial\\lungAirwaySegmentation\\data\\processed\\1\\1_airway_mask_processed.nii.gz",
+  "val_image_path": "D:\\Code\\Imperial\\lungAirwaySegmentation\\data\\processed\\1\\1_ct_processed.nii.gz",
+  "val_label_path": "D:\\Code\\Imperial\\lungAirwaySegmentation\\data\\processed\\1\\1_airway_mask_processed.nii.gz",
+  "device": "cuda",
+  "epochs": 100,
+  "batch_size": 2,
+  "samples_per_epoch": 128,
+  "roi_size": [
+    96,
+    96,
+    96
+  ],
+  "sw_batch_size": 2,
+  "lr": 0.001,
+  "seed": 42,
+  "train_image_shape": [
+    1,
+    401,
+    311,
+    580
+  ],
+  "val_image_shape": [
+    1,
+    401,
+    311,
+    580
+  ]
+}
