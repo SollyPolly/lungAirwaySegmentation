@@ -701,9 +701,9 @@ def _(list_prediction_run_names, mo, prediction_run_root):
         step=20,
         label="Prediction viewer height",
     )
-    show_prediction_lung_mask = mo.ui.switch(value=False, label="Show lung mask")
-    show_true_prediction_mask = mo.ui.switch(value=True, label="Show true mask")
-    show_predicted_mask = mo.ui.switch(value=True, label="Show predicted mask")
+    show_prediction_lung_mask = mo.ui.switch(value=False, label="Lung")
+    show_true_prediction_mask = mo.ui.switch(value=True, label="Truth")
+    show_predicted_mask = mo.ui.switch(value=True, label="Prediction")
     predicted_mask_opacity = mo.ui.slider(
         0.05,
         1.0,
@@ -935,42 +935,90 @@ def _(
         prediction_controls = mo.vstack(
             [
                 mo.md("## Saved Prediction Viewer"),
-                prediction_run_selector,
-                prediction_split_selector,
+                mo.hstack(
+                    [prediction_run_selector, prediction_split_selector],
+                    widths=[1.6, 1.0],
+                    gap=0.8,
+                    wrap=True,
+                    align="end",
+                ),
                 mo.md(f"Prediction bundle error: `{prediction_bundle_error}`"),
             ],
             gap=0.75,
         )
     else:
+        prediction_primary_controls = mo.hstack(
+            [prediction_run_selector, prediction_split_selector],
+            widths=[1.6, 1.0],
+            gap=0.8,
+            wrap=True,
+            align="end",
+        )
+        prediction_secondary_controls = mo.hstack(
+            [prediction_plane_selector, prediction_slice_slider],
+            widths=[1.0, 1.6],
+            gap=0.8,
+            wrap=True,
+            align="end",
+        )
+        prediction_slider_controls = mo.hstack(
+            [prediction_view_height_slider, predicted_mask_opacity],
+            widths="equal",
+            gap=0.8,
+            wrap=True,
+            align="end",
+        )
+        prediction_mask_controls = mo.hstack(
+            [show_prediction_lung_mask, show_true_prediction_mask, show_predicted_mask],
+            widths="equal",
+            justify="start",
+            gap=0.8,
+            wrap=True,
+            align="center",
+        )
+
         prediction_notes = [
-            f"Run: `{prediction_bundle['run_name']}`",
-            f"Split: `{prediction_bundle['split']}`",
-            f"Case: `{prediction_bundle['case_id']}`",
-            f"Best validation Dice: `{prediction_bundle['best_val_dice']}`",
-            #f"CT path: `{prediction_bundle['ct_path']}`",
-            #f"Lung mask path: `{prediction_bundle['lung_mask_path']}`",
-            #f"Prediction path: `{prediction_bundle['prediction_mask_path']}`",
+            f"- **Run**: {prediction_bundle['run_name']}",
+            f"- **Split**: `{prediction_bundle['split']}`",
+            f"- **Case**: `{prediction_bundle['case_id']}`",
+            f"- **Best validation Dice**: `{float(prediction_bundle['best_val_dice']):.4f}`",
         ]
-        if prediction_bundle["last_epoch_metrics"] is not None:
-            prediction_notes.append(f"Last epoch metrics: `{prediction_bundle['last_epoch_metrics']}`")
+        prediction_summary_blocks = [mo.md("### Run Summary"), mo.md("\n".join(prediction_notes))]
+
+        last_epoch_metrics = prediction_bundle["last_epoch_metrics"]
+        if last_epoch_metrics is not None:
+            last_epoch_lines = []
+            epoch_value = last_epoch_metrics.get("epoch")
+            if epoch_value is not None:
+                last_epoch_lines.append(f"- **Epoch**: `{int(epoch_value)}`")
+            train_loss = last_epoch_metrics.get("train_loss")
+            if train_loss is not None:
+                last_epoch_lines.append(f"- **Train loss**: `{float(train_loss):.4f}`")
+            train_dice = last_epoch_metrics.get("train_dice")
+            if train_dice is not None:
+                last_epoch_lines.append(f"- **Train Dice**: `{float(train_dice):.4f}`")
+            val_dice = last_epoch_metrics.get("val_dice")
+            if val_dice is not None:
+                last_epoch_lines.append(f"- **Validation Dice**: `{float(val_dice):.4f}`")
+            if last_epoch_lines:
+                prediction_summary_blocks.extend(
+                    [
+                        mo.md("### Last Epoch"),
+                        mo.md("\n".join(last_epoch_lines)),
+                    ]
+                )
 
         prediction_controls = mo.vstack(
             [
                 mo.md("## Saved Prediction Viewer"),
-                prediction_run_selector,
-                prediction_split_selector,
-                prediction_plane_selector,
-                prediction_view_height_slider,
-                predicted_mask_opacity,
-                mo.hstack(
-                    [show_prediction_lung_mask, show_true_prediction_mask, show_predicted_mask],
-                    justify="start",
-                    gap=1.0,
-                ),
-                prediction_slice_slider,
-                mo.md("\n".join(f"- {note}" for note in prediction_notes)),
+                prediction_primary_controls,
+                prediction_secondary_controls,
+                prediction_slider_controls,
+                mo.md("### Masks"),
+                prediction_mask_controls,
+                *prediction_summary_blocks,
             ],
-            gap=0.75,
+            gap=0.8,
         )
     return (prediction_controls,)
 
@@ -1089,7 +1137,7 @@ def _(mo, prediction_3d_view, prediction_controls):
             prediction_controls,
             prediction_3d_view,
         ],
-        widths=[0.95, 2.2],
+        widths=[1.2, 1.8],
         gap=1.25,
         align="start",
         wrap=True,

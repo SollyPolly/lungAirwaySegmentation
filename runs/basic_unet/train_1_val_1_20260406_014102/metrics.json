@@ -2,11 +2,11 @@
   "config": {
     "train_case": "1",
     "val_case": "1",
-    "processed_root": "D:\\Code\\Imperial\\lungAirwaySegmentation\\data\\processed",
-    "train_image_path": "D:\\Code\\Imperial\\lungAirwaySegmentation\\data\\processed\\1\\1_ct_processed.nii.gz",
-    "train_label_path": "D:\\Code\\Imperial\\lungAirwaySegmentation\\data\\processed\\1\\1_airway_mask_processed.nii.gz",
-    "val_image_path": "D:\\Code\\Imperial\\lungAirwaySegmentation\\data\\processed\\1\\1_ct_processed.nii.gz",
-    "val_label_path": "D:\\Code\\Imperial\\lungAirwaySegmentation\\data\\processed\\1\\1_airway_mask_processed.nii.gz",
+    "processed_root": "data/processed",
+    "train_image_path": "data/processed/1/1_ct_processed.nii.gz",
+    "train_label_path": "data/processed/1/1_airway_mask_processed.nii.gz",
+    "val_image_path": "data/processed/1/1_ct_processed.nii.gz",
+    "val_label_path": "data/processed/1/1_airway_mask_processed.nii.gz",
     "device": "cuda",
     "epochs": 100,
     "batch_size": 2,
@@ -636,7 +636,7 @@
   ],
   "best_val_dice": 0.9514331817626953,
   "prediction_paths": {
-    "train_mask": "D:\\Code\\Imperial\\lungAirwaySegmentation\\runs\\basic_unet\\train_1_val_1_20260406_014102\\train_case_1_prediction_mask.nii.gz",
-    "val_mask": "D:\\Code\\Imperial\\lungAirwaySegmentation\\runs\\basic_unet\\train_1_val_1_20260406_014102\\val_case_1_prediction_mask.nii.gz"
+    "train_mask": "runs/basic_unet/train_1_val_1_20260406_014102/train_case_1_prediction_mask.nii.gz",
+    "val_mask": "runs/basic_unet/train_1_val_1_20260406_014102/val_case_1_prediction_mask.nii.gz"
   }
 }

@@ -23,8 +23,9 @@ from monai.transforms.utility.dictionary import EnsureTyped
 from monai.utils.misc import set_determinism
 
 
-DEFAULT_PROCESSED_ROOT = Path(__file__).resolve().parent / "data" / "processed"
-DEFAULT_OUTPUT_ROOT = Path(__file__).resolve().parent / "runs" / "basic_unet"
+PROJECT_ROOT = Path(__file__).resolve().parent
+DEFAULT_PROCESSED_ROOT = PROJECT_ROOT / "data" / "processed"
+DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "runs" / "basic_unet"
 RoiSize3D = tuple[int, int, int]
 TensorDict = dict[str, Tensor]
 
@@ -199,6 +200,14 @@ def parse_roi_size(values: object) -> RoiSize3D:
     if not isinstance(values, (list, tuple)) or len(values) != 3:
         raise ValueError(f"ROI size must be a sequence of 3 integers, got {values!r}.")
     return (int(values[0]), int(values[1]), int(values[2]))
+
+
+def serialize_path(path: Path, base_root: Path = PROJECT_ROOT) -> str:
+    resolved_path = path.resolve()
+    try:
+        return resolved_path.relative_to(base_root).as_posix()
+    except ValueError:
+        return str(resolved_path)
 
 
 def resolve_processed_case_paths(case_id: str, processed_root: Path) -> ProcessedCasePaths:
@@ -474,11 +483,11 @@ def main() -> None:
     config: dict[str, object] = {
         "train_case": train_case_id,
         "val_case": val_case_id,
-        "processed_root": str(processed_root),
-        "train_image_path": str(train_case.image_path),
-        "train_label_path": str(train_case.label_path),
-        "val_image_path": str(val_case.image_path),
-        "val_label_path": str(val_case.label_path),
+        "processed_root": serialize_path(processed_root),
+        "train_image_path": serialize_path(train_case.image_path),
+        "train_label_path": serialize_path(train_case.label_path),
+        "val_image_path": serialize_path(val_case.image_path),
+        "val_label_path": serialize_path(val_case.label_path),
         "device": str(device),
         "epochs": int(args.epochs),
         "batch_size": int(args.batch_size),
@@ -621,13 +630,13 @@ def main() -> None:
         )
 
         saved_prediction_paths = {
-            "train_mask": str(train_prediction_paths["mask"]),
-            "val_mask": str(val_prediction_paths["mask"]),
+            "train_mask": serialize_path(train_prediction_paths["mask"]),
+            "val_mask": serialize_path(val_prediction_paths["mask"]),
         }
         if "probability" in train_prediction_paths:
-            saved_prediction_paths["train_probability"] = str(train_prediction_paths["probability"])
+            saved_prediction_paths["train_probability"] = serialize_path(train_prediction_paths["probability"])
         if "probability" in val_prediction_paths:
-            saved_prediction_paths["val_probability"] = str(val_prediction_paths["probability"])
+            saved_prediction_paths["val_probability"] = serialize_path(val_prediction_paths["probability"])
 
         save_json(
             history_path,
