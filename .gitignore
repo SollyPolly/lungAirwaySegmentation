@@ -3,7 +3,11 @@
 __pycache__/
 __marimo__/
 *.pyc
+*.pt
 
-data/
+/data/
 
 CT_FM_Feature_Extractor/
+runs/
+outputs/
+preprocessing_summary.csv

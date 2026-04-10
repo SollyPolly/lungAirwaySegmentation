@@ -1,0 +1,17 @@
+# What belongs here:
+# - the stage-2 hard-region specialist
+# - inputs that combine CT patches with stage-1 cues
+# - outputs for peripheral refinement or repair
+
+model_name: distal_refiner
+spatial_dims: 3
+input_channels:
+  ct: 1
+  stage1_logits: 1
+  centerline_hint: 1
+  uncertainty_hint: 1
+  distance_hint: 1
+total_in_channels: 5
+out_channels: 1
+channels: [16, 32, 64, 128]
+strides: [2, 2, 2]

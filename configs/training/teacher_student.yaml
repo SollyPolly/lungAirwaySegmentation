@@ -1,0 +1,27 @@
+# What belongs here:
+# - semi-supervised training settings
+# - teacher EMA settings
+# - pseudo-label thresholds
+# - weights for consistency and uncertainty-aware losses
+
+experiment_name: teacher_student_semisupervised
+seed: 7
+epochs: 300
+batch_size_labeled: 1
+batch_size_unlabeled: 1
+num_workers: 4
+
+teacher:
+  ema_decay: 0.99
+  warm_start_epochs: 20
+
+pseudo_labels:
+  confidence_threshold: 0.8
+  uncertainty_threshold: 0.15
+
+loss:
+  supervised_dice_weight: 1.0
+  supervised_bce_weight: 1.0
+  cldice_weight: 0.3
+  distance_weight: 0.2
+  consistency_weight: 0.5

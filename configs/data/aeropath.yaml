@@ -1,0 +1,18 @@
+# What belongs here:
+# - raw and processed dataset locations
+# - expected filename conventions
+# - default preprocessing choices tied to the dataset
+# - split-file locations if you define them later
+
+dataset_name: aeropath
+raw_data_root: data/AeroPath
+processed_data_root: data/processed
+case_id_pattern: "{case_id}"
+ct_filename: "{case_id}_CT_HR.nii.gz"
+lung_mask_filename: "{case_id}_CT_HR_label_lungs.nii.gz"
+airway_mask_filename: "{case_id}_CT_HR_label_airways.nii.gz"
+
+preprocessing:
+  crop_margin_voxels: 5
+  hu_window: [-1024.0, 600.0]
+  include_lung_mask: true

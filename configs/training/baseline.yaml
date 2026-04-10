@@ -1,0 +1,24 @@
+# What belongs here:
+# - optimizer and scheduler settings for the first supervised baseline
+# - dataset loader sizes
+# - checkpoint and logging cadence
+# - loss weights for standard segmentation only
+
+experiment_name: baseline_supervised
+seed: 7
+epochs: 200
+batch_size: 1
+num_workers: 4
+
+optimizer:
+  name: adamw
+  lr: 0.0003
+  weight_decay: 0.00001
+
+scheduler:
+  name: cosine
+  warmup_epochs: 10
+
+loss:
+  dice_weight: 1.0
+  bce_weight: 1.0

@@ -1,0 +1,18 @@
+# What belongs here:
+# - the stage-1 global model
+# - segmentation plus auxiliary topology-aware heads
+# - output definitions for airway mask, centerline, uncertainty, and distance cues
+
+model_name: multitask_topology_unet
+spatial_dims: 3
+encoder_channels: [16, 32, 64, 128, 256]
+decoder_channels: [128, 64, 32, 16]
+
+heads:
+  airway_logits: 1
+  centerline_logits: 1
+  distance_map: 1
+  uncertainty: 1
+
+normalization: instance
+activation: leaky_relu
