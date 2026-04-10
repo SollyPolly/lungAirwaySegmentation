@@ -125,7 +125,7 @@ def main() -> None:
     data_root = RAW_AEROPATH_ROOT
     seed = 15
     batch_size = 1
-    num_epochs = 100
+    num_epochs = 25
     learning_rate = 1e-3
     train_split = 0.7
     val_split = 0.15
