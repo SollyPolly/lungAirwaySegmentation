@@ -14,8 +14,10 @@ What not to put here:
 - ad hoc notebook-only code
 """
 
+import argparse
 import json
 from datetime import datetime
+from pathlib import Path
 
 import torch
 from torch.utils.data import DataLoader
@@ -27,6 +29,105 @@ from lung_airway_segmentation.losses.segmentation import CombinedSegmentationLos
 from lung_airway_segmentation.models.baseline_unet import build_baseline_unet
 from lung_airway_segmentation.settings import RAW_AEROPATH_ROOT, RUNS_ROOT
 from lung_airway_segmentation.training.loops import train_one_epoch, validate_one_epoch
+
+
+def build_argument_parser() -> argparse.ArgumentParser:
+    """Build the command-line interface for baseline training runs."""
+    parser = argparse.ArgumentParser(
+        description="Train the baseline supervised 3D U-Net airway segmentation model.",
+    )
+    parser.add_argument(
+        "--data-root",
+        type=Path,
+        default=RAW_AEROPATH_ROOT,
+        help="Path to the AeroPath case root.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=15,
+        help="Random seed for dataset splits and torch initialization.",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=1,
+        help="Batch size for training and validation dataloaders.",
+    )
+    parser.add_argument(
+        "--num-epochs",
+        type=int,
+        default=25,
+        help="Number of training epochs.",
+    )
+    parser.add_argument(
+        "--learning-rate",
+        type=float,
+        default=1e-3,
+        help="Learning rate for the AdamW optimizer.",
+    )
+    parser.add_argument(
+        "--train-split",
+        type=float,
+        default=0.7,
+        help="Fraction of cases assigned to the training split.",
+    )
+    parser.add_argument(
+        "--val-split",
+        type=float,
+        default=0.15,
+        help="Fraction of cases assigned to the validation split.",
+    )
+    parser.add_argument(
+        "--test-split",
+        type=float,
+        default=0.15,
+        help="Fraction of cases assigned to the test split.",
+    )
+    parser.add_argument(
+        "--experiment-name",
+        type=str,
+        default="baseline_unet",
+        help="Name used for the timestamped run directory.",
+    )
+    parser.add_argument(
+        "--run-description",
+        type=str,
+        default="First run on the Imperial HPC. Early full-volume supervised baseline.",
+        help="Free-text description stored in run metadata.",
+    )
+    parser.add_argument(
+        "--device",
+        choices=("auto", "cpu", "cuda"),
+        default="auto",
+        help="Training device. Use 'auto' to prefer CUDA when available.",
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=0,
+        help="Number of DataLoader worker processes.",
+    )
+    parser.add_argument(
+        "--bce-weight",
+        type=float,
+        default=1.0,
+        help="Weight for BCE-with-logits in the combined segmentation loss.",
+    )
+    parser.add_argument(
+        "--dice-weight",
+        type=float,
+        default=1.0,
+        help="Weight for Dice loss in the combined segmentation loss.",
+    )
+    return parser
+
+
+def resolve_device(device_name: str) -> torch.device:
+    """Resolve the requested device string to a torch device."""
+    if device_name == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return torch.device(device_name)
 
 
 def build_case_splits(data_root, seed, train_split, val_split, test_split):
@@ -57,26 +158,33 @@ def build_datasets(train_ids, val_ids, data_root):
     )
     return train_dataset, val_dataset
 
-def build_dataloaders(train_dataset, val_dataset, batch_size):
+
+def build_dataloaders(train_dataset, val_dataset, batch_size, num_workers):
     """Build train and validation dataloaders for baseline training."""
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
-        shuffle=False
+        shuffle=True,
+        num_workers=num_workers
     )
 
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
-        shuffle=False
+        shuffle=False,
+        num_workers=num_workers
     )
     return train_loader, val_loader
 
-def build_training_components(device, learning_rate):
+
+def build_training_components(device, learning_rate, bce_weight, dice_weight):
     """Build the baseline model, loss function, and optimizer."""
 
     model = build_baseline_unet().to(device)
-    loss_fn = CombinedSegmentationLoss()
+    loss_fn = CombinedSegmentationLoss(
+        bce_weight=bce_weight,
+        dice_weight=dice_weight,
+    )
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
     return model, loss_fn, optimizer
@@ -121,52 +229,53 @@ def initialize_run_artifacts(run_dir, run_metadata):
 
 
 def main() -> None:
-    # Basic experiment settings
-    data_root = RAW_AEROPATH_ROOT
-    seed = 15
-    batch_size = 1
-    num_epochs = 25
-    learning_rate = 1e-3
-    train_split = 0.7
-    val_split = 0.15
-    test_split = 0.15
-    experiment_name = "baseline_unet"
-    run_description = "First run on the imperial HPC. With the aim to understand a very very early baseline."
+    args = build_argument_parser().parse_args()
 
     # Device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = resolve_device(args.device)
     # Reproducibility
-    torch.manual_seed(seed)
+    torch.manual_seed(args.seed)
 
     train_ids, val_ids, test_ids = build_case_splits(
-        data_root=data_root,
-        seed=seed,
-        train_split=train_split,
-        val_split=val_split,
-        test_split=test_split,
+        data_root=args.data_root,
+        seed=args.seed,
+        train_split=args.train_split,
+        val_split=args.val_split,
+        test_split=args.test_split,
     )
-    train_dataset, val_dataset = build_datasets(train_ids, val_ids, data_root)
-    train_loader, val_loader = build_dataloaders(train_dataset, val_dataset, batch_size)
-    model, loss_fn, optimizer = build_training_components(device, learning_rate)
+    train_dataset, val_dataset = build_datasets(train_ids, val_ids, args.data_root)
+    train_loader, val_loader = build_dataloaders(
+        train_dataset,
+        val_dataset,
+        args.batch_size,
+        args.num_workers,
+    )
+    model, loss_fn, optimizer = build_training_components(
+        device,
+        args.learning_rate,
+        args.bce_weight,
+        args.dice_weight,
+    )
 
     # Saving
-    run_dir = build_run_dir(experiment_name)
+    run_dir = build_run_dir(args.experiment_name)
     best_val_dice = -1.0
     history = []
     run_metadata = {
-        "experiment_name": experiment_name,
-        "description": run_description,
+        "experiment_name": args.experiment_name,
+        "description": args.run_description,
         "created_at": datetime.now().isoformat(timespec="seconds"),
-        "data_root": str(data_root),
+        "data_root": str(args.data_root),
         "device": str(device),
-        "seed": seed,
-        "batch_size": batch_size,
-        "num_epochs": num_epochs,
-        "learning_rate": learning_rate,
+        "seed": args.seed,
+        "batch_size": args.batch_size,
+        "num_epochs": args.num_epochs,
+        "learning_rate": args.learning_rate,
+        "num_workers": args.num_workers,
         "splits": {
-            "train_fraction": train_split,
-            "val_fraction": val_split,
-            "test_fraction": test_split,
+            "train_fraction": args.train_split,
+            "val_fraction": args.val_split,
+            "test_fraction": args.test_split,
             "train_case_ids": train_ids,
             "val_case_ids": val_ids,
             "test_case_ids": test_ids,
@@ -190,7 +299,7 @@ def main() -> None:
     initialize_run_artifacts(run_dir, run_metadata)
 
     # Training loop
-    for epoch in range(num_epochs):
+    for epoch in range(args.num_epochs):
         train_metrics = train_one_epoch(
             model=model,
             dataloader=train_loader,
@@ -207,7 +316,7 @@ def main() -> None:
         )
 
         print(
-            f"Epoch {epoch + 1} / {num_epochs}"
+            f"Epoch {epoch + 1} / {args.num_epochs}"
             f" - train_loss: {train_metrics['loss']:.4f}"
             f" - train_dice: {train_metrics['dice']:.4f}"
             f" - val_loss: {val_metrics['loss']:.4f}"

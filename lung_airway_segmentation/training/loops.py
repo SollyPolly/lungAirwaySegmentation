@@ -65,7 +65,6 @@ def train_one_epoch(
     return {"loss": epoch_loss, "dice": epoch_dice}
 
 
-
 def validate_one_epoch(
     model,
     dataloader,
