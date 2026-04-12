@@ -197,12 +197,10 @@ def build_datasets(
         patches_per_case=patches_per_case
         )
 
-        val_dataset = AeroPathPatchDataset(
+        val_dataset = AeroPathDataset(
             case_ids=val_ids,
             data_root=data_root,
-            include_lung_mask=False,
-            patch_size=tuple(patch_size),
-            patches_per_case=patches_per_case           
+            include_lung_mask=False
         )       
         return train_dataset, val_dataset
 
@@ -218,7 +216,7 @@ def build_dataloaders(train_dataset, val_dataset, batch_size, num_workers):
 
     val_loader = DataLoader(
         val_dataset,
-        batch_size=batch_size,
+        batch_size=1,
         shuffle=False,
         num_workers=num_workers
     )
@@ -307,9 +305,6 @@ def main() -> None:
         args.num_workers,
     )
 
-    first_batch = next(iter(train_loader))
-    print(first_batch["image"].shape)
-    print(first_batch["airway_mask"].shape)
 
     model, loss_fn, optimizer = build_training_components(
         device,
@@ -321,6 +316,7 @@ def main() -> None:
     # Saving
     run_dir = build_run_dir(args.experiment_name)
     best_val_dice = -1.0
+    best_epoch = 0
     history = []
     run_metadata = {
         "experiment_name": args.experiment_name,
@@ -373,7 +369,10 @@ def main() -> None:
             model=model,
             dataloader=val_loader,
             loss_fn=loss_fn,
-            device=device
+            device=device,
+            roi_size=tuple(args.patch_size),
+            sw_batch_size=1,
+            overlap=0.5
         )
 
         print(
@@ -391,14 +390,6 @@ def main() -> None:
             "val_loss": val_metrics["loss"],
             "val_dice": val_metrics["dice"],
         }
-        history.append(epoch_summary)
-        write_json(
-            {
-                "run_metadata": run_metadata,
-                "history": history,
-            },
-            run_dir / "history.json",
-        )
 
         save_checkpoint(
             model=model,
@@ -415,6 +406,7 @@ def main() -> None:
 
         if val_metrics["dice"] > best_val_dice:
             best_val_dice = val_metrics["dice"]
+            best_epoch = epoch + 1
             save_checkpoint(
                 model=model,
                 optimizer=optimizer,
@@ -428,10 +420,27 @@ def main() -> None:
                 output_path=run_dir / "best_model.pt"
             )
 
+        history.append(epoch_summary)
+        write_json(
+            {
+                "run_metadata": run_metadata,
+                "best": {
+                    "epoch": best_epoch,
+                    "val_dice": best_val_dice,
+                },
+                "history": history,
+            },
+            run_dir / "history.json",
+        )
+
 
     print("Training finished.")
     print(f"Run directory: {run_dir}")
     print(f"Held-out test cases: {len(test_ids)}")
+
+    print(f"Best val dice: {best_val_dice:.4f}")
+    print(f"Best epoch: {best_epoch}")
+
 
 
 

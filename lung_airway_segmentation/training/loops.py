@@ -10,6 +10,8 @@ Keep this loop generic so different models and configs can reuse it.
 """
 import torch
 
+from monai.inferers import sliding_window_inference
+
 from lung_airway_segmentation.metrics.segmentation import binary_dice_score_from_logits
 
 
@@ -70,6 +72,9 @@ def validate_one_epoch(
     dataloader,
     loss_fn,
     device,
+    roi_size,
+    sw_batch_size=1,
+    overlap=0.5,
     threshold=0.5,
 ):
     model.eval()
@@ -89,7 +94,13 @@ def validate_one_epoch(
             targets = targets.to(device).float()
 
             # forward pass
-            logits = model(images)
+            logits = sliding_window_inference(
+                inputs=images,
+                roi_size=roi_size,
+                sw_batch_size=sw_batch_size,
+                predictor=model,
+                overlap=overlap,
+            )
 
             # compute loss
             loss = loss_fn(logits, targets)
