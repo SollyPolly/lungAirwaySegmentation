@@ -22,7 +22,7 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
-from lung_airway_segmentation.datasets.aeropath import AeroPathDataset
+from lung_airway_segmentation.datasets.aeropath import AeroPathDataset, AeroPathPatchDataset
 from lung_airway_segmentation.datasets.splits import create_train_val_test_split
 from lung_airway_segmentation.io.case_layout import list_case_ids
 from lung_airway_segmentation.losses.segmentation import CombinedSegmentationLoss
@@ -120,6 +120,27 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=1.0,
         help="Weight for Dice loss in the combined segmentation loss.",
     )
+    parser.add_argument(
+        "--patch-size",
+        type=int,
+        nargs=3,
+        default=(96, 96, 96),
+        metavar=("Z", "Y", "X"),
+        help="3D patch size used for patch-based training.",
+    )
+    parser.add_argument(
+        "--use-full-volumes",
+        action="store_true",
+        help="Train on full preprocessed volumes instead of sampled patches.",
+    )
+    parser.add_argument(
+        "--patches-per-case",
+        type=int,
+        default=4,
+        help="Number of training patch samples exposed per case in each epoch.",
+    )
+
+
     return parser
 
 
@@ -143,20 +164,47 @@ def build_case_splits(data_root, seed, train_split, val_split, test_split):
     return train_ids, val_ids, test_ids
 
 
-def build_datasets(train_ids, val_ids, data_root):
+def build_datasets(
+        train_ids, 
+        val_ids, 
+        data_root,
+        *,
+        use_full_volumes,
+        patch_size,
+        patches_per_case
+    ):
     """Build train and validation datasets from the selected case IDs."""
-    train_dataset = AeroPathDataset(
+    if use_full_volumes:
+        train_dataset = AeroPathDataset(
         case_ids=train_ids,
         data_root=data_root,
         include_lung_mask=False
-    )
+        )
 
-    val_dataset = AeroPathDataset(
-        case_ids=val_ids,
+        val_dataset = AeroPathDataset(
+            case_ids=val_ids,
+            data_root=data_root,
+            include_lung_mask=False
+        )   
+        return train_dataset, val_dataset
+    
+    else:
+        train_dataset = AeroPathPatchDataset(
+        case_ids=train_ids,
         data_root=data_root,
-        include_lung_mask=False
-    )
-    return train_dataset, val_dataset
+        include_lung_mask=False,
+        patch_size=tuple(patch_size),
+        patches_per_case=patches_per_case
+        )
+
+        val_dataset = AeroPathPatchDataset(
+            case_ids=val_ids,
+            data_root=data_root,
+            include_lung_mask=False,
+            patch_size=tuple(patch_size),
+            patches_per_case=patches_per_case           
+        )       
+        return train_dataset, val_dataset
 
 
 def build_dataloaders(train_dataset, val_dataset, batch_size, num_workers):
@@ -243,13 +291,26 @@ def main() -> None:
         val_split=args.val_split,
         test_split=args.test_split,
     )
-    train_dataset, val_dataset = build_datasets(train_ids, val_ids, args.data_root)
+    train_dataset, val_dataset = build_datasets(
+        train_ids, 
+        val_ids, 
+        args.data_root,
+        use_full_volumes=args.use_full_volumes,
+        patch_size=args.patch_size,
+        patches_per_case=args.patches_per_case
+        )
+    
     train_loader, val_loader = build_dataloaders(
         train_dataset,
         val_dataset,
         args.batch_size,
         args.num_workers,
     )
+
+    first_batch = next(iter(train_loader))
+    print(first_batch["image"].shape)
+    print(first_batch["airway_mask"].shape)
+
     model, loss_fn, optimizer = build_training_components(
         device,
         args.learning_rate,
