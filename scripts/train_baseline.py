@@ -29,6 +29,8 @@ from lung_airway_segmentation.losses.segmentation import CombinedSegmentationLos
 from lung_airway_segmentation.models.baseline_unet import build_baseline_unet
 from lung_airway_segmentation.settings import RAW_AEROPATH_ROOT, RUNS_ROOT
 from lung_airway_segmentation.training.loops import train_one_epoch, validate_one_epoch
+from lung_airway_segmentation.datasets.transforms import build_train_patch_transforms
+
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
@@ -139,6 +141,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=4,
         help="Number of training patch samples exposed per case in each epoch.",
     )
+    parser.add_argument(
+        "--foreground-probability",
+        type=float,
+        default=0.7,
+        help="How often a training patch is forced to be airway-centered"
+    )
 
 
     return parser
@@ -164,6 +172,8 @@ def build_case_splits(data_root, seed, train_split, val_split, test_split):
     return train_ids, val_ids, test_ids
 
 
+
+
 def build_datasets(
         train_ids, 
         val_ids, 
@@ -171,9 +181,13 @@ def build_datasets(
         *,
         use_full_volumes,
         patch_size,
-        patches_per_case
+        patches_per_case,
+        foreground_probability
     ):
     """Build train and validation datasets from the selected case IDs."""
+
+    
+
     if use_full_volumes:
         train_dataset = AeroPathDataset(
         case_ids=train_ids,
@@ -189,12 +203,17 @@ def build_datasets(
         return train_dataset, val_dataset
     
     else:
+
+        train_transform = build_train_patch_transforms(include_lung_mask=True)
+        
         train_dataset = AeroPathPatchDataset(
         case_ids=train_ids,
         data_root=data_root,
-        include_lung_mask=False,
+        include_lung_mask=True,
         patch_size=tuple(patch_size),
-        patches_per_case=patches_per_case
+        patches_per_case=patches_per_case,
+        foreground_probability=foreground_probability,
+        transform=train_transform
         )
 
         val_dataset = AeroPathDataset(
@@ -295,7 +314,8 @@ def main() -> None:
         args.data_root,
         use_full_volumes=args.use_full_volumes,
         patch_size=args.patch_size,
-        patches_per_case=args.patches_per_case
+        patches_per_case=args.patches_per_case,
+        foreground_probability=args.foreground_probability
         )
     
     train_loader, val_loader = build_dataloaders(

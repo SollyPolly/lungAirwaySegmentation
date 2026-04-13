@@ -14,7 +14,12 @@ from torch.utils.data import Dataset
 from lung_airway_segmentation.preprocessing.pipeline import preprocess_case
 from lung_airway_segmentation.io.case_layout import list_case_ids
 
-from lung_airway_segmentation.datasets.patches import normalize_patch_size, extract_patch, sample_foreground_patch_start
+from lung_airway_segmentation.datasets.patches import (
+    normalize_patch_size,
+    extract_patch,
+    sample_foreground_patch_start,
+    sample_random_patch_start,
+)
 
 from lung_airway_segmentation.settings import(
     DEFAULT_HU_WINDOW,
@@ -144,11 +149,31 @@ class AeroPathPatchDataset(Dataset):
 
         rng = np.random.default_rng(self.seed + index)
 
-        start = sample_foreground_patch_start(
-            case.airway_mask,
-            self.patch_size,
-            rng
-        )
+        use_foreground_patch = rng.random() < self.foreground_probability
+        
+        if use_foreground_patch:
+            start = sample_foreground_patch_start(
+                case.airway_mask,
+                self.patch_size,
+                rng
+            )
+        elif case.lung_mask is not None:
+            start = sample_foreground_patch_start(
+                case.lung_mask,
+                self.patch_size,
+                rng
+            )
+        else:
+            volume_shape = (
+                int(case.ct.shape[0]),
+                int(case.ct.shape[1]),
+                int(case.ct.shape[2]),                               
+            )
+            start = sample_random_patch_start(
+                volume_shape,
+                self.patch_size,
+                rng
+            )
 
         image_patch = extract_patch(case.ct, start, self.patch_size)
         airway_patch = extract_patch(case.airway_mask, start, self.patch_size)
@@ -168,6 +193,10 @@ class AeroPathPatchDataset(Dataset):
             sample["lung_mask"] = extract_patch(case.lung_mask, start, self.patch_size)
 
         if self.transform is not None:
+            sample["image"] = sample["image"][None, ...]
+            sample["airway_mask"] = sample["airway_mask"][None, ...]
+            if "lung_mask" in sample:
+                sample["lung_mask"] = sample["lung_mask"][None, ...]
             sample = self.transform(sample)
 
         return sample        

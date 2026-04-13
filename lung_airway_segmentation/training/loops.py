@@ -31,8 +31,18 @@ def train_one_epoch(
 
     for batch in dataloader:
         # get inputs and targets from batch
-        images = batch["image"].unsqueeze(1)
-        targets = batch["airway_mask"].unsqueeze(1)
+        images = batch["image"]
+        targets = batch["airway_mask"]
+
+        if images.ndim == 4:
+            images = images.unsqueeze(1)
+        elif images.ndim != 5:
+            raise ValueError(f"Expected image batch to be 4D or 5D, got shape {images.shape}")
+
+        if targets.ndim == 4:
+            targets = targets.unsqueeze(1)
+        elif targets.ndim != 5:
+            raise ValueError(f"Expected target batch to be 4D or 5D, got shape {targets.shape}")
 
         # move to device and ensure float dtype, add channel dimension
         images = images.to(device).float()
@@ -86,8 +96,18 @@ def validate_one_epoch(
     with torch.no_grad():
         for batch in dataloader:
             
-            images = batch["image"].unsqueeze(1)
-            targets = batch["airway_mask"].unsqueeze(1)
+            images = batch["image"]
+            targets = batch["airway_mask"]
+
+            if images.ndim == 4:
+                images = images.unsqueeze(1)
+            elif images.ndim != 5:
+                raise ValueError(f"Expected image batch to be 4D or 5D, got shape {images.shape}")
+
+            if targets.ndim == 4:
+                targets = targets.unsqueeze(1)
+            elif targets.ndim != 5:
+                raise ValueError(f"Expected target batch to be 4D or 5D, got shape {targets.shape}")
 
             # move to device and ensure float dtype
             images = images.to(device).float()
