@@ -98,6 +98,15 @@ class AeroPathDataset(Dataset):
     
 
 class AeroPathPatchDataset(Dataset):
+    """Explicit runtime patch sampler kept for controlled sampling experiments.
+
+    The baseline training script now uses the MONAI-native pipeline in
+    ``datasets.monai_aeropath`` because it loads each case once and lets MONAI
+    emit multiple balanced patches. This class remains useful when we need
+    custom Python-side sampling logic, for example semi-supervised or
+    pseudo-label-specific patch policies.
+    """
+
     def __init__(
             self,
             case_ids=None,

@@ -1,17 +1,10 @@
-"""Supervised baseline training CLI.
+"""Train the supervised baseline airway segmentation model.
 
-This entrypoint should launch the first clean reference experiment only.
-
-What to put here:
-- config loading
-- dataset and dataloader construction
-- baseline model creation
-- supervised training loop kickoff
-
-What not to put here:
-- semi-supervised teacher-student logic
-- distal refinement fusion
-- ad hoc notebook-only code
+This script owns experiment-level wiring: argument parsing, case splitting,
+dataset/dataloader construction, model/loss/optimizer creation, checkpointing,
+and per-epoch training. Patch-mode training uses a MONAI-native data pipeline
+that loads each case and samples several foreground-balanced patches from it.
+Full-volume training is kept as a debugging fallback.
 """
 
 import argparse
@@ -20,16 +13,16 @@ from datetime import datetime
 from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader
+from monai.data import DataLoader, list_data_collate
 
-from lung_airway_segmentation.datasets.aeropath import AeroPathDataset, AeroPathPatchDataset
+from lung_airway_segmentation.datasets.aeropath import AeroPathDataset
+from lung_airway_segmentation.datasets.monai_aeropath import build_monai_aeropath_datasets
 from lung_airway_segmentation.datasets.splits import create_train_val_test_split
 from lung_airway_segmentation.io.case_layout import list_case_ids
 from lung_airway_segmentation.losses.segmentation import CombinedSegmentationLoss
 from lung_airway_segmentation.models.baseline_unet import build_baseline_unet
 from lung_airway_segmentation.settings import RAW_AEROPATH_ROOT, RUNS_ROOT
 from lung_airway_segmentation.training.loops import train_one_epoch, validate_one_epoch
-from lung_airway_segmentation.datasets.transforms import build_train_patch_transforms
 
 
 
@@ -54,7 +47,10 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--batch-size",
         type=int,
         default=1,
-        help="Batch size for training and validation dataloaders.",
+        help=(
+            "Training case batch size. In patch mode, the effective patch batch "
+            "is batch_size * patches_per_case."
+        ),
     )
     parser.add_argument(
         "--num-epochs",
@@ -95,7 +91,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--run-description",
         type=str,
-        default="First run on the Imperial HPC. Early full-volume supervised baseline.",
+        default="Supervised MONAI patch-based baseline.",
         help="Free-text description stored in run metadata.",
     )
     parser.add_argument(
@@ -139,17 +135,56 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--patches-per-case",
         type=int,
         default=4,
-        help="Number of training patch samples exposed per case in each epoch.",
+        help="Number of MONAI training patches sampled from each loaded case.",
     )
     parser.add_argument(
         "--foreground-probability",
         type=float,
         default=0.7,
-        help="How often a training patch is forced to be airway-centered"
+        help="Probability that a sampled training patch is airway-foreground centered.",
+    )
+    parser.add_argument(
+        "--cache-rate",
+        type=float,
+        default=0.0,
+        help="MONAI CacheDataset cache rate for loaded/preprocessed cases in patch mode.",
+    )
+    parser.add_argument(
+        "--validate-every",
+        type=int,
+        default=1,
+        help="Run full-volume sliding-window validation every N epochs.",
+    )
+    parser.add_argument(
+        "--sw-batch-size",
+        type=int,
+        default=1,
+        help="Number of sliding-window patches evaluated together during validation.",
+    )
+    parser.add_argument(
+        "--inference-overlap",
+        type=float,
+        default=0.5,
+        help="Fractional overlap between sliding-window validation patches.",
     )
 
-
     return parser
+
+
+def validate_training_args(args) -> None:
+    """Validate command-line arguments that argparse cannot fully constrain."""
+    if args.patches_per_case <= 0:
+        raise ValueError("--patches-per-case must be positive.")
+    if args.validate_every <= 0:
+        raise ValueError("--validate-every must be positive.")
+    if args.sw_batch_size <= 0:
+        raise ValueError("--sw-batch-size must be positive.")
+    if not 0.0 <= args.foreground_probability <= 1.0:
+        raise ValueError("--foreground-probability must be between 0.0 and 1.0.")
+    if not 0.0 <= args.cache_rate <= 1.0:
+        raise ValueError("--cache-rate must be between 0.0 and 1.0.")
+    if not 0.0 <= args.inference_overlap < 1.0:
+        raise ValueError("--inference-overlap must be in [0.0, 1.0).")
 
 
 def resolve_device(device_name: str) -> torch.device:
@@ -167,61 +202,47 @@ def build_case_splits(data_root, seed, train_split, val_split, test_split):
         train_split=train_split,
         val_split=val_split,
         test_split=test_split,
-        seed = seed
+        seed=seed,
     )
     return train_ids, val_ids, test_ids
 
 
-
-
 def build_datasets(
-        train_ids, 
-        val_ids, 
-        data_root,
-        *,
-        use_full_volumes,
-        patch_size,
-        patches_per_case,
-        foreground_probability
-    ):
+    train_ids,
+    val_ids,
+    data_root,
+    *,
+    use_full_volumes,
+    patch_size,
+    patches_per_case,
+    foreground_probability,
+    cache_rate,
+):
     """Build train and validation datasets from the selected case IDs."""
-
-    
 
     if use_full_volumes:
         train_dataset = AeroPathDataset(
-        case_ids=train_ids,
-        data_root=data_root,
-        include_lung_mask=False
+            case_ids=train_ids,
+            data_root=data_root,
+            include_lung_mask=False,
         )
-
         val_dataset = AeroPathDataset(
             case_ids=val_ids,
             data_root=data_root,
-            include_lung_mask=False
-        )   
+            include_lung_mask=False,
+        )
         return train_dataset, val_dataset
-    
-    else:
 
-        train_transform = build_train_patch_transforms(include_lung_mask=True)
-        
-        train_dataset = AeroPathPatchDataset(
-        case_ids=train_ids,
+    train_dataset, val_dataset = build_monai_aeropath_datasets(
+        train_ids=train_ids,
+        val_ids=val_ids,
         data_root=data_root,
-        include_lung_mask=True,
         patch_size=tuple(patch_size),
         patches_per_case=patches_per_case,
         foreground_probability=foreground_probability,
-        transform=train_transform
-        )
-
-        val_dataset = AeroPathDataset(
-            case_ids=val_ids,
-            data_root=data_root,
-            include_lung_mask=False
-        )       
-        return train_dataset, val_dataset
+        cache_rate=cache_rate,
+    )
+    return train_dataset, val_dataset
 
 
 def build_dataloaders(train_dataset, val_dataset, batch_size, num_workers):
@@ -230,14 +251,16 @@ def build_dataloaders(train_dataset, val_dataset, batch_size, num_workers):
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=num_workers
+        num_workers=num_workers,
+        collate_fn=list_data_collate,
     )
 
     val_loader = DataLoader(
         val_dataset,
         batch_size=1,
         shuffle=False,
-        num_workers=num_workers
+        num_workers=num_workers,
+        collate_fn=list_data_collate,
     )
     return train_loader, val_loader
 
@@ -254,6 +277,7 @@ def build_training_components(device, learning_rate, bce_weight, dice_weight):
 
     return model, loss_fn, optimizer
 
+
 def save_checkpoint(model, optimizer, epoch, metrics, output_path):
     """Save model, optimizer, and summary metrics for one training checkpoint."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -262,7 +286,7 @@ def save_checkpoint(model, optimizer, epoch, metrics, output_path):
         "epoch": epoch,
         "model_state": model.state_dict(),
         "optimizer_state": optimizer.state_dict(),
-        "metrics": metrics
+        "metrics": metrics,
     }
     torch.save(payload, output_path)
 
@@ -295,6 +319,7 @@ def initialize_run_artifacts(run_dir, run_metadata):
 
 def main() -> None:
     args = build_argument_parser().parse_args()
+    validate_training_args(args)
 
     # Device
     device = resolve_device(args.device)
@@ -309,15 +334,16 @@ def main() -> None:
         test_split=args.test_split,
     )
     train_dataset, val_dataset = build_datasets(
-        train_ids, 
-        val_ids, 
+        train_ids,
+        val_ids,
         args.data_root,
         use_full_volumes=args.use_full_volumes,
         patch_size=args.patch_size,
         patches_per_case=args.patches_per_case,
-        foreground_probability=args.foreground_probability
-        )
-    
+        foreground_probability=args.foreground_probability,
+        cache_rate=args.cache_rate,
+    )
+
     train_loader, val_loader = build_dataloaders(
         train_dataset,
         val_dataset,
@@ -346,9 +372,20 @@ def main() -> None:
         "device": str(device),
         "seed": args.seed,
         "batch_size": args.batch_size,
+        "effective_patch_batch_size": (
+            args.batch_size if args.use_full_volumes else args.batch_size * args.patches_per_case
+        ),
         "num_epochs": args.num_epochs,
         "learning_rate": args.learning_rate,
         "num_workers": args.num_workers,
+        "data_pipeline": "custom_full_volume" if args.use_full_volumes else "monai_patch",
+        "patch_size": list(args.patch_size),
+        "patches_per_case": args.patches_per_case,
+        "foreground_probability": args.foreground_probability,
+        "cache_rate": args.cache_rate,
+        "validate_every": args.validate_every,
+        "sw_batch_size": args.sw_batch_size,
+        "inference_overlap": args.inference_overlap,
         "splits": {
             "train_fraction": args.train_split,
             "val_fraction": args.val_split,
@@ -382,62 +419,65 @@ def main() -> None:
             dataloader=train_loader,
             loss_fn=loss_fn,
             optimizer=optimizer,
-            device=device
-        )
-
-        val_metrics = validate_one_epoch(
-            model=model,
-            dataloader=val_loader,
-            loss_fn=loss_fn,
             device=device,
-            roi_size=tuple(args.patch_size),
-            sw_batch_size=1,
-            overlap=0.5
-        )
-
-        print(
-            f"Epoch {epoch + 1} / {args.num_epochs}"
-            f" - train_loss: {train_metrics['loss']:.4f}"
-            f" - train_dice: {train_metrics['dice']:.4f}"
-            f" - val_loss: {val_metrics['loss']:.4f}"
-            f" - val_dice: {val_metrics['dice']:.4f}"
         )
 
         epoch_summary = {
             "epoch": epoch + 1,
             "train_loss": train_metrics["loss"],
             "train_dice": train_metrics["dice"],
-            "val_loss": val_metrics["loss"],
-            "val_dice": val_metrics["dice"],
         }
+
+        should_validate = (
+            (epoch + 1) % args.validate_every == 0
+            or epoch + 1 == args.num_epochs
+        )
+        if should_validate:
+            val_metrics = validate_one_epoch(
+                model=model,
+                dataloader=val_loader,
+                loss_fn=loss_fn,
+                device=device,
+                roi_size=tuple(args.patch_size),
+                sw_batch_size=args.sw_batch_size,
+                overlap=args.inference_overlap,
+            )
+            epoch_summary["val_loss"] = val_metrics["loss"]
+            epoch_summary["val_dice"] = val_metrics["dice"]
+
+            print(
+                f"Epoch {epoch + 1} / {args.num_epochs}"
+                f" - train_loss: {train_metrics['loss']:.4f}"
+                f" - train_dice: {train_metrics['dice']:.4f}"
+                f" - val_loss: {val_metrics['loss']:.4f}"
+                f" - val_dice: {val_metrics['dice']:.4f}"
+            )
+        else:
+            val_metrics = None
+            print(
+                f"Epoch {epoch + 1} / {args.num_epochs}"
+                f" - train_loss: {train_metrics['loss']:.4f}"
+                f" - train_dice: {train_metrics['dice']:.4f}"
+                " - validation skipped"
+            )
 
         save_checkpoint(
             model=model,
             optimizer=optimizer,
             epoch=epoch + 1,
-            metrics={
-                "train_loss": train_metrics["loss"],
-                "train_dice": train_metrics["dice"],
-                "val_loss": val_metrics["loss"],
-                "val_dice": val_metrics["dice"]
-            },
-            output_path=run_dir / "last_model.pt"
+            metrics=epoch_summary,
+            output_path=run_dir / "last_model.pt",
         )
 
-        if val_metrics["dice"] > best_val_dice:
+        if val_metrics is not None and val_metrics["dice"] > best_val_dice:
             best_val_dice = val_metrics["dice"]
             best_epoch = epoch + 1
             save_checkpoint(
                 model=model,
                 optimizer=optimizer,
                 epoch=epoch + 1,
-                metrics = {
-                    "train_loss": train_metrics["loss"],
-                    "train_dice": train_metrics["dice"],
-                    "val_loss": val_metrics["loss"],
-                    "val_dice": val_metrics["dice"]
-                },
-                output_path=run_dir / "best_model.pt"
+                metrics=epoch_summary,
+                output_path=run_dir / "best_model.pt",
             )
 
         history.append(epoch_summary)
@@ -460,8 +500,6 @@ def main() -> None:
 
     print(f"Best val dice: {best_val_dice:.4f}")
     print(f"Best epoch: {best_epoch}")
-
-
 
 
 if __name__ == "__main__":
