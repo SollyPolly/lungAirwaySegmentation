@@ -371,7 +371,7 @@ def build_training_components(device, model_config: dict, training_config: dict)
     loss_fn = CombinedSegmentationLoss(
         bce_weight=float(loss_config["bce_weight"]),
         dice_weight=float(loss_config["dice_weight"]),
-    )
+    ).to(device)
 
     optimizer_config = training_config["optimizer"]
     optimizer = torch.optim.AdamW(
