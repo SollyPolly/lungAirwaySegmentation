@@ -1,7 +1,7 @@
-# Main supervised patch-based baseline.
+# Archived full-volume ablation using the same shared model and loss.
 
-experiment_name: baseline_unet
-training_regime: patch
+experiment_name: baseline_unet_full_volume
+training_regime: full_volume
 seed: 15
 epochs: 25
 batch_size: 1
@@ -16,7 +16,7 @@ sampling:
   patch_size: [96, 96, 96]
   patches_per_case: 4
   foreground_probability: 0.7
-  cache_rate: 0.5
+  cache_rate: 0.0
 
 validation:
   validate_every: 1

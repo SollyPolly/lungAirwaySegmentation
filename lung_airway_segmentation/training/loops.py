@@ -21,6 +21,8 @@ def train_one_epoch(
     loss_fn,
     optimizer,
     device,
+    scaler,
+    use_amp=False,
     threshold=0.5,
 ):
     model.train()
@@ -49,20 +51,20 @@ def train_one_epoch(
         targets = targets.to(device).float()
 
         # clear old gradients
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
 
         # forward pass
-        logits = model(images)
-
-        # compute loss
-        loss = loss_fn(logits, targets)
+        with torch.autocast(device_type=device.type, enabled=use_amp, dtype=torch.float16):
+            logits = model(images)
+            loss = loss_fn(logits, targets)
         dice = binary_dice_score_from_logits(logits.detach(), targets, threshold=threshold)
 
         # backward pass
-        loss.backward()
+        scaler.scale(loss).backward()
 
         # optimizer step
-        optimizer.step()
+        scaler.step(optimizer)
+        scaler.update()
 
         # accumulate loss
         running_loss += loss.item()
@@ -85,6 +87,7 @@ def validate_one_epoch(
     roi_size,
     sw_batch_size=1,
     overlap=0.5,
+    use_amp=False,
     threshold=0.5,
 ):
     model.eval()
@@ -114,16 +117,15 @@ def validate_one_epoch(
             targets = targets.to(device).float()
 
             # forward pass
-            logits = sliding_window_inference(
-                inputs=images,
-                roi_size=roi_size,
-                sw_batch_size=sw_batch_size,
-                predictor=model,
-                overlap=overlap,
-            )
-
-            # compute loss
-            loss = loss_fn(logits, targets)
+            with torch.autocast(device_type=device.type, enabled=use_amp, dtype=torch.float16):
+                logits = sliding_window_inference(
+                    inputs=images,
+                    roi_size=roi_size,
+                    sw_batch_size=sw_batch_size,
+                    predictor=model,
+                    overlap=overlap,
+                )
+                loss = loss_fn(logits, targets)
             dice = binary_dice_score_from_logits(logits, targets, threshold=threshold)
 
             # accumulate loss

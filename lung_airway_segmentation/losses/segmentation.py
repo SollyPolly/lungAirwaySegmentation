@@ -6,6 +6,7 @@ cross-entropy on logits with Dice loss on sigmoid-normalized predictions to
 balance stable optimization against overlap quality.
 """
 
+import torch
 import torch.nn as nn
 from monai.losses.dice import DiceLoss
 
@@ -15,7 +16,7 @@ class CombinedSegmentationLoss(nn.Module):
 
     def __init__(self, bce_weight=1.0, dice_weight=1.0):
         super().__init__()
-        self.bce_loss = nn.BCEWithLogitsLoss()
+        self.bce_loss = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([10.0]))
         self.dice_loss = DiceLoss(sigmoid=True)
         self.bce_weight = bce_weight
         self.dice_weight =  dice_weight

@@ -12,3 +12,13 @@ Rules:
 
 The main reason for this folder is repeatability: you should be able to rerun
 an experiment from a saved config without editing Python code.
+
+`scripts/train_baseline.py` now reads one YAML from each of these groups:
+
+- `configs/data/` for dataset roots
+- `configs/model/` for the shared model definition
+- `configs/training/` for the training regime and optimizer settings
+
+The CLI is intentionally small and should only be used for explicit runtime
+overrides such as device selection, experiment naming, or short smoke-test
+changes.

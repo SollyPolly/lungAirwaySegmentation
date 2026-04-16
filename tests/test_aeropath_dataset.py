@@ -67,9 +67,9 @@ def test_aeropath_dataset_returns_expected_sample_keys(monkeypatch):
     assert isinstance(sample["image"], np.ndarray)
     assert isinstance(sample["airway_mask"], np.ndarray)
     assert isinstance(sample["lung_mask"], np.ndarray)
-    assert sample["image"].shape == (4, 5, 6)
-    assert sample["airway_mask"].shape == (4, 5, 6)
-    assert sample["lung_mask"].shape == (4, 5, 6)
+    assert sample["image"].shape == (32, 32, 32)
+    assert sample["airway_mask"].shape == (32, 32, 32)
+    assert sample["lung_mask"].shape == (16, 16, 16)
 
 
 def test_aeropath_dataset_keeps_lung_mask_none_when_not_requested(monkeypatch):

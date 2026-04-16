@@ -2,9 +2,10 @@
 
 This module provides the training data path that mirrors a standard MONAI
 segmentation workflow: build case records, load full NIfTI volumes, sample
-multiple label-balanced patches from each loaded case, and apply patch-level
-augmentation. It is intended for efficient supervised training while the
-explicit AeroPath datasets remain available for custom sampling experiments.
+multiple label-balanced patches from each loaded case, crop to the lung ROI,
+and apply patch-level augmentation. It is intended for efficient supervised
+training while the explicit AeroPath datasets remain available for custom
+sampling experiments.
 """
 
 from pathlib import Path
@@ -12,6 +13,7 @@ from pathlib import Path
 from monai.data import CacheDataset, Dataset
 from monai.transforms import (
     Compose,
+    CropForegroundd,
     EnsureTyped,
     LoadImaged,
     RandAffined,
@@ -63,8 +65,8 @@ def build_train_transforms(
     patch_size: tuple[int, int, int],
     patches_per_case: int,
     foreground_probability: float,
-    include_lung_mask: bool = False,
     hu_window: tuple[float, float] = DEFAULT_HU_WINDOW,
+    crop_margin_voxels: int = 0,
 ) -> Compose:
     """Build MONAI transforms for patch-based supervised training."""
     patch_size = normalize_patch_size(patch_size)
@@ -73,10 +75,7 @@ def build_train_transforms(
     if patches_per_case <= 0:
         raise ValueError("patches_per_case must be positive.")
 
-    keys = ["image", "airway_mask"]
-    if include_lung_mask:
-        keys.append("lung_mask")
-
+    keys = ["image", "airway_mask", "lung_mask"]
     modes = ["bilinear" if key == "image" else "nearest" for key in keys]
     lower, upper = hu_window
 
@@ -84,6 +83,11 @@ def build_train_transforms(
         [
             LoadImaged(keys=keys, ensure_channel_first=True, image_only=False),
             EnsureTyped(keys=keys),
+            CropForegroundd(
+                keys=keys,
+                source_key="lung_mask",
+                margin=crop_margin_voxels,
+            ),
             ScaleIntensityRanged(
                 keys="image",
                 a_min=lower,
@@ -124,15 +128,21 @@ def build_train_transforms(
 def build_val_transforms(
     *,
     hu_window: tuple[float, float] = DEFAULT_HU_WINDOW,
+    crop_margin_voxels: int = 0,
 ) -> Compose:
     """Build MONAI transforms for full-volume validation."""
     lower, upper = hu_window
-    keys = ["image", "airway_mask"]
+    keys = ["image", "airway_mask", "lung_mask"]
 
     return Compose(
         [
             LoadImaged(keys=keys, ensure_channel_first=True, image_only=False),
             EnsureTyped(keys=keys),
+            CropForegroundd(
+                keys=keys,
+                source_key="lung_mask",
+                margin=crop_margin_voxels,
+            ),
             ScaleIntensityRanged(
                 keys="image",
                 a_min=lower,
@@ -154,6 +164,8 @@ def build_monai_aeropath_datasets(
     patches_per_case: int,
     foreground_probability: float,
     cache_rate: float = 0.0,
+    crop_margin_voxels: int = 0,
+    hu_window: tuple[float, float] = DEFAULT_HU_WINDOW,
 ) -> tuple[Dataset, Dataset]:
     """Build MONAI train and validation datasets for labelled AeroPath data."""
     if not 0.0 <= cache_rate <= 1.0:
@@ -167,7 +179,7 @@ def build_monai_aeropath_datasets(
     val_records = build_aeropath_records(
         val_ids,
         data_root=data_root,
-        include_lung_mask=False,
+        include_lung_mask=True,
     )
 
     dataset_class = CacheDataset if cache_rate > 0.0 else Dataset
@@ -179,13 +191,17 @@ def build_monai_aeropath_datasets(
             patch_size=patch_size,
             patches_per_case=patches_per_case,
             foreground_probability=foreground_probability,
-            include_lung_mask=True,
+            crop_margin_voxels=crop_margin_voxels,
+            hu_window=hu_window,
         ),
         **cache_kwargs,
     )
     val_dataset = dataset_class(
         data=val_records,
-        transform=build_val_transforms(),
+        transform=build_val_transforms(
+            crop_margin_voxels=crop_margin_voxels,
+            hu_window=hu_window,
+        ),
         **cache_kwargs,
     )
 
