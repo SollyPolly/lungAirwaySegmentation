@@ -1,7 +1,7 @@
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
-#     "marimo",
+#     "marimo>=0.23.1",
 #     "nibabel",
 #     "numpy",
 #     "pandas",
@@ -12,8 +12,18 @@
 
 import marimo
 
-__generated_with = "0.22.4"
+__generated_with = "0.23.1"
 app = marimo.App()
+
+
+@app.cell
+def _():
+    REPORT_CAMERA = dict(
+        eye=dict(x=1.45, y=1.55, z=0.95),
+        center=dict(x=0.0, y=0.0, z=0.0),
+        up=dict(x=0.0, y=0.0, z=1.0),
+    )
+    return (REPORT_CAMERA,)
 
 
 @app.cell
@@ -27,24 +37,23 @@ def _():
     import plotly.graph_objects as go
     from skimage.measure import marching_cubes
 
-    from preprocessing import (
+    from lung_airway_segmentation.settings import (
         DEFAULT_CROP_MARGIN,
-        DEFAULT_DATA_ROOT,
         DEFAULT_HU_WINDOW,
-        clip_ct_to_window,
-        crop_volume,
-        list_case_ids,
-        load_canonical_image,
-        preprocess_case,
-        resolve_case_paths,
+        RAW_AEROPATH_ROOT,
     )
+    from lung_airway_segmentation.preprocessing.geometry import crop_volume
+    from lung_airway_segmentation.preprocessing.intensity import clip_ct_to_hu_window
+    from lung_airway_segmentation.preprocessing.pipeline import preprocess_case
+    from lung_airway_segmentation.io.case_layout import list_case_ids, resolve_case_paths
+    from lung_airway_segmentation.io.nifti import load_canonical_image
 
     return (
         DEFAULT_CROP_MARGIN,
-        DEFAULT_DATA_ROOT,
         DEFAULT_HU_WINDOW,
         Path,
-        clip_ct_to_window,
+        RAW_AEROPATH_ROOT,
+        clip_ct_to_hu_window,
         crop_volume,
         go,
         json,
@@ -65,7 +74,7 @@ def _(mo):
     # AeroPath Raw vs Cropped Viewer
 
     This notebook uses the shared `preprocess_case(...)` function from
-    `preprocessing.py`. The preprocessing shown here keeps the original
+    `lung_airway_segmentation.preprocessing.pipeline`. The preprocessing shown here keeps the original
     voxel spacing and performs:
 
     - alignment checks
@@ -86,8 +95,8 @@ def _(viewer_panel):
 
 
 @app.cell
-def _(DEFAULT_CROP_MARGIN, DEFAULT_DATA_ROOT, list_case_ids, mo):
-    data_root = DEFAULT_DATA_ROOT
+def _(DEFAULT_CROP_MARGIN, RAW_AEROPATH_ROOT, list_case_ids, mo):
+    data_root = RAW_AEROPATH_ROOT
     case_ids = list_case_ids(data_root)
 
     case_selector = mo.ui.dropdown(
@@ -172,22 +181,22 @@ def _(
 
 @app.cell
 def _(crop_volume, processed_case, raw_ct):
-    cropped_ct_hu = crop_volume(raw_ct, processed_case["crop_box"]).astype("float32", copy=False)
+    cropped_ct_hu = crop_volume(raw_ct, processed_case.crop_box).astype("float32", copy=False)
     return (cropped_ct_hu,)
 
 
 @app.cell
 def _(
     DEFAULT_HU_WINDOW,
-    clip_ct_to_window,
+    clip_ct_to_hu_window,
     cropped_ct_hu,
     processed_case,
     raw_ct,
 ):
     hu_window = DEFAULT_HU_WINDOW
-    raw_ct_display = clip_ct_to_window(raw_ct, hu_window)
-    cropped_ct_display = clip_ct_to_window(cropped_ct_hu, hu_window)
-    normalized_ct = processed_case["ct"]
+    raw_ct_display = clip_ct_to_hu_window(raw_ct, hu_window)
+    cropped_ct_display = clip_ct_to_hu_window(cropped_ct_hu, hu_window)
+    normalized_ct = processed_case.ct
     return cropped_ct_display, hu_window, normalized_ct, raw_ct_display
 
 
@@ -268,8 +277,8 @@ def _(marching_cubes, np):
 
 @app.cell
 def _(build_mask_mesh, processed_case):
-    cropped_lung_mesh = build_mask_mesh(processed_case["lung_mask"], processed_case["spacing"], stride=3)
-    cropped_airway_mesh = build_mask_mesh(processed_case["airway_mask"], processed_case["spacing"], stride=2)
+    cropped_lung_mesh = build_mask_mesh(processed_case.lung_mask, processed_case.spacing, stride=6)
+    cropped_airway_mesh = build_mask_mesh(processed_case.airway_mask, processed_case.spacing, stride=4)
     return cropped_airway_mesh, cropped_lung_mesh
 
 
@@ -291,8 +300,8 @@ def _(
     notes = [
         f"Original spacing: `{original_spacing[0]:.3f} x {original_spacing[1]:.3f} x {original_spacing[2]:.3f} mm`",
         f"Crop margin: `{crop_margin_value}` voxels",
-        f"Crop box: `{processed_case['crop_box']}`",
-        f"Processed shape: `{processed_case['metadata']['processed_shape']}`",
+        f"Crop box: `{processed_case.crop_box}`",
+        f"Processed shape: `{processed_case.metadata['processed_shape']}`",
         f"Display HU window: `{hu_window}`",
         "Mesh detail is fixed to a single high-detail setting.",
     ]
@@ -318,6 +327,7 @@ def _(
 
 @app.cell
 def _(
+    REPORT_CAMERA,
     cropped_airway_mesh,
     cropped_lung_mesh,
     go,
@@ -386,6 +396,7 @@ def _(
                 yaxis_title="y (mm)",
                 zaxis_title="z (mm)",
                 bgcolor="white",
+                camera=REPORT_CAMERA,
             ),
         )
         cropped_3d_view = mo.vstack(
@@ -466,7 +477,7 @@ def _(
 ):
     cropped_slice_figure = go.Figure()
     cropped_source_slice_index = int(shared_slice_slider.value)
-    crop_bounds = processed_case["crop_box"][axis]
+    crop_bounds = processed_case.crop_box[axis]
     crop_start = int(crop_bounds[0])
     crop_stop = int(crop_bounds[1])
 
@@ -481,10 +492,10 @@ def _(
                 hovertemplate="CT %{z:.1f}<extra></extra>",
             )
         )
-        if show_lung_mask.value and processed_case["lung_mask"] is not None:
+        if show_lung_mask.value and processed_case.lung_mask is not None:
             cropped_slice_figure.add_trace(
                 go.Heatmap(
-                    z=overlay_mask(processed_case["lung_mask"], axis, cropped_slice_index),
+                    z=overlay_mask(processed_case.lung_mask, axis, cropped_slice_index),
                     colorscale=[[0.0, "rgba(42,157,143,0.0)"], [1.0, "rgba(42,157,143,0.30)"]],
                     showscale=False,
                     hoverinfo="skip",
@@ -493,7 +504,7 @@ def _(
         if show_airway_mask.value:
             cropped_slice_figure.add_trace(
                 go.Heatmap(
-                    z=overlay_mask(processed_case["airway_mask"], axis, cropped_slice_index),
+                    z=overlay_mask(processed_case.airway_mask, axis, cropped_slice_index),
                     colorscale=[[0.0, "rgba(216,27,96,0.0)"], [1.0, "rgba(216,27,96,0.78)"]],
                     showscale=False,
                     hoverinfo="skip",
@@ -581,49 +592,110 @@ def _(
 
 
 @app.cell
-def _(Path, json, nib, np):
-    prediction_run_root = Path(__file__).resolve().parent / "runs" / "basic_unet"
+def _(
+    DEFAULT_HU_WINDOW,
+    Path,
+    clip_ct_to_hu_window,
+    json,
+    load_canonical_image,
+    nib,
+    np,
+    resolve_case_paths,
+):
+    prediction_run_root = Path(__file__).resolve().parent / "runs"
 
     def list_prediction_run_names(run_root):
         if not run_root.exists():
             return []
-        run_dirs = [path for path in run_root.iterdir() if path.is_dir()]
-        run_dirs.sort(key=lambda path: path.stat().st_mtime, reverse=True)
-        return [path.name for path in run_dirs]
 
-    def load_prediction_bundle(run_root, run_name, split):
-        run_dir = run_root / run_name
-        metrics_path = run_dir / "metrics.json"
-        if not metrics_path.exists():
-            raise FileNotFoundError(f"Missing metrics file: {metrics_path}")
-
-        metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
-        config = metrics["config"]
-        prediction_paths = metrics.get("prediction_paths", {})
-        case_id = str(config[f"{split}_case"])
-
-        ct_path = Path(config[f"{split}_image_path"]).resolve()
-        true_mask_path = Path(config[f"{split}_label_path"]).resolve()
-        lung_mask_path = ct_path.parent / f"{case_id}_lung_mask_processed.nii.gz"
-        fallback_prediction_path = run_dir / f"{split}_case_{case_id}_prediction_mask.nii.gz"
-        prediction_mask_path = Path(prediction_paths.get(f"{split}_mask", fallback_prediction_path)).resolve()
-
-        if not ct_path.exists():
-            raise FileNotFoundError(f"Missing processed CT: {ct_path}")
-        if not true_mask_path.exists():
-            raise FileNotFoundError(f"Missing true mask: {true_mask_path}")
-        if not prediction_mask_path.exists():
-            raise FileNotFoundError(
-                f"Missing prediction mask: {prediction_mask_path}. "
-                "Run basic_unet.py with --save-predictions first."
+        run_dirs = []
+        for metadata_path in run_root.rglob("run_metadata.json"):
+            run_dir = metadata_path.parent
+            predictions_dir = run_dir / "predictions"
+            if not predictions_dir.is_dir():
+                continue
+            has_case_predictions = any(
+                (case_dir / "prediction_metadata.json").is_file()
+                for case_dir in predictions_dir.iterdir()
+                if case_dir.is_dir()
             )
+            if has_case_predictions:
+                run_dirs.append(run_dir)
 
-        ct_image = nib.load(str(ct_path))
+        run_dirs.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+        return [str(path.relative_to(run_root)) for path in run_dirs]
+
+    def resolve_prediction_run_dir(run_root, run_name):
+        return (run_root / run_name).resolve()
+
+    def list_prediction_case_ids(run_root, run_name):
+        if run_name is None:
+            return []
+
+        predictions_dir = resolve_prediction_run_dir(run_root, run_name) / "predictions"
+        if not predictions_dir.exists():
+            return []
+
+        case_ids = [
+            case_dir.name
+            for case_dir in predictions_dir.iterdir()
+            if case_dir.is_dir() and (case_dir / "prediction_metadata.json").is_file()
+        ]
+        return sorted(case_ids, key=lambda value: (not value.isdigit(), int(value) if value.isdigit() else value))
+
+    def load_prediction_bundle(run_root, run_name, case_id):
+        run_dir = resolve_prediction_run_dir(run_root, run_name)
+        prediction_case_dir = run_dir / "predictions" / str(case_id)
+        prediction_metadata_path = prediction_case_dir / "prediction_metadata.json"
+        prediction_mask_path = prediction_case_dir / "airway_pred_full.nii.gz"
+
+        if not prediction_metadata_path.exists():
+            raise FileNotFoundError(f"Missing prediction metadata: {prediction_metadata_path}")
+        if not prediction_mask_path.exists():
+            raise FileNotFoundError(f"Missing full prediction mask: {prediction_mask_path}")
+
+        prediction_metadata = json.loads(prediction_metadata_path.read_text(encoding="utf-8"))
+        run_metadata_path = run_dir / "run_metadata.json"
+        history_path = run_dir / "history.json"
+        resolved_config_path = run_dir / "resolved_config.json"
+
+        run_metadata = (
+            json.loads(run_metadata_path.read_text(encoding="utf-8"))
+            if run_metadata_path.exists()
+            else {}
+        )
+        history = (
+            json.loads(history_path.read_text(encoding="utf-8"))
+            if history_path.exists()
+            else {}
+        )
+        resolved_config = (
+            json.loads(resolved_config_path.read_text(encoding="utf-8"))
+            if resolved_config_path.exists()
+            else {}
+        )
+
+        data_root = Path(run_metadata["data_root"]).resolve() if run_metadata.get("data_root") else None
+        case_paths = resolve_case_paths(case_id, data_root=data_root) if data_root is not None else resolve_case_paths(case_id)
+
+        ct_image = load_canonical_image(case_paths["ct"])
         ct = np.asarray(ct_image.dataobj, dtype=np.float32)
-        true_mask = np.asarray(nib.load(str(true_mask_path)).dataobj) > 0
-        prediction_mask = np.asarray(nib.load(str(prediction_mask_path)).dataobj) > 0
-        lung_mask = np.asarray(nib.load(str(lung_mask_path)).dataobj) > 0 if lung_mask_path.exists() else None
+        hu_window = tuple(
+            float(value)
+            for value in resolved_config.get("data", {}).get("preprocessing", {}).get("hu_window", DEFAULT_HU_WINDOW)
+        )
+        ct_display = clip_ct_to_hu_window(ct, hu_window)
         spacing = tuple(float(value) for value in ct_image.header.get_zooms()[:3])
+
+        if case_paths["airway"] is None:
+            raise ValueError(f"Case {case_id} does not have a reference airway mask.")
+        true_mask = np.asarray(load_canonical_image(case_paths["airway"]).dataobj) > 0
+        lung_mask = (
+            np.asarray(load_canonical_image(case_paths["lung"]).dataobj) > 0
+            if case_paths["lung"] is not None
+            else None
+        )
+        prediction_mask = np.asarray(nib.load(str(prediction_mask_path)).dataobj) > 0
 
         if ct.shape != true_mask.shape or ct.shape != prediction_mask.shape:
             raise ValueError(
@@ -636,26 +708,43 @@ def _(Path, json, nib, np):
                 f"ct={ct.shape}, lung_mask={lung_mask.shape}"
             )
 
-        history = metrics.get("history", [])
+        probability_path = prediction_case_dir / "airway_prob_full.nii.gz"
+        probability_volume = (
+            np.asarray(nib.load(str(probability_path)).dataobj, dtype=np.float32)
+            if probability_path.exists()
+            else None
+        )
+
+        history_entries = history.get("history", []) if isinstance(history, dict) else []
+        best_metrics = history.get("best", {}) if isinstance(history, dict) else {}
+
         return {
             "run_dir": run_dir,
-            "run_name": run_dir.name,
-            "split": split,
-            "case_id": case_id,
-            "ct_path": ct_path,
-            "lung_mask_path": lung_mask_path if lung_mask_path.exists() else None,
-            "true_mask_path": true_mask_path,
+            "run_name": run_name,
+            "case_id": str(case_id),
+            "ct_path": case_paths["ct"],
+            "lung_mask_path": case_paths["lung"],
+            "true_mask_path": case_paths["airway"],
             "prediction_mask_path": prediction_mask_path,
+            "probability_path": probability_path if probability_path.exists() else None,
+            "prediction_metadata_path": prediction_metadata_path,
             "ct": ct,
+            "ct_display": ct_display,
+            "hu_window": hu_window,
             "lung_mask": lung_mask,
             "true_mask": true_mask,
             "prediction_mask": prediction_mask,
+            "probability_volume": probability_volume,
             "spacing": spacing,
-            "best_val_dice": metrics.get("best_val_dice"),
-            "last_epoch_metrics": history[-1] if history else None,
+            "best_val_dice": best_metrics.get("val_dice"),
+            "best_epoch": best_metrics.get("epoch"),
+            "last_epoch_metrics": history_entries[-1] if history_entries else None,
+            "checkpoint_epoch": prediction_metadata.get("checkpoint_epoch"),
+            "threshold": prediction_metadata.get("threshold"),
         }
 
     return (
+        list_prediction_case_ids,
         list_prediction_run_names,
         load_prediction_bundle,
         prediction_run_root,
@@ -676,14 +765,6 @@ def _(list_prediction_run_names, mo, prediction_run_root):
         )
         if prediction_runs_available
         else None
-    )
-    prediction_split_selector = mo.ui.dropdown(
-        {
-            "Validation": "val",
-            "Training": "train",
-        },
-        value="Validation",
-        label="Prediction split",
     )
     prediction_plane_selector = mo.ui.dropdown(
         {
@@ -716,7 +797,6 @@ def _(list_prediction_run_names, mo, prediction_run_root):
         prediction_plane_selector,
         prediction_run_selector,
         prediction_runs_available,
-        prediction_split_selector,
         prediction_view_height_slider,
         show_predicted_mask,
         show_prediction_lung_mask,
@@ -726,21 +806,52 @@ def _(list_prediction_run_names, mo, prediction_run_root):
 
 @app.cell
 def _(
-    load_prediction_bundle,
+    list_prediction_case_ids,
+    mo,
     prediction_run_root,
     prediction_run_selector,
     prediction_runs_available,
-    prediction_split_selector,
+):
+    if not prediction_runs_available or prediction_run_selector is None:
+        prediction_case_selector = None
+    else:
+        prediction_case_ids = list_prediction_case_ids(
+            prediction_run_root,
+            prediction_run_selector.value,
+        )
+        prediction_case_selector = (
+            mo.ui.dropdown(
+                prediction_case_ids,
+                value=prediction_case_ids[0],
+                label="Predicted case",
+                searchable=True,
+            )
+            if prediction_case_ids
+            else None
+        )
+    return (prediction_case_selector,)
+
+
+@app.cell
+def _(
+    load_prediction_bundle,
+    prediction_case_selector,
+    prediction_run_root,
+    prediction_run_selector,
+    prediction_runs_available,
 ):
     if not prediction_runs_available or prediction_run_selector is None:
         prediction_bundle = None
         prediction_bundle_error = None
+    elif prediction_case_selector is None:
+        prediction_bundle = None
+        prediction_bundle_error = "Selected run does not contain any saved case predictions."
     else:
         try:
             prediction_bundle = load_prediction_bundle(
                 prediction_run_root,
                 prediction_run_selector.value,
-                prediction_split_selector.value,
+                prediction_case_selector.value,
             )
             prediction_bundle_error = None
         except Exception as error:
@@ -779,7 +890,7 @@ def _(build_mask_mesh, prediction_bundle):
             build_mask_mesh(
                 prediction_bundle["lung_mask"],
                 prediction_bundle["spacing"],
-                stride=3,
+                stride=6,
             )
             if prediction_bundle["lung_mask"] is not None
             else None
@@ -787,18 +898,19 @@ def _(build_mask_mesh, prediction_bundle):
         prediction_true_mesh = build_mask_mesh(
             prediction_bundle["true_mask"],
             prediction_bundle["spacing"],
-            stride=2,
+            stride=5,
         )
         prediction_mask_mesh = build_mask_mesh(
             prediction_bundle["prediction_mask"],
             prediction_bundle["spacing"],
-            stride=2,
+            stride=5,
         )
     return prediction_lung_mesh, prediction_mask_mesh, prediction_true_mesh
 
 
 @app.cell
 def _(
+    REPORT_CAMERA,
     go,
     mo,
     predicted_mask_opacity,
@@ -806,7 +918,6 @@ def _(
     prediction_bundle_error,
     prediction_lung_mesh,
     prediction_mask_mesh,
-    prediction_split_selector,
     prediction_true_mesh,
     prediction_view_height_slider,
     show_predicted_mask,
@@ -897,11 +1008,12 @@ def _(
                     yaxis_title="y (mm)",
                     zaxis_title="z (mm)",
                     bgcolor="white",
+                    camera=REPORT_CAMERA,
                 ),
             )
             prediction_3d_view = mo.vstack(
                 [
-                    mo.md(f"### {prediction_split_selector.value} Prediction 3D Viewer"),
+                    mo.md(f"### Saved Prediction 3D Viewer | Case {prediction_bundle['case_id']}"),
                     mo.as_html(prediction_mesh_figure),
                 ],
                 gap=0.5,
@@ -915,11 +1027,11 @@ def _(
     predicted_mask_opacity,
     prediction_bundle,
     prediction_bundle_error,
+    prediction_case_selector,
     prediction_plane_selector,
     prediction_run_selector,
     prediction_runs_available,
     prediction_slice_slider,
-    prediction_split_selector,
     prediction_view_height_slider,
     show_predicted_mask,
     show_prediction_lung_mask,
@@ -928,15 +1040,15 @@ def _(
     if not prediction_runs_available:
         prediction_controls = mo.md(
             "## Saved Prediction Viewer\n\n"
-            "No run folders were found in `runs/basic_unet`. "
-            "Run `basic_unet.py --save-predictions` first."
+            "No run folders with saved predictions were found under `runs/`. "
+            "Run `scripts.predict_case` first."
         )
     elif prediction_bundle_error is not None:
         prediction_controls = mo.vstack(
             [
                 mo.md("## Saved Prediction Viewer"),
                 mo.hstack(
-                    [prediction_run_selector, prediction_split_selector],
+                    [prediction_run_selector, prediction_case_selector],
                     widths=[1.6, 1.0],
                     gap=0.8,
                     wrap=True,
@@ -948,7 +1060,7 @@ def _(
         )
     else:
         prediction_primary_controls = mo.hstack(
-            [prediction_run_selector, prediction_split_selector],
+            [prediction_run_selector, prediction_case_selector],
             widths=[1.6, 1.0],
             gap=0.8,
             wrap=True,
@@ -979,9 +1091,10 @@ def _(
 
         prediction_notes = [
             f"- **Run**: {prediction_bundle['run_name']}",
-            f"- **Split**: `{prediction_bundle['split']}`",
             f"- **Case**: `{prediction_bundle['case_id']}`",
-            f"- **Best validation Dice**: `{float(prediction_bundle['best_val_dice']):.4f}`",
+            f"- **Best validation Dice**: `{float(prediction_bundle['best_val_dice']):.4f}`" if prediction_bundle["best_val_dice"] is not None else "- **Best validation Dice**: unavailable",
+            f"- **Checkpoint epoch**: `{int(prediction_bundle['checkpoint_epoch'])}`" if prediction_bundle["checkpoint_epoch"] is not None else "- **Checkpoint epoch**: unavailable",
+            f"- **Threshold**: `{float(prediction_bundle['threshold']):.2f}`" if prediction_bundle["threshold"] is not None else "- **Threshold**: unavailable",
         ]
         prediction_summary_blocks = [mo.md("### Run Summary"), mo.md("\n".join(prediction_notes))]
 
@@ -1034,7 +1147,6 @@ def _(
     prediction_bundle,
     prediction_bundle_error,
     prediction_slice_slider,
-    prediction_split_selector,
     prediction_view_height_slider,
     show_predicted_mask,
     show_prediction_lung_mask,
@@ -1047,7 +1159,7 @@ def _(
     else:
         prediction_slice_index = int(prediction_slice_slider.value)
         prediction_ct_slice = extract_plane(
-            prediction_bundle["ct"],
+            prediction_bundle["ct_display"],
             prediction_axis,
             prediction_slice_index,
         )
@@ -1057,10 +1169,8 @@ def _(
             go.Heatmap(
                 z=prediction_ct_slice,
                 colorscale="Gray",
-                zmin=0.0,
-                zmax=1.0,
                 showscale=False,
-                hovertemplate="CT %{z:.3f}<extra></extra>",
+                hovertemplate="CT %{z:.1f}<extra></extra>",
             )
         )
 
@@ -1112,7 +1222,7 @@ def _(
 
         prediction_slice_figure.update_layout(
             title=(
-                f"{prediction_split_selector.value} prediction slice {prediction_slice_index} "
+                f"Saved prediction slice {prediction_slice_index} "
                 f"| case {prediction_bundle['case_id']}"
             ),
             height=int(prediction_view_height_slider.value),

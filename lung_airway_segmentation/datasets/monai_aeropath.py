@@ -14,6 +14,7 @@ from monai.data import CacheDataset, Dataset
 from monai.transforms import (
     Compose,
     CropForegroundd,
+    DivisiblePadd,
     EnsureTyped,
     LoadImaged,
     RandAffined,
@@ -125,14 +126,16 @@ def build_train_transforms(
     )
 
 
-def build_val_transforms(
+def build_full_volume_train_transforms(
     *,
     hu_window: tuple[float, float] = DEFAULT_HU_WINDOW,
     crop_margin_voxels: int = 0,
+    divisible_k: int = 16,
 ) -> Compose:
-    """Build MONAI transforms for full-volume validation."""
+    """Build MONAI transforms for full-volume supervised training."""
     lower, upper = hu_window
     keys = ["image", "airway_mask", "lung_mask"]
+    modes = ["bilinear" if key == "image" else "nearest" for key in keys]
 
     return Compose(
         [
@@ -151,8 +154,56 @@ def build_val_transforms(
                 b_max=1.0,
                 clip=True,
             ),
+            DivisiblePadd(keys=keys, k=divisible_k),
+            RandFlipd(keys=keys, prob=0.5, spatial_axis=0),
+            RandFlipd(keys=keys, prob=0.5, spatial_axis=1),
+            RandFlipd(keys=keys, prob=0.5, spatial_axis=2),
+            RandAffined(
+                keys=keys,
+                prob=0.2,
+                rotate_range=(0.1, 0.1, 0.1),
+                scale_range=(0.1, 0.1, 0.1),
+                mode=modes,
+                padding_mode="border",
+            ),
+            RandGaussianNoised(keys="image", prob=0.15, std=0.01),
+            RandScaleIntensityd(keys="image", factors=0.1, prob=0.15),
+            RandShiftIntensityd(keys="image", offsets=0.1, prob=0.15),
         ]
     )
+
+
+def build_val_transforms(
+    *,
+    hu_window: tuple[float, float] = DEFAULT_HU_WINDOW,
+    crop_margin_voxels: int = 0,
+    divisible_k: int | None = None,
+) -> Compose:
+    """Build MONAI transforms for full-volume validation."""
+    lower, upper = hu_window
+    keys = ["image", "airway_mask", "lung_mask"]
+
+    transforms = [
+        LoadImaged(keys=keys, ensure_channel_first=True, image_only=False),
+        EnsureTyped(keys=keys),
+        CropForegroundd(
+            keys=keys,
+            source_key="lung_mask",
+            margin=crop_margin_voxels,
+        ),
+        ScaleIntensityRanged(
+            keys="image",
+            a_min=lower,
+            a_max=upper,
+            b_min=0.0,
+            b_max=1.0,
+            clip=True,
+        ),
+    ]
+    if divisible_k is not None:
+        transforms.append(DivisiblePadd(keys=keys, k=divisible_k))
+
+    return Compose(transforms)
 
 
 def build_monai_aeropath_datasets(
@@ -193,6 +244,55 @@ def build_monai_aeropath_datasets(
             foreground_probability=foreground_probability,
             crop_margin_voxels=crop_margin_voxels,
             hu_window=hu_window,
+        ),
+        **cache_kwargs,
+    )
+    val_dataset = dataset_class(
+        data=val_records,
+        transform=build_val_transforms(
+            crop_margin_voxels=crop_margin_voxels,
+            hu_window=hu_window,
+        ),
+        **cache_kwargs,
+    )
+
+    return train_dataset, val_dataset
+
+
+def build_monai_aeropath_full_volume_datasets(
+    *,
+    train_ids,
+    val_ids,
+    data_root: Path = RAW_AEROPATH_ROOT,
+    cache_rate: float = 0.0,
+    crop_margin_voxels: int = 0,
+    hu_window: tuple[float, float] = DEFAULT_HU_WINDOW,
+    divisible_k: int = 16,
+) -> tuple[Dataset, Dataset]:
+    """Build MONAI train and validation datasets for full-volume AeroPath training."""
+    if not 0.0 <= cache_rate <= 1.0:
+        raise ValueError("cache_rate must be between 0.0 and 1.0.")
+
+    train_records = build_aeropath_records(
+        train_ids,
+        data_root=data_root,
+        include_lung_mask=True,
+    )
+    val_records = build_aeropath_records(
+        val_ids,
+        data_root=data_root,
+        include_lung_mask=True,
+    )
+
+    dataset_class = CacheDataset if cache_rate > 0.0 else Dataset
+    cache_kwargs = {"cache_rate": cache_rate} if cache_rate > 0.0 else {}
+
+    train_dataset = dataset_class(
+        data=train_records,
+        transform=build_full_volume_train_transforms(
+            crop_margin_voxels=crop_margin_voxels,
+            hu_window=hu_window,
+            divisible_k=divisible_k,
         ),
         **cache_kwargs,
     )

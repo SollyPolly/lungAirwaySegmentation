@@ -11,3 +11,9 @@ CT_FM_Feature_Extractor/
 runs/
 outputs/
 preprocessing_summary.csv
+legacy/
+ideas.md
+outline.md
+learning/
+docs/
+tests/
