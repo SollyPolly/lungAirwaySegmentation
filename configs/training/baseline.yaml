@@ -19,7 +19,7 @@ sampling:
   cache_rate: 0.5
 
 validation:
-  validate_every: 1
+  validate_every: 5
   roi_size: [96, 96, 96]
   sw_batch_size: 1
   inference_overlap: 0.5
@@ -31,7 +31,7 @@ optimizer:
 
 scheduler:
   name: cosine
-  warmup_epochs: 5
+  warmup_epochs: 10
 
 amp:
   enabled: true
