@@ -277,8 +277,8 @@ def _(marching_cubes, np):
 
 @app.cell
 def _(build_mask_mesh, processed_case):
-    cropped_lung_mesh = build_mask_mesh(processed_case.lung_mask, processed_case.spacing, stride=6)
-    cropped_airway_mesh = build_mask_mesh(processed_case.airway_mask, processed_case.spacing, stride=4)
+    cropped_lung_mesh = build_mask_mesh(processed_case.lung_mask, processed_case.spacing, stride=2)
+    cropped_airway_mesh = build_mask_mesh(processed_case.airway_mask, processed_case.spacing, stride=1)
     return cropped_airway_mesh, cropped_lung_mesh
 
 
@@ -595,6 +595,7 @@ def _(
 def _(
     DEFAULT_HU_WINDOW,
     Path,
+    RAW_AEROPATH_ROOT,
     clip_ct_to_hu_window,
     json,
     load_canonical_image,
@@ -603,6 +604,7 @@ def _(
     resolve_case_paths,
 ):
     prediction_run_root = Path(__file__).resolve().parent / "runs"
+    project_root = Path(__file__).resolve().parent
 
     def list_prediction_run_names(run_root):
         if not run_root.exists():
@@ -627,6 +629,29 @@ def _(
 
     def resolve_prediction_run_dir(run_root, run_name):
         return (run_root / run_name).resolve()
+
+    def resolve_prediction_data_root(run_metadata, resolved_config):
+        candidate_paths = []
+
+        recorded_data_root = run_metadata.get("data_root")
+        if recorded_data_root:
+            candidate_paths.append(Path(recorded_data_root))
+
+        configured_data_root = resolved_config.get("data", {}).get("raw_data_root")
+        if configured_data_root:
+            configured_path = Path(configured_data_root)
+            if configured_path.is_absolute():
+                candidate_paths.append(configured_path)
+            else:
+                candidate_paths.append((project_root / configured_path).resolve())
+
+        candidate_paths.append(RAW_AEROPATH_ROOT)
+
+        for candidate_path in candidate_paths:
+            if candidate_path.exists():
+                return candidate_path.resolve()
+
+        return RAW_AEROPATH_ROOT.resolve()
 
     def list_prediction_case_ids(run_root, run_name):
         if run_name is None:
@@ -675,8 +700,8 @@ def _(
             else {}
         )
 
-        data_root = Path(run_metadata["data_root"]).resolve() if run_metadata.get("data_root") else None
-        case_paths = resolve_case_paths(case_id, data_root=data_root) if data_root is not None else resolve_case_paths(case_id)
+        data_root = resolve_prediction_data_root(run_metadata, resolved_config)
+        case_paths = resolve_case_paths(case_id, data_root=data_root)
 
         ct_image = load_canonical_image(case_paths["ct"])
         ct = np.asarray(ct_image.dataobj, dtype=np.float32)

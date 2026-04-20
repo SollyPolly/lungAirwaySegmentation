@@ -67,6 +67,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help="Probability threshold for the exported binary mask.",
     )
     parser.add_argument(
+        "--inference-overlap",
+        type=float,
+        default=None,
+        help="Optional sliding-window overlap override. Defaults to the saved run config.",
+    )
+    parser.add_argument(
         "--save-probabilities",
         action="store_true",
         help="Also save the probability volume as a NIfTI file.",
@@ -155,7 +161,9 @@ def build_prediction_metadata(
         "original_affine": case.metadata["original_affine"].tolist(),
         "roi_size": resolved_config["training"]["validation"]["roi_size"],
         "sw_batch_size": resolved_config["training"]["validation"]["sw_batch_size"],
-        "inference_overlap": resolved_config["training"]["validation"]["inference_overlap"],
+        "inference_overlap": float(args.inference_overlap)
+        if args.inference_overlap is not None
+        else resolved_config["training"]["validation"]["inference_overlap"],
         "amp_enabled": bool(resolved_config["training"].get("amp", {}).get("enabled", False)),
     }
 
@@ -192,6 +200,11 @@ def main() -> None:
 
     validation_config = resolved_config["training"]["validation"]
     use_amp = bool(resolved_config["training"].get("amp", {}).get("enabled", False)) and device.type == "cuda"
+    inference_overlap = (
+        float(args.inference_overlap)
+        if args.inference_overlap is not None
+        else float(validation_config["inference_overlap"])
+    )
 
     image_tensor = torch.from_numpy(case.ct)
     logits = predict_logits_for_volume(
@@ -200,7 +213,7 @@ def main() -> None:
         device=device,
         roi_size=tuple(int(value) for value in validation_config["roi_size"]),
         sw_batch_size=int(validation_config["sw_batch_size"]),
-        overlap=float(validation_config["inference_overlap"]),
+        overlap=inference_overlap,
         use_amp=use_amp,
     )
     probabilities_cropped = torch.sigmoid(logits).squeeze().cpu().numpy().astype(np.float32, copy=False)

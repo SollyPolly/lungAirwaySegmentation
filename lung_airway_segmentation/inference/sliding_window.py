@@ -11,7 +11,7 @@ def predict_logits_for_volume(
     device,
     roi_size,
     sw_batch_size=1,
-    overlap=0.5,
+    overlap=0.75,
     use_amp=False,
 ):
     """Run sliding-window inference on one cropped 3D volume."""
@@ -33,6 +33,7 @@ def predict_logits_for_volume(
                 sw_batch_size=int(sw_batch_size),
                 predictor=model,
                 overlap=float(overlap),
+                mode="gaussian"
             )
 
     return logits

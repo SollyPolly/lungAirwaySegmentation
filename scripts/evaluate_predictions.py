@@ -17,6 +17,7 @@ from lung_airway_segmentation.metrics.segmentation import (
     binary_precision_from_masks,
     binary_recall_from_masks,
 )
+from lung_airway_segmentation.settings import RAW_AEROPATH_ROOT
 from lung_airway_segmentation.training.config import resolve_project_path
 
 
@@ -74,14 +75,28 @@ def resolve_data_root(run_dir: Path, data_root_override: Path | None) -> Path:
     if data_root_override is not None:
         return data_root_override.resolve()
 
+    candidate_paths = []
     run_metadata_path = run_dir / "run_metadata.json"
     if run_metadata_path.exists():
         run_metadata = load_json(run_metadata_path)
         if run_metadata.get("data_root"):
-            return Path(run_metadata["data_root"]).resolve()
+            candidate_paths.append(Path(run_metadata["data_root"]))
 
     resolved_config = load_json(run_dir / "resolved_config.json")
-    return resolve_project_path(resolved_config["data"]["raw_data_root"]).resolve()
+    configured_data_root = resolved_config["data"]["raw_data_root"]
+    configured_path = Path(configured_data_root)
+    if configured_path.is_absolute():
+        candidate_paths.append(configured_path)
+    else:
+        candidate_paths.append(resolve_project_path(configured_path).resolve())
+
+    candidate_paths.append(RAW_AEROPATH_ROOT)
+
+    for candidate_path in candidate_paths:
+        if candidate_path.exists():
+            return candidate_path.resolve()
+
+    return RAW_AEROPATH_ROOT.resolve()
 
 
 def list_prediction_case_dirs(predictions_dir: Path, case_ids: list[str] | None = None) -> list[Path]:

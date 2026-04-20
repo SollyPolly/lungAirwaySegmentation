@@ -86,7 +86,7 @@ def validate_one_epoch(
     device,
     roi_size,
     sw_batch_size=1,
-    overlap=0.5,
+    overlap=0.75,
     use_amp=False,
     threshold=0.5,
 ):
@@ -124,6 +124,7 @@ def validate_one_epoch(
                     sw_batch_size=sw_batch_size,
                     predictor=model,
                     overlap=overlap,
+                    mode="gaussian"
                 )
                 loss = loss_fn(logits, targets)
             dice = binary_dice_score_from_logits(logits, targets, threshold=threshold)
