@@ -7,7 +7,7 @@ __marimo__/
 
 /data/
 
-CT_FM_Feature_Extractor/
+
 runs/
 outputs/
 preprocessing_summary.csv
