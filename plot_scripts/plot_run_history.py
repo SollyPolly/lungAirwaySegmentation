@@ -2,7 +2,7 @@
 
 Usage with an explicit run directory:
 
-    python -m scripts.plot_run_history --run-dir runs/baseline_unet/20260410_205441
+    python -m plot_scripts.plot_run_history --run-dir runs/baseline_unet/20260410_205441
 
 If you prefer copy-paste editing, you can also set ``DEFAULT_RUN_DIR`` below
 and run the script without any flags.
@@ -18,6 +18,12 @@ import matplotlib.pyplot as plt
 # Optional convenience override. Paste a run directory here if you do not want
 # to pass --run-dir every time.
 DEFAULT_RUN_DIR = None
+
+FIGURE_DPI = 240
+AXIS_LABEL_SIZE = 14
+TICK_LABEL_SIZE = 12
+LEGEND_FONT_SIZE = 12
+TITLE_SIZE = 15
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
@@ -42,6 +48,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Display the figure interactively after saving.",
     )
+    parser.add_argument(
+        "--include-title",
+        action="store_true",
+        help="Add an on-figure title. Useful for standalone viewing, but usually unnecessary in LaTeX.",
+    )
     return parser
 
 
@@ -61,7 +72,7 @@ def resolve_run_dir(args: argparse.Namespace) -> Path:
     run_dir = args.run_dir if args.run_dir is not None else DEFAULT_RUN_DIR
     if run_dir is None:
         raise ValueError(
-            "No run directory was provided. Pass --run-dir or set DEFAULT_RUN_DIR in scripts/plot_run_history.py."
+            "No run directory was provided. Pass --run-dir or set DEFAULT_RUN_DIR in plot_scripts/plot_run_history.py."
         )
     return Path(run_dir).resolve()
 
@@ -77,7 +88,14 @@ def extract_series(history_entries: list[dict], metric_name: str) -> tuple[list[
     return epochs, values
 
 
-def build_training_curve_figure(history_entries: list[dict], run_name: str):
+def style_axis(axis) -> None:
+    """Apply a readable default style for report figures."""
+    axis.tick_params(axis="both", labelsize=TICK_LABEL_SIZE)
+    axis.grid(True, alpha=0.25)
+    axis.legend(fontsize=LEGEND_FONT_SIZE)
+
+
+def build_training_curve_figure(history_entries: list[dict], run_name: str, include_title: bool):
     """Build the main loss, dice, and learning-rate figure for one run."""
     train_loss_epochs, train_loss_values = extract_series(history_entries, "train_loss")
     val_loss_epochs, val_loss_values = extract_series(history_entries, "val_loss")
@@ -86,29 +104,41 @@ def build_training_curve_figure(history_entries: list[dict], run_name: str):
     lr_epochs, lr_values = extract_series(history_entries, "learning_rate")
 
     figure, axes = plt.subplots(3, 1, figsize=(10, 11), sharex=True)
-    figure.suptitle(f"Training Curves: {run_name}", fontsize=14)
+    if include_title:
+        figure.suptitle(f"Training Curves: {run_name}", fontsize=TITLE_SIZE)
 
     axes[0].plot(train_loss_epochs, train_loss_values, label="Train loss", color="#1f77b4", linewidth=2.0)
     if val_loss_epochs:
-        axes[0].plot(val_loss_epochs, val_loss_values, label="Validation loss", color="#ff7f0e", marker="o")
-    axes[0].set_ylabel("Loss")
-    axes[0].grid(True, alpha=0.25)
-    axes[0].legend()
+        axes[0].plot(
+            val_loss_epochs,
+            val_loss_values,
+            label="Validation loss",
+            color="#ff7f0e",
+            marker="o",
+            markersize=6,
+        )
+    axes[0].set_ylabel("Loss", fontsize=AXIS_LABEL_SIZE)
+    style_axis(axes[0])
 
     axes[1].plot(train_dice_epochs, train_dice_values, label="Train Dice", color="#2ca02c", linewidth=2.0)
     if val_dice_epochs:
-        axes[1].plot(val_dice_epochs, val_dice_values, label="Validation Dice", color="#d62728", marker="o")
-    axes[1].set_ylabel("Dice")
-    axes[1].grid(True, alpha=0.25)
-    axes[1].legend()
+        axes[1].plot(
+            val_dice_epochs,
+            val_dice_values,
+            label="Validation Dice",
+            color="#d62728",
+            marker="o",
+            markersize=6,
+        )
+    axes[1].set_ylabel("Dice", fontsize=AXIS_LABEL_SIZE)
+    style_axis(axes[1])
 
     axes[2].plot(lr_epochs, lr_values, label="Learning rate", color="#9467bd", linewidth=2.0)
-    axes[2].set_xlabel("Epoch")
-    axes[2].set_ylabel("LR")
-    axes[2].grid(True, alpha=0.25)
-    axes[2].legend()
+    axes[2].set_xlabel("Epoch", fontsize=AXIS_LABEL_SIZE)
+    axes[2].set_ylabel("LR", fontsize=AXIS_LABEL_SIZE)
+    style_axis(axes[2])
 
-    figure.tight_layout()
+    figure.tight_layout(rect=(0.0, 0.0, 1.0, 0.98) if include_title else None)
     return figure
 
 
@@ -139,8 +169,12 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     run_name = run_dir.parent.name
-    figure = build_training_curve_figure(history_entries, run_name=run_name)
-    figure.savefig(output_dir / "training_curves.png", dpi=200, bbox_inches="tight")
+    figure = build_training_curve_figure(
+        history_entries,
+        run_name=run_name,
+        include_title=args.include_title,
+    )
+    figure.savefig(output_dir / "training_curves.png", dpi=FIGURE_DPI, bbox_inches="tight")
 
     summary = {
         "run_name": run_name,

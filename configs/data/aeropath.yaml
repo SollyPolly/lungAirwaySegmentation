@@ -14,5 +14,5 @@ airway_mask_filename: "{case_id}_CT_HR_label_airways.nii.gz"
 
 preprocessing:
   crop_margin_voxels: 5
-  hu_window: [-1024.0, 600.0]
+  hu_window: [-1024, 2048] #  [-1024.0, 600.0]
   include_lung_mask: true

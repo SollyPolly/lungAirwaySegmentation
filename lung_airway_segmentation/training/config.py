@@ -149,6 +149,75 @@ def build_resolved_training_config(
     return resolved
 
 
+def validate_model_config(model_config: dict) -> None:
+    """Validate one model config before building the network."""
+    model_name = str(model_config.get("model_name", "")).lower()
+
+    if model_name == "baseline_unet":
+        if int(model_config["spatial_dims"]) != 3:
+            raise ValueError("baseline_unet currently requires spatial_dims = 3.")
+        if int(model_config["in_channels"]) <= 0:
+            raise ValueError("baseline_unet.in_channels must be positive.")
+        if int(model_config["out_channels"]) <= 0:
+            raise ValueError("baseline_unet.out_channels must be positive.")
+        if len(model_config["channels"]) < 2:
+            raise ValueError("baseline_unet.channels must define at least two stages.")
+        if len(model_config["strides"]) != len(model_config["channels"]) - 1:
+            raise ValueError("baseline_unet.strides must be one shorter than channels.")
+        if int(model_config["num_res_units"]) < 0:
+            raise ValueError("baseline_unet.num_res_units must be non-negative.")
+        if float(model_config["dropout"]) < 0.0:
+            raise ValueError("baseline_unet.dropout must be non-negative.")
+        return
+
+    if model_name == "ct_fm_segresnet":
+        if int(model_config["spatial_dims"]) != 3:
+            raise ValueError("ct_fm_segresnet currently requires spatial_dims = 3.")
+        if int(model_config["in_channels"]) != 1:
+            raise ValueError("ct_fm_segresnet currently requires in_channels = 1.")
+        if int(model_config["out_channels"]) <= 0:
+            raise ValueError("ct_fm_segresnet.out_channels must be positive.")
+        if int(model_config["init_filters"]) <= 0:
+            raise ValueError("ct_fm_segresnet.init_filters must be positive.")
+        if len(model_config["blocks_down"]) == 0:
+            raise ValueError("ct_fm_segresnet.blocks_down must not be empty.")
+        if int(model_config.get("dsdepth", 1)) != 1:
+            raise ValueError("ct_fm_segresnet.dsdepth must be 1 for the current training loop.")
+
+        pretrained = model_config.get("pretrained", {})
+        if not isinstance(pretrained, dict):
+            raise ValueError("ct_fm_segresnet.pretrained must be a mapping.")
+        if not isinstance(pretrained.get("enabled", True), bool):
+            raise ValueError("ct_fm_segresnet.pretrained.enabled must be a boolean.")
+
+        if pretrained.get("enabled", True):
+            source = str(pretrained.get("source", "local")).lower()
+            variant = str(pretrained.get("variant", "encoder")).lower()
+
+            if source not in {"local", "hub"}:
+                raise ValueError("ct_fm_segresnet.pretrained.source must be 'local' or 'hub'.")
+            if variant not in {"encoder", "segresnet"}:
+                raise ValueError(
+                    "ct_fm_segresnet.pretrained.variant must be 'encoder' or 'segresnet'."
+                )
+            if source == "local":
+                if variant != "encoder":
+                    raise ValueError(
+                        "Local CT-FM loading currently supports only pretrained.variant = 'encoder'."
+                    )
+                path_value = pretrained.get("path")
+                if path_value is None:
+                    raise ValueError("Local CT-FM loading requires ct_fm_segresnet.pretrained.path.")
+
+                resolved_path = resolve_project_path(path_value)
+                if not resolved_path.is_dir():
+                    raise ValueError(f"Local CT-FM checkpoint directory does not exist: {resolved_path}")
+
+        return
+
+    raise ValueError(f"Unsupported model_name: {model_name}")
+
+
 def validate_training_config(training_config: dict) -> None:
     """Validate the resolved training config before running experiments."""
     training_regime = training_config["training_regime"]

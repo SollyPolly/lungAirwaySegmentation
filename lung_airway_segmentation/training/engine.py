@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import re
 from datetime import datetime
 
 import torch
@@ -19,6 +20,7 @@ from lung_airway_segmentation.training.config import (
     load_yaml_config,
     resolve_device,
     resolve_project_path,
+    validate_model_config,
     validate_training_config,
 )
 from lung_airway_segmentation.training.loops import train_one_epoch, validate_one_epoch
@@ -47,10 +49,21 @@ def write_json(data, output_path):
         json.dump(data, file, indent=2)
 
 
-def build_run_dir(experiment_name):
-    """Create a timestamped run directory for one baseline experiment."""
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return RUNS_ROOT / experiment_name / timestamp
+def slugify_run_component(value: str) -> str:
+    """Convert one run-directory label to a safe readable slug."""
+    value = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip())
+    value = re.sub(r"-{2,}", "-", value).strip("-")
+    return value or "run"
+
+
+def build_run_dir(experiment_name, model_name, created_at=None):
+    """Create a readable run directory grouped by experiment and labeled by model."""
+    created_at = created_at or datetime.now()
+    timestamp = created_at.strftime("%Y-%m-%d__%H-%M-%S")
+    experiment_slug = slugify_run_component(str(experiment_name))
+    model_slug = slugify_run_component(str(model_name))
+    run_name = f"{timestamp}__{model_slug}"
+    return RUNS_ROOT / experiment_slug / run_name
 
 
 def initialize_run_artifacts(run_dir, run_metadata, resolved_config):
@@ -74,6 +87,7 @@ def run_supervised_training(args: argparse.Namespace) -> None:
     training_config = load_yaml_config(args.training_config)
 
     resolved_training_config = build_resolved_training_config(training_config, args)
+    validate_model_config(model_config)
     validate_training_config(resolved_training_config)
 
     device = resolve_device(args.device)
@@ -104,7 +118,12 @@ def run_supervised_training(args: argparse.Namespace) -> None:
     use_amp = bool(resolved_training_config.get("amp", {}).get("enabled", False)) and device.type == "cuda"
     scaler = torch.amp.GradScaler(device.type, enabled=use_amp)
 
-    run_dir = build_run_dir(resolved_training_config["experiment_name"])
+    run_started_at = datetime.now()
+    run_dir = build_run_dir(
+        resolved_training_config["experiment_name"],
+        model_config["model_name"],
+        created_at=run_started_at,
+    )
     best_val_dice = -1.0
     best_epoch = 0
     history = []
@@ -129,7 +148,9 @@ def run_supervised_training(args: argparse.Namespace) -> None:
     run_metadata = {
         "experiment_name": resolved_training_config["experiment_name"],
         "description": run_description,
-        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "created_at": run_started_at.isoformat(timespec="seconds"),
+        "run_name": run_dir.name,
+        "run_dir": str(run_dir),
         "config_files": {
             "data": str(args.data_config),
             "model": str(args.model_config),

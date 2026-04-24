@@ -11,21 +11,47 @@ from lung_airway_segmentation.datasets.splits import create_train_val_test_split
 from lung_airway_segmentation.io.case_layout import list_case_ids
 from lung_airway_segmentation.losses.segmentation import CombinedSegmentationLoss
 from lung_airway_segmentation.models.baseline_unet import build_baseline_unet
+from lung_airway_segmentation.models.ct_fm_segresnet import build_ct_fm_segresnet
 
 
 def build_model(device, model_config: dict):
-    """Build the configured baseline model and move it to the target device."""
-    return build_baseline_unet(
-        spatial_dims=int(model_config["spatial_dims"]),
-        in_channels=int(model_config["in_channels"]),
-        out_channels=int(model_config["out_channels"]),
-        channels=tuple(int(value) for value in model_config["channels"]),
-        strides=tuple(int(value) for value in model_config["strides"]),
-        num_res_units=int(model_config["num_res_units"]),
-        dropout=float(model_config["dropout"]),
-        norm=str(model_config["norm"]).upper(),
-        act=str(model_config["act"]).upper(),
-    ).to(device)
+    """Build the configured model and move it to the target device."""
+    model_name = str(model_config["model_name"]).lower()
+
+    if model_name == "baseline_unet":
+        model = build_baseline_unet(
+            spatial_dims=int(model_config["spatial_dims"]),
+            in_channels=int(model_config["in_channels"]),
+            out_channels=int(model_config["out_channels"]),
+            channels=tuple(int(value) for value in model_config["channels"]),
+            strides=tuple(int(value) for value in model_config["strides"]),
+            num_res_units=int(model_config["num_res_units"]),
+            dropout=float(model_config["dropout"]),
+            norm=str(model_config["norm"]).upper(),
+            act=str(model_config["act"]).upper(),
+        )
+    elif model_name == "ct_fm_segresnet":
+        pretrained_config = model_config.get("pretrained", {})
+        model = build_ct_fm_segresnet(
+            spatial_dims=int(model_config["spatial_dims"]),
+            in_channels=int(model_config["in_channels"]),
+            out_channels=int(model_config["out_channels"]),
+            init_filters=int(model_config["init_filters"]),
+            blocks_down=tuple(int(value) for value in model_config["blocks_down"]),
+            dsdepth=int(model_config.get("dsdepth", 1)),
+            act=str(model_config.get("act", "relu")),
+            norm=str(model_config.get("norm", "batch")),
+            pretrained_enabled=bool(pretrained_config.get("enabled", True)),
+            pretrained_source=str(pretrained_config.get("source", "local")),
+            pretrained_variant=str(pretrained_config.get("variant", "encoder")),
+            pretrained_path=pretrained_config.get("path"),
+            pretrained_repo_id=pretrained_config.get("repo_id"),
+            freeze_encoder=bool(pretrained_config.get("freeze_encoder", False)),
+        )
+    else:
+        raise ValueError(f"Unsupported model_name: {model_name}")
+
+    return model.to(device)
 
 
 def build_case_splits(data_root, training_config: dict) -> tuple[list[str], list[str], list[str]]:
