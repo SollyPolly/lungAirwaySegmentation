@@ -12,7 +12,7 @@ act: relu
 
 pretrained:
   enabled: true
-  source: local
+  source: hub
   variant: encoder
-  path: CT_FM_Feature_Extractor
+  repo_id: project-lighter/ct_fm_feature_extractor
   freeze_encoder: false

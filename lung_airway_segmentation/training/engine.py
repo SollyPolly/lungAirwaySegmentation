@@ -24,6 +24,7 @@ from lung_airway_segmentation.training.config import (
     validate_training_config,
 )
 from lung_airway_segmentation.training.loops import train_one_epoch, validate_one_epoch
+from lung_airway_segmentation.reporting.run_index import refresh_run_index
 
 
 def save_checkpoint(model, optimizer, epoch, metrics, output_path, scheduler=None):
@@ -78,6 +79,8 @@ def initialize_run_artifacts(run_dir, run_metadata, resolved_config):
             "Add baseline run notes here.\n",
             encoding="utf-8",
         )
+
+    refresh_run_index()
 
 
 def run_supervised_training(args: argparse.Namespace) -> None:
@@ -274,6 +277,7 @@ def run_supervised_training(args: argparse.Namespace) -> None:
             run_dir / "history.json",
         )
 
+    refresh_run_index()
     print("Training finished.")
     print(f"Run directory: {run_dir}")
     print(f"Held-out test cases: {len(test_ids)}")

@@ -17,6 +17,7 @@ from lung_airway_segmentation.metrics.segmentation import (
     binary_precision_from_masks,
     binary_recall_from_masks,
 )
+from lung_airway_segmentation.reporting.run_index import refresh_run_index
 from lung_airway_segmentation.settings import RAW_AEROPATH_ROOT
 from lung_airway_segmentation.training.config import resolve_project_path
 
@@ -230,6 +231,7 @@ def main() -> None:
     write_case_metrics_csv(case_metrics, output_dir / "per_case_metrics.csv")
     write_json(case_metrics, output_dir / "per_case_metrics.json")
     write_json(summary, output_dir / "summary.json")
+    refresh_run_index()
 
     print(f"Evaluated {len(case_metrics)} case(s) from {predictions_dir}")
     print(f"Mean Dice: {summary['dice_mean']:.4f}")
