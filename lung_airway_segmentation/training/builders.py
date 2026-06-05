@@ -12,6 +12,7 @@ from lung_airway_segmentation.io.case_layout import list_case_ids
 from lung_airway_segmentation.losses.segmentation import CombinedSegmentationLoss
 from lung_airway_segmentation.models.baseline_unet import build_baseline_unet
 from lung_airway_segmentation.models.ct_fm_segresnet import build_ct_fm_segresnet
+from lung_airway_segmentation.preprocessing.geometry import normalize_margin
 
 
 def build_model(device, model_config: dict):
@@ -78,7 +79,7 @@ def build_datasets(
     training_regime = training_config["training_regime"]
     sampling = training_config["sampling"]
     preprocessing = data_config["preprocessing"]
-    crop_margin_voxels = int(preprocessing["crop_margin_voxels"])
+    crop_margin_voxels = normalize_margin(preprocessing["crop_margin_voxels"])
     hu_window = tuple(float(value) for value in preprocessing["hu_window"])
 
     if training_regime == "full_volume":

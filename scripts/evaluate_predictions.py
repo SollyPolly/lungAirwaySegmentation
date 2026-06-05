@@ -57,6 +57,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional subset of case IDs to evaluate. Defaults to all saved prediction cases.",
     )
+    parser.add_argument(
+        "--prediction-filename",
+        default="airway_pred_full.nii.gz",
+        help="Prediction mask filename within each case directory.",
+    )
     return parser
 
 
@@ -123,10 +128,15 @@ def load_binary_nifti_mask(path: Path) -> np.ndarray:
     return np.asarray(nib.load(str(path)).dataobj) > 0
 
 
-def evaluate_prediction_case(case_id: str, prediction_case_dir: Path, data_root: Path) -> dict:
+def evaluate_prediction_case(
+    case_id: str,
+    prediction_case_dir: Path,
+    data_root: Path,
+    prediction_filename: str,
+) -> dict:
     """Evaluate one saved prediction case against the reference airway mask."""
     prediction_metadata = load_json(prediction_case_dir / "prediction_metadata.json")
-    prediction_mask_path = prediction_case_dir / "airway_pred_full.nii.gz"
+    prediction_mask_path = prediction_case_dir / prediction_filename
     if not prediction_mask_path.is_file():
         raise FileNotFoundError(f"Missing predicted full-volume mask: {prediction_mask_path}")
 
@@ -223,7 +233,7 @@ def main() -> None:
         raise ValueError(f"No saved prediction cases were found in {predictions_dir}.")
 
     case_metrics = [
-        evaluate_prediction_case(case_dir.name, case_dir, data_root)
+        evaluate_prediction_case(case_dir.name, case_dir, data_root, args.prediction_filename)
         for case_dir in case_dirs
     ]
     summary = summarize_case_metrics(case_metrics)

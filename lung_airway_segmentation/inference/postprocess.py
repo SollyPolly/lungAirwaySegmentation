@@ -1,6 +1,8 @@
 """Prediction cleanup and heuristic filtering."""
 
+import numpy as np
 import torch
+from scipy import ndimage
 
 
 def binarize_logits(logits: torch.Tensor, threshold: float = 0.5) -> torch.Tensor:
@@ -8,12 +10,22 @@ def binarize_logits(logits: torch.Tensor, threshold: float = 0.5) -> torch.Tenso
     return (torch.sigmoid(logits) >= threshold).float()
 
 
-def apply_lung_mask(predictions: torch.Tensor, lung_mask: torch.Tensor) -> torch.Tensor:
-    """Zero out airway predictions outside the lung region.
+def keep_largest_connected_component(binary_mask: np.ndarray) -> np.ndarray:
+    """Keep only the largest 6-connected component of a 3D binary mask.
 
-    The sliding window runs over the full lung bounding box. Within that box,
-    predictions can leak into vertebrae and chest-wall voxels at the edges.
-    Multiplying by the binary lung mask suppresses those false positives before
-    computing any metric or saving a result.
+    This can remove isolated false-positive blobs, but it can also remove true
+    airway branches when the prediction is disconnected. Preserve and evaluate
+    the raw prediction before adopting this as routine postprocessing.
     """
-    return predictions * (lung_mask > 0).float().to(predictions.device)
+    if binary_mask.ndim != 3:
+        raise ValueError(f"Expected a 3D binary mask, got shape {binary_mask.shape}.")
+
+    foreground = binary_mask > 0
+    connectivity = ndimage.generate_binary_structure(rank=3, connectivity=1)
+    labeled, num_components = ndimage.label(foreground, structure=connectivity)
+    if num_components == 0:
+        return np.zeros_like(binary_mask)
+
+    component_sizes = np.bincount(labeled.ravel())[1:]
+    largest = int(np.argmax(component_sizes)) + 1
+    return (labeled == largest).astype(binary_mask.dtype)

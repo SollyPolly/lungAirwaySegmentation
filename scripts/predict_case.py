@@ -8,7 +8,9 @@ import nibabel as nib
 import numpy as np
 import torch
 
+from lung_airway_segmentation.inference.postprocess import keep_largest_connected_component
 from lung_airway_segmentation.inference.sliding_window import predict_logits_for_volume
+from lung_airway_segmentation.preprocessing.geometry import normalize_margin
 from lung_airway_segmentation.preprocessing.pipeline import preprocess_case
 from lung_airway_segmentation.training.builders import build_model
 from lung_airway_segmentation.training.config import resolve_device, resolve_project_path
@@ -73,9 +75,28 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help="Optional sliding-window overlap override. Defaults to the saved run config.",
     )
     parser.add_argument(
+        "--crop-margin",
+        type=int,
+        nargs=3,
+        default=None,
+        metavar=("X", "Y", "Z"),
+        help=(
+            "Optional lung bounding-box margin override for each canonical axis. "
+            "Use 5 5 1000 to preserve the full superior-inferior airway extent."
+        ),
+    )
+    parser.add_argument(
         "--save-probabilities",
         action="store_true",
         help="Also save the probability volume as a NIfTI file.",
+    )
+    parser.add_argument(
+        "--largest-component",
+        action="store_true",
+        help=(
+            "Also save a mask containing only the largest connected component. "
+            "The raw binary prediction is always preserved."
+        ),
     )
     return parser
 
@@ -165,6 +186,8 @@ def build_prediction_metadata(
         if args.inference_overlap is not None
         else resolved_config["training"]["validation"]["inference_overlap"],
         "amp_enabled": bool(resolved_config["training"].get("amp", {}).get("enabled", False)),
+        "largest_component_saved": bool(args.largest_component),
+        "crop_margin": list(case.metadata["crop_margin"]),
     }
 
 
@@ -183,13 +206,18 @@ def main() -> None:
         else resolve_project_path(resolved_config["data"]["raw_data_root"])
     )
     preprocessing_config = resolved_config["data"]["preprocessing"]
+    crop_margin = normalize_margin(
+        args.crop_margin
+        if args.crop_margin is not None
+        else preprocessing_config["crop_margin_voxels"]
+    )
 
     case = preprocess_case(
         args.case_id,
         data_root=data_root,
         include_lung_mask=True,
         hu_window=tuple(float(value) for value in preprocessing_config["hu_window"]),
-        crop_margin=int(preprocessing_config["crop_margin_voxels"]),
+        crop_margin=crop_margin,
     )
 
     model, checkpoint = load_model_from_checkpoint(
@@ -238,6 +266,25 @@ def main() -> None:
         case.metadata["original_affine"],
         case_output_dir / "airway_pred_full.nii.gz",
     )
+
+    if args.largest_component:
+        prediction_lcc_cropped = keep_largest_connected_component(prediction_cropped)
+        prediction_lcc_full = restore_cropped_volume(
+            prediction_lcc_cropped,
+            case.crop_box,
+            original_shape,
+            fill_value=0,
+        )
+        save_nifti_volume(
+            prediction_lcc_cropped,
+            case.affine,
+            case_output_dir / "airway_pred_lcc_cropped.nii.gz",
+        )
+        save_nifti_volume(
+            prediction_lcc_full,
+            case.metadata["original_affine"],
+            case_output_dir / "airway_pred_lcc_full.nii.gz",
+        )
 
     if args.save_probabilities:
         probabilities_full = restore_cropped_volume(

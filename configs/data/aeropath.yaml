@@ -13,6 +13,6 @@ lung_mask_filename: "{case_id}_CT_HR_label_lungs.nii.gz"
 airway_mask_filename: "{case_id}_CT_HR_label_airways.nii.gz"
 
 preprocessing:
-  crop_margin_voxels: 5
+  # Preserve the full canonical superior-inferior axis so the trachea is not cropped.
+  crop_margin_voxels: [5, 5, 1000]
   hu_window: [-1024, 2048] #  [-1024.0, 600.0]
-  include_lung_mask: true

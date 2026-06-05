@@ -67,7 +67,7 @@ def build_train_transforms(
     patches_per_case: int,
     foreground_probability: float,
     hu_window: tuple[float, float] = DEFAULT_HU_WINDOW,
-    crop_margin_voxels: int = 0,
+    crop_margin_voxels: int | tuple[int, int, int] = 0,
 ) -> Compose:
     """Build MONAI transforms for patch-based supervised training."""
     patch_size = normalize_patch_size(patch_size)
@@ -88,6 +88,7 @@ def build_train_transforms(
                 keys=keys,
                 source_key="lung_mask",
                 margin=crop_margin_voxels,
+                allow_smaller=True,
             ),
             ScaleIntensityRanged(
                 keys="image",
@@ -129,7 +130,7 @@ def build_train_transforms(
 def build_full_volume_train_transforms(
     *,
     hu_window: tuple[float, float] = DEFAULT_HU_WINDOW,
-    crop_margin_voxels: int = 0,
+    crop_margin_voxels: int | tuple[int, int, int] = 0,
     divisible_k: int = 16,
 ) -> Compose:
     """Build MONAI transforms for full-volume supervised training."""
@@ -145,6 +146,7 @@ def build_full_volume_train_transforms(
                 keys=keys,
                 source_key="lung_mask",
                 margin=crop_margin_voxels,
+                allow_smaller=True,
             ),
             ScaleIntensityRanged(
                 keys="image",
@@ -176,7 +178,7 @@ def build_full_volume_train_transforms(
 def build_val_transforms(
     *,
     hu_window: tuple[float, float] = DEFAULT_HU_WINDOW,
-    crop_margin_voxels: int = 0,
+    crop_margin_voxels: int | tuple[int, int, int] = 0,
     divisible_k: int | None = None,
 ) -> Compose:
     """Build MONAI transforms for full-volume validation."""
@@ -190,6 +192,7 @@ def build_val_transforms(
             keys=keys,
             source_key="lung_mask",
             margin=crop_margin_voxels,
+            allow_smaller=True,
         ),
         ScaleIntensityRanged(
             keys="image",
@@ -215,7 +218,7 @@ def build_monai_aeropath_datasets(
     patches_per_case: int,
     foreground_probability: float,
     cache_rate: float = 0.0,
-    crop_margin_voxels: int = 0,
+    crop_margin_voxels: int | tuple[int, int, int] = 0,
     hu_window: tuple[float, float] = DEFAULT_HU_WINDOW,
 ) -> tuple[Dataset, Dataset]:
     """Build MONAI train and validation datasets for labelled AeroPath data."""
@@ -265,7 +268,7 @@ def build_monai_aeropath_full_volume_datasets(
     val_ids,
     data_root: Path = RAW_AEROPATH_ROOT,
     cache_rate: float = 0.0,
-    crop_margin_voxels: int = 0,
+    crop_margin_voxels: int | tuple[int, int, int] = 0,
     hu_window: tuple[float, float] = DEFAULT_HU_WINDOW,
     divisible_k: int = 16,
 ) -> tuple[Dataset, Dataset]:

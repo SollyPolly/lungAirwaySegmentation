@@ -613,11 +613,10 @@ def _(
         run_dirs = []
         for metadata_path in run_root.rglob("run_metadata.json"):
             run_dir = metadata_path.parent
-            predictions_dir = run_dir / "predictions"
-            if not predictions_dir.is_dir():
-                continue
             has_case_predictions = any(
                 (case_dir / "prediction_metadata.json").is_file()
+                for predictions_dir in run_dir.glob("predictions*")
+                if predictions_dir.is_dir()
                 for case_dir in predictions_dir.iterdir()
                 if case_dir.is_dir()
             )
@@ -653,20 +652,52 @@ def _(
 
         return RAW_AEROPATH_ROOT.resolve()
 
-    def list_prediction_case_ids(run_root, run_name):
+    def list_prediction_set_names(run_root, run_name):
         if run_name is None:
             return []
 
-        predictions_dir = resolve_prediction_run_dir(run_root, run_name) / "predictions"
-        if not predictions_dir.exists():
+        run_dir = resolve_prediction_run_dir(run_root, run_name)
+        prediction_sets = [
+            path.name
+            for path in run_dir.glob("predictions*")
+            if path.is_dir()
+            and any(
+                case_dir.is_dir() and (case_dir / "prediction_metadata.json").is_file()
+                for case_dir in path.iterdir()
+            )
+        ]
+        return sorted(prediction_sets, key=lambda name: (name != "predictions_safe_crop", name))
+
+    def list_prediction_case_ids(run_root, run_name, prediction_set_name):
+        if run_name is None or prediction_set_name is None:
             return []
 
+        predictions_dir = resolve_prediction_run_dir(run_root, run_name) / prediction_set_name
         case_ids = [
             case_dir.name
             for case_dir in predictions_dir.iterdir()
             if case_dir.is_dir() and (case_dir / "prediction_metadata.json").is_file()
         ]
         return sorted(case_ids, key=lambda value: (not value.isdigit(), int(value) if value.isdigit() else value))
+
+    def list_prediction_mask_options(run_root, run_name, prediction_set_name, case_id):
+        if run_name is None or prediction_set_name is None or case_id is None:
+            return {}
+
+        case_dir = resolve_prediction_run_dir(run_root, run_name) / prediction_set_name / str(case_id)
+        mask_paths = [
+            path
+            for path in case_dir.glob("airway_pred*_full.nii.gz")
+            if "lung_masked" not in path.name
+        ]
+        label_by_name = {
+            "airway_pred_full.nii.gz": "Raw prediction",
+            "airway_pred_lcc_full.nii.gz": "Largest component (6-connectivity)",
+        }
+        return {
+            label_by_name.get(path.name, path.name): path.name
+            for path in sorted(mask_paths, key=lambda path: (path.name != "airway_pred_lcc_full.nii.gz", path.name))
+        }
 
     def preferred_prediction_run_name(run_names):
         preferred_suffix = Path("baseline_unet_patches") / "20260417_232126"
@@ -680,11 +711,11 @@ def _(
     def preferred_prediction_case_id(case_ids):
         return "20" if "20" in case_ids else case_ids[0] if case_ids else None
 
-    def load_prediction_bundle(run_root, run_name, case_id):
+    def load_prediction_bundle(run_root, run_name, prediction_set_name, case_id, prediction_mask_filename):
         run_dir = resolve_prediction_run_dir(run_root, run_name)
-        prediction_case_dir = run_dir / "predictions" / str(case_id)
+        prediction_case_dir = run_dir / prediction_set_name / str(case_id)
         prediction_metadata_path = prediction_case_dir / "prediction_metadata.json"
-        prediction_mask_path = prediction_case_dir / "airway_pred_full.nii.gz"
+        prediction_mask_path = prediction_case_dir / prediction_mask_filename
 
         if not prediction_metadata_path.exists():
             raise FileNotFoundError(f"Missing prediction metadata: {prediction_metadata_path}")
@@ -758,6 +789,8 @@ def _(
         return {
             "run_dir": run_dir,
             "run_name": run_name,
+            "prediction_set_name": prediction_set_name,
+            "prediction_mask_filename": prediction_mask_filename,
             "case_id": str(case_id),
             "ct_path": case_paths["ct"],
             "lung_mask_path": case_paths["lung"],
@@ -782,7 +815,9 @@ def _(
 
     return (
         list_prediction_case_ids,
+        list_prediction_mask_options,
         list_prediction_run_names,
+        list_prediction_set_names,
         load_prediction_bundle,
         prediction_run_root,
         preferred_prediction_case_id,
@@ -850,19 +885,53 @@ def _(
 
 @app.cell
 def _(
+    list_prediction_set_names,
+    mo,
+    prediction_run_root,
+    prediction_run_selector,
+    prediction_runs_available,
+):
+    if not prediction_runs_available or prediction_run_selector is None:
+        prediction_set_selector = None
+    else:
+        prediction_set_names = list_prediction_set_names(
+            prediction_run_root,
+            prediction_run_selector.value,
+        )
+        prediction_set_selector = (
+            mo.ui.dropdown(
+                prediction_set_names,
+                value=prediction_set_names[0],
+                label="Prediction set",
+                searchable=True,
+            )
+            if prediction_set_names
+            else None
+        )
+    return (prediction_set_selector,)
+
+
+@app.cell
+def _(
     list_prediction_case_ids,
     mo,
     prediction_run_root,
     prediction_run_selector,
     prediction_runs_available,
+    prediction_set_selector,
     preferred_prediction_case_id,
 ):
-    if not prediction_runs_available or prediction_run_selector is None:
+    if (
+        not prediction_runs_available
+        or prediction_run_selector is None
+        or prediction_set_selector is None
+    ):
         prediction_case_selector = None
     else:
         prediction_case_ids = list_prediction_case_ids(
             prediction_run_root,
             prediction_run_selector.value,
+            prediction_set_selector.value,
         )
         prediction_case_selector = (
             mo.ui.dropdown(
@@ -879,24 +948,66 @@ def _(
 
 @app.cell
 def _(
-    load_prediction_bundle,
+    list_prediction_mask_options,
+    mo,
     prediction_case_selector,
     prediction_run_root,
     prediction_run_selector,
+    prediction_set_selector,
+):
+    if (
+        prediction_run_selector is None
+        or prediction_set_selector is None
+        or prediction_case_selector is None
+    ):
+        prediction_mask_selector = None
+    else:
+        prediction_mask_options = list_prediction_mask_options(
+            prediction_run_root,
+            prediction_run_selector.value,
+            prediction_set_selector.value,
+            prediction_case_selector.value,
+        )
+        prediction_mask_selector = (
+            mo.ui.dropdown(
+                prediction_mask_options,
+                value=next(iter(prediction_mask_options)),
+                label="Prediction mask",
+            )
+            if prediction_mask_options
+            else None
+        )
+    return (prediction_mask_selector,)
+
+
+@app.cell
+def _(
+    load_prediction_bundle,
+    prediction_case_selector,
+    prediction_mask_selector,
+    prediction_run_root,
+    prediction_run_selector,
     prediction_runs_available,
+    prediction_set_selector,
 ):
     if not prediction_runs_available or prediction_run_selector is None:
         prediction_bundle = None
         prediction_bundle_error = None
-    elif prediction_case_selector is None:
+    elif (
+        prediction_set_selector is None
+        or prediction_case_selector is None
+        or prediction_mask_selector is None
+    ):
         prediction_bundle = None
-        prediction_bundle_error = "Selected run does not contain any saved case predictions."
+        prediction_bundle_error = "Selected run does not contain a usable saved prediction mask."
     else:
         try:
             prediction_bundle = load_prediction_bundle(
                 prediction_run_root,
                 prediction_run_selector.value,
+                prediction_set_selector.value,
                 prediction_case_selector.value,
+                prediction_mask_selector.value,
             )
             prediction_bundle_error = None
         except Exception as error:
@@ -1073,9 +1184,11 @@ def _(
     prediction_bundle,
     prediction_bundle_error,
     prediction_case_selector,
+    prediction_mask_selector,
     prediction_plane_selector,
     prediction_run_selector,
     prediction_runs_available,
+    prediction_set_selector,
     prediction_slice_slider,
     prediction_view_height_slider,
     show_predicted_mask,
@@ -1093,8 +1206,8 @@ def _(
             [
                 mo.md("## Saved Prediction Viewer"),
                 mo.hstack(
-                    [prediction_run_selector, prediction_case_selector],
-                    widths=[1.6, 1.0],
+                    [prediction_run_selector, prediction_set_selector, prediction_case_selector],
+                    widths=[1.6, 1.0, 0.8],
                     gap=0.8,
                     wrap=True,
                     align="end",
@@ -1105,15 +1218,15 @@ def _(
         )
     else:
         prediction_primary_controls = mo.hstack(
-            [prediction_run_selector, prediction_case_selector],
-            widths=[1.6, 1.0],
+            [prediction_run_selector, prediction_set_selector, prediction_case_selector],
+            widths=[1.6, 1.0, 0.8],
             gap=0.8,
             wrap=True,
             align="end",
         )
         prediction_secondary_controls = mo.hstack(
-            [prediction_plane_selector, prediction_slice_slider],
-            widths=[1.0, 1.6],
+            [prediction_mask_selector, prediction_plane_selector, prediction_slice_slider],
+            widths=[1.4, 1.0, 1.6],
             gap=0.8,
             wrap=True,
             align="end",
@@ -1136,6 +1249,8 @@ def _(
 
         prediction_notes = [
             f"- **Run**: {prediction_bundle['run_name']}",
+            f"- **Prediction set**: `{prediction_bundle['prediction_set_name']}`",
+            f"- **Prediction mask**: `{prediction_bundle['prediction_mask_filename']}`",
             f"- **Case**: `{prediction_bundle['case_id']}`",
             f"- **Best validation Dice**: `{float(prediction_bundle['best_val_dice']):.4f}`" if prediction_bundle["best_val_dice"] is not None else "- **Best validation Dice**: unavailable",
             f"- **Checkpoint epoch**: `{int(prediction_bundle['checkpoint_epoch'])}`" if prediction_bundle["checkpoint_epoch"] is not None else "- **Checkpoint epoch**: unavailable",

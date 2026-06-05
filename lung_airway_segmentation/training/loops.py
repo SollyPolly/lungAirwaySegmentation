@@ -12,7 +12,7 @@ import torch
 
 from monai.inferers import sliding_window_inference
 
-from lung_airway_segmentation.inference.postprocess import apply_lung_mask, binarize_logits
+from lung_airway_segmentation.inference.postprocess import binarize_logits
 from lung_airway_segmentation.metrics.segmentation import (
     binary_dice_score_from_logits,
     binary_dice_score_from_masks,
@@ -105,7 +105,6 @@ def validate_one_epoch(
         for batch in dataloader:
             images = batch["image"]
             targets = batch["airway_mask"]
-            lung_mask = batch.get("lung_mask")
 
             if images.ndim == 4:
                 images = images.unsqueeze(1)
@@ -131,14 +130,14 @@ def validate_one_epoch(
                 )
                 loss = loss_fn(logits, targets)
 
-            # Binarize and suppress predictions outside the lung region.
-            # The lung bounding box still contains non-lung voxels at its edges;
-            # masking here removes those false positives before Dice is computed.
+            # Binarize logits to get the binary prediction mask.
+            # We do NOT apply the voxel-level lung parenchyma mask here because
+            # the trachea and mainstem bronchi sit in the mediastinum, outside
+            # the lung parenchyma mask, so masking would zero out central airway
+            # predictions and collapse Dice. The bounding-box crop uses the lung
+            # mask only as an in-plane ROI and preserves the full superior-
+            # inferior axis so the trachea remains available.
             predictions = binarize_logits(logits.float(), threshold=threshold)
-            if lung_mask is not None:
-                if lung_mask.ndim == 4:
-                    lung_mask = lung_mask.unsqueeze(1)
-                predictions = apply_lung_mask(predictions, lung_mask.to(device))
 
             # Compute and record per-case Dice so we can see which cases are failing.
             case_ids = batch.get("case_id", [None] * images.shape[0])

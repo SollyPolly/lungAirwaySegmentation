@@ -3,9 +3,9 @@
 experiment_name: baseline_unet
 training_regime: patch
 seed: 15
-epochs: 25
+epochs: 50
 batch_size: 1
-num_workers: 0
+num_workers: 4
 
 splits:
   train_fraction: 0.8
@@ -23,6 +23,9 @@ validation:
   roi_size: [96, 96, 96]
   sw_batch_size: 1
   inference_overlap: 0.75
+  # pos_weight=10 in BCE shifts optimal decision boundary to ~0.91; use 0.99
+  # so val Dice reflects actual usable predictions, not threshold-miscalibrated blobs.
+  threshold: 0.99
 
 optimizer:
   name: adamw

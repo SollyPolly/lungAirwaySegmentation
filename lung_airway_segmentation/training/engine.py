@@ -216,6 +216,7 @@ def run_supervised_training(args: argparse.Namespace) -> None:
                 sw_batch_size=int(validation_config["sw_batch_size"]),
                 overlap=float(validation_config["inference_overlap"]),
                 use_amp=use_amp,
+                threshold=float(validation_config.get("threshold", 0.5)),
             )
             epoch_summary["val_loss"] = val_metrics["loss"]
             epoch_summary["val_dice"] = val_metrics["dice"]
