@@ -1,7 +1,7 @@
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
-#     "marimo>=0.23.1",
+#     "marimo>=0.23.3",
 #     "nibabel",
 #     "numpy",
 #     "pandas",
@@ -12,7 +12,7 @@
 
 import marimo
 
-__generated_with = "0.23.1"
+__generated_with = "0.23.6"
 app = marimo.App()
 
 
@@ -668,6 +668,18 @@ def _(
         ]
         return sorted(case_ids, key=lambda value: (not value.isdigit(), int(value) if value.isdigit() else value))
 
+    def preferred_prediction_run_name(run_names):
+        preferred_suffix = Path("baseline_unet_patches") / "20260417_232126"
+        preferred_parts = preferred_suffix.parts
+        for run_name in run_names:
+            run_parts = Path(run_name).parts
+            if run_parts[-len(preferred_parts):] == preferred_parts:
+                return run_name
+        return run_names[0] if run_names else None
+
+    def preferred_prediction_case_id(case_ids):
+        return "20" if "20" in case_ids else case_ids[0] if case_ids else None
+
     def load_prediction_bundle(run_root, run_name, case_id):
         run_dir = resolve_prediction_run_dir(run_root, run_name)
         prediction_case_dir = run_dir / "predictions" / str(case_id)
@@ -773,18 +785,25 @@ def _(
         list_prediction_run_names,
         load_prediction_bundle,
         prediction_run_root,
+        preferred_prediction_case_id,
+        preferred_prediction_run_name,
     )
 
 
 @app.cell
-def _(list_prediction_run_names, mo, prediction_run_root):
+def _(
+    list_prediction_run_names,
+    mo,
+    prediction_run_root,
+    preferred_prediction_run_name,
+):
     prediction_run_names = list_prediction_run_names(prediction_run_root)
     prediction_runs_available = len(prediction_run_names) > 0
 
     prediction_run_selector = (
         mo.ui.dropdown(
             prediction_run_names,
-            value=prediction_run_names[0],
+            value=preferred_prediction_run_name(prediction_run_names),
             label="Prediction run",
             searchable=True,
         )
@@ -836,6 +855,7 @@ def _(
     prediction_run_root,
     prediction_run_selector,
     prediction_runs_available,
+    preferred_prediction_case_id,
 ):
     if not prediction_runs_available or prediction_run_selector is None:
         prediction_case_selector = None
@@ -847,7 +867,7 @@ def _(
         prediction_case_selector = (
             mo.ui.dropdown(
                 prediction_case_ids,
-                value=prediction_case_ids[0],
+                value=preferred_prediction_case_id(prediction_case_ids),
                 label="Predicted case",
                 searchable=True,
             )
@@ -923,12 +943,12 @@ def _(build_mask_mesh, prediction_bundle):
         prediction_true_mesh = build_mask_mesh(
             prediction_bundle["true_mask"],
             prediction_bundle["spacing"],
-            stride=5,
+            stride=2,
         )
         prediction_mask_mesh = build_mask_mesh(
             prediction_bundle["prediction_mask"],
             prediction_bundle["spacing"],
-            stride=5,
+            stride=2,
         )
     return prediction_lung_mesh, prediction_mask_mesh, prediction_true_mesh
 

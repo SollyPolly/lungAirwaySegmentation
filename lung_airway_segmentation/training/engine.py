@@ -219,13 +219,19 @@ def run_supervised_training(args: argparse.Namespace) -> None:
             )
             epoch_summary["val_loss"] = val_metrics["loss"]
             epoch_summary["val_dice"] = val_metrics["dice"]
+            epoch_summary["val_per_case_dice"] = val_metrics.get("per_case_dice", {})
 
+            per_case_str = "  ".join(
+                f"{cid}:{d:.3f}"
+                for cid, d in sorted(val_metrics.get("per_case_dice", {}).items())
+            )
             print(
                 f"Epoch {epoch + 1} / {resolved_training_config['epochs']}"
                 f" - train_loss: {train_metrics['loss']:.4f}"
                 f" - train_dice: {train_metrics['dice']:.4f}"
                 f" - val_loss: {val_metrics['loss']:.4f}"
                 f" - val_dice: {val_metrics['dice']:.4f}"
+                + (f"\n  per-case: {per_case_str}" if per_case_str else "")
             )
         else:
             val_metrics = None
