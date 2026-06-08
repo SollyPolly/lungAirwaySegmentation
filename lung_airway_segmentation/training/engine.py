@@ -137,6 +137,8 @@ def run_supervised_training(args: argparse.Namespace) -> None:
 
     run_description = args.run_description
     if run_description is None:
+        run_description = resolved_training_config.get("description")
+    if run_description is None:
         if training_regime == "patch":
             run_description = "Supervised MONAI patch-based baseline."
         else:

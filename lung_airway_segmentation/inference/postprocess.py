@@ -10,8 +10,11 @@ def binarize_logits(logits: torch.Tensor, threshold: float = 0.5) -> torch.Tenso
     return (torch.sigmoid(logits) >= threshold).float()
 
 
-def keep_largest_connected_component(binary_mask: np.ndarray) -> np.ndarray:
-    """Keep only the largest 6-connected component of a 3D binary mask.
+def keep_largest_connected_component(
+    binary_mask: np.ndarray,
+    connectivity: int = 6,
+) -> np.ndarray:
+    """Keep only the largest connected component of a 3D binary mask.
 
     This can remove isolated false-positive blobs, but it can also remove true
     airway branches when the prediction is disconnected. Preserve and evaluate
@@ -19,10 +22,13 @@ def keep_largest_connected_component(binary_mask: np.ndarray) -> np.ndarray:
     """
     if binary_mask.ndim != 3:
         raise ValueError(f"Expected a 3D binary mask, got shape {binary_mask.shape}.")
+    if connectivity not in {6, 18, 26}:
+        raise ValueError("connectivity must be one of 6, 18, or 26.")
 
     foreground = binary_mask > 0
-    connectivity = ndimage.generate_binary_structure(rank=3, connectivity=1)
-    labeled, num_components = ndimage.label(foreground, structure=connectivity)
+    connectivity_rank = {6: 1, 18: 2, 26: 3}[connectivity]
+    structure = ndimage.generate_binary_structure(rank=3, connectivity=connectivity_rank)
+    labeled, num_components = ndimage.label(foreground, structure=structure)
     if num_components == 0:
         return np.zeros_like(binary_mask)
 

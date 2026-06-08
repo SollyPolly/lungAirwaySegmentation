@@ -1,7 +1,7 @@
-# Main supervised patch-based baseline.
+# Controlled patch-based baseline retrain with reduced BCE positive-class weight.
 
-experiment_name: baseline_unet
-description: "Corrected supervised patch baseline with BCE positive-class weight 10."
+experiment_name: baseline-unet-pos-weight-3
+description: "Controlled baseline retrain with BCE positive-class weight 3; all other training settings match the corrected patch baseline."
 training_regime: patch
 seed: 15
 epochs: 50
@@ -24,9 +24,9 @@ validation:
   roi_size: [96, 96, 96]
   sw_batch_size: 1
   inference_overlap: 0.75
-  # pos_weight=10 in BCE shifts optimal decision boundary to ~0.91; use 0.99
-  # so val Dice reflects actual usable predictions, not threshold-miscalibrated blobs.
-  threshold: 0.99
+  # Provisional checkpoint-selection threshold. Sweep validation probabilities
+  # after training before choosing the final inference threshold.
+  threshold: 0.75
 
 optimizer:
   name: adamw
@@ -43,4 +43,4 @@ amp:
 loss:
   dice_weight: 1.0
   bce_weight: 1.0
-  positive_class_weight: 10.0
+  positive_class_weight: 3.0

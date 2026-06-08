@@ -30,15 +30,27 @@ RUN_INDEX_COLUMNS = [
     "scheduler_name",
     "learning_rate",
     "weight_decay",
+    "positive_class_weight",
     "pretrained_enabled",
     "freeze_encoder",
     "best_epoch",
     "best_val_dice",
+    "evaluation_name",
+    "evaluation_dir",
+    "eval_case_ids",
+    "eval_prediction_filename",
+    "eval_checkpoint_epoch",
+    "eval_threshold",
     "eval_num_cases",
     "eval_dice_mean",
     "eval_iou_mean",
     "eval_precision_mean",
     "eval_recall_mean",
+    "eval_tree_length_detected_mean",
+    "eval_branch_detected_mean",
+    "eval_cldice_mean",
+    "eval_topology_precision_mean",
+    "eval_topology_sensitivity_mean",
     "predictions_saved",
     "status",
 ]
@@ -54,6 +66,29 @@ def load_json_if_exists(path: Path) -> dict | None:
     if not isinstance(data, dict):
         raise ValueError(f"Expected {path} to contain a JSON object.")
     return data
+
+
+def load_json_list_if_exists(path: Path) -> list | None:
+    """Load one JSON file if it exists and contains a list."""
+    if not path.is_file():
+        return None
+
+    with path.open("r", encoding="utf-8") as file:
+        data = json.load(file)
+    if not isinstance(data, list):
+        raise ValueError(f"Expected {path} to contain a JSON list.")
+    return data
+
+
+def list_evaluation_dirs(run_dir: Path) -> list[Path]:
+    """List saved evaluation variants that contain a summary artifact."""
+    return sorted(
+        path
+        for path in run_dir.iterdir()
+        if path.is_dir()
+        and path.name.startswith("evaluation")
+        and (path / "summary.json").is_file()
+    )
 
 
 def detect_predictions_saved(run_dir: Path) -> bool:
@@ -102,19 +137,36 @@ def infer_training_regime(training_config: dict, run_metadata: dict) -> str:
     return ""
 
 
-def build_run_index_row(run_dir: Path, runs_root: Path = RUNS_ROOT) -> dict[str, object]:
-    """Build one flattened index row from a run directory."""
+def build_run_index_row(
+    run_dir: Path,
+    runs_root: Path = RUNS_ROOT,
+    evaluation_dir: Path | None = None,
+) -> dict[str, object]:
+    """Build one flattened index row for a run and optional evaluation variant."""
     run_metadata = load_json_if_exists(run_dir / "run_metadata.json")
     if run_metadata is None:
         raise FileNotFoundError(f"Run metadata is missing for run directory: {run_dir}")
 
     resolved_config = load_json_if_exists(run_dir / "resolved_config.json") or {}
     history = load_json_if_exists(run_dir / "history.json")
-    evaluation_summary = load_json_if_exists(run_dir / "evaluation" / "summary.json")
+    if evaluation_dir is None:
+        default_evaluation_dir = run_dir / "evaluation"
+        evaluation_dir = default_evaluation_dir if (default_evaluation_dir / "summary.json").is_file() else None
+    evaluation_summary = (
+        load_json_if_exists(evaluation_dir / "summary.json")
+        if evaluation_dir is not None
+        else None
+    )
+    per_case_metrics = (
+        load_json_list_if_exists(evaluation_dir / "per_case_metrics.json")
+        if evaluation_dir is not None
+        else None
+    ) or []
 
     training_config = resolved_config.get("training", {})
     model_config = resolved_config.get("model", {})
     optimizer_config = training_config.get("optimizer", {})
+    loss_config = training_config.get("loss", {})
     sampling_config = training_config.get("sampling", {})
     pretrained_config = model_config.get("pretrained", {}) if isinstance(model_config.get("pretrained"), dict) else {}
 
@@ -122,6 +174,9 @@ def build_run_index_row(run_dir: Path, runs_root: Path = RUNS_ROOT) -> dict[str,
     best = history.get("best", {}) if history is not None else {}
     predictions_saved = detect_predictions_saved(run_dir)
     patch_size = sampling_config.get("patch_size")
+    first_case_metrics = per_case_metrics[0] if per_case_metrics else {}
+    prediction_mask_path = Path(first_case_metrics["prediction_mask_path"]) if first_case_metrics.get("prediction_mask_path") else None
+    evaluation_name = evaluation_dir.name if evaluation_dir is not None else ""
 
     try:
         relative_run_dir = run_dir.relative_to(runs_root)
@@ -150,15 +205,29 @@ def build_run_index_row(run_dir: Path, runs_root: Path = RUNS_ROOT) -> dict[str,
         "scheduler_name": run_metadata.get("scheduler_name", training_config.get("scheduler", {}).get("name", "")),
         "learning_rate": optimizer_config.get("lr", run_metadata.get("learning_rate", "")),
         "weight_decay": optimizer_config.get("weight_decay", ""),
+        # Historical supervised runs predate this config field and used a
+        # hardcoded positive-class weight of 10.
+        "positive_class_weight": loss_config.get("positive_class_weight", 10.0),
         "pretrained_enabled": pretrained_config.get("enabled", ""),
         "freeze_encoder": pretrained_config.get("freeze_encoder", ""),
         "best_epoch": best.get("epoch", ""),
         "best_val_dice": best.get("val_dice", ""),
+        "evaluation_name": evaluation_name,
+        "evaluation_dir": str(evaluation_dir.relative_to(run_dir)) if evaluation_dir is not None else "",
+        "eval_case_ids": ",".join(str(case["case_id"]) for case in per_case_metrics if "case_id" in case),
+        "eval_prediction_filename": prediction_mask_path.name if prediction_mask_path is not None else "",
+        "eval_checkpoint_epoch": first_case_metrics.get("checkpoint_epoch", ""),
+        "eval_threshold": first_case_metrics.get("threshold", ""),
         "eval_num_cases": evaluation_summary.get("num_cases", "") if evaluation_summary is not None else "",
         "eval_dice_mean": evaluation_summary.get("dice_mean", "") if evaluation_summary is not None else "",
         "eval_iou_mean": evaluation_summary.get("iou_mean", "") if evaluation_summary is not None else "",
         "eval_precision_mean": evaluation_summary.get("precision_mean", "") if evaluation_summary is not None else "",
         "eval_recall_mean": evaluation_summary.get("recall_mean", "") if evaluation_summary is not None else "",
+        "eval_tree_length_detected_mean": evaluation_summary.get("tree_length_detected_mean", "") if evaluation_summary is not None else "",
+        "eval_branch_detected_mean": evaluation_summary.get("branch_detected_mean", "") if evaluation_summary is not None else "",
+        "eval_cldice_mean": evaluation_summary.get("cldice_mean", "") if evaluation_summary is not None else "",
+        "eval_topology_precision_mean": evaluation_summary.get("topology_precision_mean", "") if evaluation_summary is not None else "",
+        "eval_topology_sensitivity_mean": evaluation_summary.get("topology_sensitivity_mean", "") if evaluation_summary is not None else "",
         "predictions_saved": predictions_saved,
         "status": determine_run_status(
             history=history,
@@ -171,13 +240,30 @@ def build_run_index_row(run_dir: Path, runs_root: Path = RUNS_ROOT) -> dict[str,
 
 
 def collect_run_index_rows(runs_root: Path = RUNS_ROOT) -> list[dict[str, object]]:
-    """Scan the runs root and return one flattened row per run directory."""
+    """Scan the runs root and return one row per evaluation variant or unevaluated run."""
     if not runs_root.exists():
         return []
 
     metadata_paths = sorted(runs_root.rglob("run_metadata.json"))
-    rows = [build_run_index_row(metadata_path.parent, runs_root=runs_root) for metadata_path in metadata_paths]
-    rows.sort(key=lambda row: (str(row["created_at"]), str(row["run_dir"])), reverse=True)
+    rows = []
+    for metadata_path in metadata_paths:
+        run_dir = metadata_path.parent
+        evaluation_dirs = list_evaluation_dirs(run_dir)
+        if evaluation_dirs:
+            rows.extend(
+                build_run_index_row(run_dir, runs_root=runs_root, evaluation_dir=evaluation_dir)
+                for evaluation_dir in evaluation_dirs
+            )
+        else:
+            rows.append(build_run_index_row(run_dir, runs_root=runs_root))
+    rows.sort(
+        key=lambda row: (
+            str(row["created_at"]),
+            str(row["run_dir"]),
+            str(row["evaluation_name"]),
+        ),
+        reverse=True,
+    )
     return rows
 
 

@@ -168,6 +168,7 @@ def build_training_components(device, model_config: dict, training_config: dict)
     loss_fn = CombinedSegmentationLoss(
         bce_weight=float(loss_config["bce_weight"]),
         dice_weight=float(loss_config["dice_weight"]),
+        positive_class_weight=float(loss_config.get("positive_class_weight", 1.0)),
     ).to(device)
 
     optimizer_config = training_config["optimizer"]

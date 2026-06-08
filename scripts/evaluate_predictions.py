@@ -17,6 +17,7 @@ from lung_airway_segmentation.metrics.segmentation import (
     binary_precision_from_masks,
     binary_recall_from_masks,
 )
+from lung_airway_segmentation.metrics.topology import airway_topology_metrics_from_masks
 from lung_airway_segmentation.reporting.run_index import refresh_run_index
 from lung_airway_segmentation.settings import RAW_AEROPATH_ROOT
 from lung_airway_segmentation.training.config import resolve_project_path
@@ -61,6 +62,17 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--prediction-filename",
         default="airway_pred_full.nii.gz",
         help="Prediction mask filename within each case directory.",
+    )
+    parser.add_argument(
+        "--topology-metrics",
+        action="store_true",
+        help="Also compute clDice and ATM'22-style tree/branch detection metrics.",
+    )
+    parser.add_argument(
+        "--branch-detection-threshold",
+        type=float,
+        default=0.8,
+        help="Minimum covered reference-branch fraction for branch detection. Default: 0.8.",
     )
     return parser
 
@@ -133,6 +145,9 @@ def evaluate_prediction_case(
     prediction_case_dir: Path,
     data_root: Path,
     prediction_filename: str,
+    *,
+    include_topology_metrics: bool = False,
+    branch_detection_threshold: float = 0.8,
 ) -> dict:
     """Evaluate one saved prediction case against the reference airway mask."""
     prediction_metadata = load_json(prediction_case_dir / "prediction_metadata.json")
@@ -157,7 +172,7 @@ def evaluate_prediction_case(
     predicted_voxels = int(prediction_mask.sum())
     target_voxels = int(target_mask.sum())
 
-    return {
+    metrics = {
         "case_id": str(case_id),
         "prediction_dir": str(prediction_case_dir),
         "prediction_mask_path": str(prediction_mask_path),
@@ -173,6 +188,15 @@ def evaluate_prediction_case(
         "voxel_count_ratio": float(predicted_voxels / target_voxels) if target_voxels > 0 else None,
         **counts,
     }
+    if include_topology_metrics:
+        metrics.update(
+            airway_topology_metrics_from_masks(
+                prediction_mask,
+                target_mask,
+                branch_detection_threshold=branch_detection_threshold,
+            )
+        )
+    return metrics
 
 
 def summarize_case_metrics(case_metrics: list[dict]) -> dict:
@@ -188,6 +212,21 @@ def summarize_case_metrics(case_metrics: list[dict]) -> dict:
         "predicted_voxels",
         "target_voxels",
     ]
+    metric_names.extend(
+        metric_name
+        for metric_name in [
+            "tree_length_detected",
+            "branch_detected",
+            "cldice",
+            "topology_precision",
+            "topology_sensitivity",
+            "reference_skeleton_voxels",
+            "prediction_skeleton_voxels",
+            "reference_branch_count",
+            "detected_branch_count",
+        ]
+        if metric_name in case_metrics[0]
+    )
 
     summary = {"num_cases": len(case_metrics)}
     for metric_name in metric_names:
@@ -233,7 +272,14 @@ def main() -> None:
         raise ValueError(f"No saved prediction cases were found in {predictions_dir}.")
 
     case_metrics = [
-        evaluate_prediction_case(case_dir.name, case_dir, data_root, args.prediction_filename)
+        evaluate_prediction_case(
+            case_dir.name,
+            case_dir,
+            data_root,
+            args.prediction_filename,
+            include_topology_metrics=args.topology_metrics,
+            branch_detection_threshold=args.branch_detection_threshold,
+        )
         for case_dir in case_dirs
     ]
     summary = summarize_case_metrics(case_metrics)
@@ -248,6 +294,10 @@ def main() -> None:
     print(f"Mean IoU: {summary['iou_mean']:.4f}")
     print(f"Mean Precision: {summary['precision_mean']:.4f}")
     print(f"Mean Recall: {summary['recall_mean']:.4f}")
+    if args.topology_metrics:
+        print(f"Mean ATM'22-style TD: {summary['tree_length_detected_mean']:.4f}")
+        print(f"Mean ATM'22-style BD: {summary['branch_detected_mean']:.4f}")
+        print(f"Mean clDice: {summary['cldice_mean']:.4f}")
     print(f"Evaluation artifacts: {output_dir}")
 
 

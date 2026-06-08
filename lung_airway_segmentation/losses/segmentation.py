@@ -14,12 +14,17 @@ from monai.losses.dice import DiceLoss
 class CombinedSegmentationLoss(nn.Module):
     """Weighted sum of BCE-with-logits loss and Dice loss."""
 
-    def __init__(self, bce_weight=1.0, dice_weight=1.0):
+    def __init__(self, bce_weight=1.0, dice_weight=1.0, positive_class_weight=1.0):
         super().__init__()
-        self.bce_loss = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([10.0]))
+        if float(positive_class_weight) <= 0.0:
+            raise ValueError("positive_class_weight must be positive.")
+
+        self.bce_loss = nn.BCEWithLogitsLoss(
+            pos_weight=torch.tensor([float(positive_class_weight)])
+        )
         self.dice_loss = DiceLoss(sigmoid=True)
         self.bce_weight = bce_weight
-        self.dice_weight =  dice_weight
+        self.dice_weight = dice_weight
 
     def forward(self, logits, targets):
         """Compute the weighted segmentation loss for logits and target masks."""

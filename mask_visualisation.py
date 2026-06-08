@@ -236,8 +236,22 @@ def _(
 
 @app.cell
 def _(marching_cubes, np):
-    def build_mask_mesh(mask_volume, voxel_spacing, stride):
-        volume = np.asarray(mask_volume[::stride, ::stride, ::stride]) > 0
+    def build_mask_mesh(
+        mask_volume,
+        voxel_spacing,
+        preferred_stride=1,
+        max_sampled_foreground_voxels=400_000,
+    ):
+        """Build the highest-detail mesh that stays within a practical size budget."""
+        mask = np.asarray(mask_volume) > 0
+        stride = max(int(preferred_stride), 1)
+        while (
+            stride < 8
+            and int(mask[::stride, ::stride, ::stride].sum()) > max_sampled_foreground_voxels
+        ):
+            stride += 1
+
+        volume = mask[::stride, ::stride, ::stride]
         if not volume.any():
             return None
 
@@ -250,6 +264,7 @@ def _(marching_cubes, np):
         return {
             "vertices": mesh_vertices,
             "faces": mesh_faces,
+            "stride": stride,
         }
 
     def extract_plane(volume, axis, index):
@@ -276,9 +291,17 @@ def _(marching_cubes, np):
 
 
 @app.cell
-def _(build_mask_mesh, processed_case):
-    cropped_lung_mesh = build_mask_mesh(processed_case.lung_mask, processed_case.spacing, stride=2)
-    cropped_airway_mesh = build_mask_mesh(processed_case.airway_mask, processed_case.spacing, stride=1)
+def _(build_mask_mesh, processed_case, show_airway_mask, show_lung_mask):
+    cropped_lung_mesh = (
+        build_mask_mesh(processed_case.lung_mask, processed_case.spacing)
+        if show_lung_mask.value
+        else None
+    )
+    cropped_airway_mesh = (
+        build_mask_mesh(processed_case.airway_mask, processed_case.spacing)
+        if show_airway_mask.value
+        else None
+    )
     return cropped_airway_mesh, cropped_lung_mesh
 
 
@@ -303,7 +326,7 @@ def _(
         f"Crop box: `{processed_case.crop_box}`",
         f"Processed shape: `{processed_case.metadata['processed_shape']}`",
         f"Display HU window: `{hu_window}`",
-        "Mesh detail is fixed to a single high-detail setting.",
+        "Mesh detail automatically uses the lowest safe stride for each mask.",
     ]
 
     controls = mo.vstack(
@@ -693,6 +716,8 @@ def _(
         label_by_name = {
             "airway_pred_full.nii.gz": "Raw prediction",
             "airway_pred_lcc_full.nii.gz": "Largest component (6-connectivity)",
+            "airway_pred_lcc18_full.nii.gz": "Largest component (18-connectivity)",
+            "airway_pred_lcc26_full.nii.gz": "Largest component (26-connectivity)",
         }
         return {
             label_by_name.get(path.name, path.name): path.name
@@ -1036,7 +1061,13 @@ def _(default_mask_index, mo, prediction_bundle, prediction_plane_selector):
 
 
 @app.cell
-def _(build_mask_mesh, prediction_bundle):
+def _(
+    build_mask_mesh,
+    prediction_bundle,
+    show_predicted_mask,
+    show_prediction_lung_mask,
+    show_true_prediction_mask,
+):
     if prediction_bundle is None:
         prediction_lung_mesh = None
         prediction_true_mesh = None
@@ -1046,20 +1077,25 @@ def _(build_mask_mesh, prediction_bundle):
             build_mask_mesh(
                 prediction_bundle["lung_mask"],
                 prediction_bundle["spacing"],
-                stride=6,
             )
-            if prediction_bundle["lung_mask"] is not None
+            if show_prediction_lung_mask.value and prediction_bundle["lung_mask"] is not None
             else None
         )
-        prediction_true_mesh = build_mask_mesh(
-            prediction_bundle["true_mask"],
-            prediction_bundle["spacing"],
-            stride=2,
+        prediction_true_mesh = (
+            build_mask_mesh(
+                prediction_bundle["true_mask"],
+                prediction_bundle["spacing"],
+            )
+            if show_true_prediction_mask.value
+            else None
         )
-        prediction_mask_mesh = build_mask_mesh(
-            prediction_bundle["prediction_mask"],
-            prediction_bundle["spacing"],
-            stride=2,
+        prediction_mask_mesh = (
+            build_mask_mesh(
+                prediction_bundle["prediction_mask"],
+                prediction_bundle["spacing"],
+            )
+            if show_predicted_mask.value
+            else None
         )
     return prediction_lung_mesh, prediction_mask_mesh, prediction_true_mesh
 

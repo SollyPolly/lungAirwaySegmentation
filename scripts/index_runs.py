@@ -1,4 +1,4 @@
-"""Rebuild the shared runs/run_index.csv table from saved run artifacts."""
+"""Rebuild the shared runs/run_index.csv table from saved run and evaluation artifacts."""
 
 import argparse
 from pathlib import Path
@@ -10,7 +10,10 @@ from lung_airway_segmentation.settings import RUNS_ROOT
 def build_argument_parser() -> argparse.ArgumentParser:
     """Build the CLI parser for run-index regeneration."""
     parser = argparse.ArgumentParser(
-        description="Rebuild the shared run_index.csv summary from saved run directories.",
+        description=(
+            "Rebuild run_index.csv with one row per saved evaluation variant, "
+            "or one row for runs that have not been evaluated."
+        ),
     )
     parser.add_argument(
         "--runs-root",

@@ -65,8 +65,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--threshold",
         type=float,
-        default=0.5,
-        help="Probability threshold for the exported binary mask.",
+        default=None,
+        help="Probability threshold override. Defaults to the saved validation threshold.",
     )
     parser.add_argument(
         "--inference-overlap",
@@ -163,6 +163,7 @@ def build_prediction_metadata(
     checkpoint_path: Path,
     output_dir: Path,
     args: argparse.Namespace,
+    threshold: float,
     resolved_config: dict,
     checkpoint: dict,
 ) -> dict:
@@ -173,7 +174,7 @@ def build_prediction_metadata(
         "checkpoint_path": str(checkpoint_path),
         "checkpoint_epoch": int(checkpoint["epoch"]),
         "output_dir": str(output_dir),
-        "threshold": float(args.threshold),
+        "threshold": float(threshold),
         "device": args.device,
         "cropped_shape": list(case.ct.shape),
         "original_shape": list(case.metadata["original_shape"]),
@@ -233,6 +234,11 @@ def main() -> None:
         if args.inference_overlap is not None
         else float(validation_config["inference_overlap"])
     )
+    threshold = (
+        float(args.threshold)
+        if args.threshold is not None
+        else float(validation_config.get("threshold", 0.5))
+    )
 
     image_tensor = torch.from_numpy(case.ct)
     logits = predict_logits_for_volume(
@@ -245,7 +251,7 @@ def main() -> None:
         use_amp=use_amp,
     )
     probabilities_cropped = torch.sigmoid(logits).squeeze().cpu().numpy().astype(np.float32, copy=False)
-    prediction_cropped = (probabilities_cropped >= float(args.threshold)).astype(np.uint8, copy=False)
+    prediction_cropped = (probabilities_cropped >= threshold).astype(np.uint8, copy=False)
 
     original_shape = tuple(int(value) for value in case.metadata["original_shape"])
     prediction_full = restore_cropped_volume(
@@ -310,6 +316,7 @@ def main() -> None:
         checkpoint_path=checkpoint_path,
         output_dir=case_output_dir,
         args=args,
+        threshold=threshold,
         resolved_config=resolved_config,
         checkpoint=checkpoint,
     )

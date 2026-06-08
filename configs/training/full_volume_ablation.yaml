@@ -39,3 +39,4 @@ amp:
 loss:
   dice_weight: 1.0
   bce_weight: 1.0
+  positive_class_weight: 10.0

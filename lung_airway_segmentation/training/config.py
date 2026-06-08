@@ -261,6 +261,8 @@ def validate_training_config(training_config: dict) -> None:
         raise ValueError("validation.sw_batch_size must be positive.")
     if not 0.0 <= float(validation["inference_overlap"]) < 1.0:
         raise ValueError("validation.inference_overlap must be in [0.0, 1.0).")
+    if not 0.0 <= float(validation.get("threshold", 0.5)) <= 1.0:
+        raise ValueError("validation.threshold must be in [0.0, 1.0].")
 
     optimizer_config = training_config["optimizer"]
     if optimizer_config["name"].lower() != "adamw":
@@ -285,6 +287,8 @@ def validate_training_config(training_config: dict) -> None:
         raise ValueError("loss.bce_weight must be non-negative.")
     if float(loss_config["dice_weight"]) < 0.0:
         raise ValueError("loss.dice_weight must be non-negative.")
+    if float(loss_config.get("positive_class_weight", 1.0)) <= 0.0:
+        raise ValueError("loss.positive_class_weight must be positive.")
 
 
 def resolve_device(device_name: str) -> torch.device:
