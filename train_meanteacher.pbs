@@ -1,0 +1,24 @@
+#!/bin/bash
+#PBS -N MeanTeacher25
+#PBS -l select=1:ncpus=8:mem=32gb:ngpus=1
+#PBS -l walltime=06:00:00
+#PBS -j oe
+#PBS -o /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation/train_meanteacher.out
+
+cd /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation || exit 1
+
+module load miniforge/3
+source "$HOME/miniforge3/etc/profile.d/conda.sh"
+conda activate ctfm
+
+python -V
+python -u -m scripts.train_semisupervised \
+  --data-config configs/data/aeropath.yaml \
+  --atm22-config configs/data/atm22.yaml \
+  --model-config configs/model/baseline_unet.yaml \
+  --training-config configs/training/teacher_student.yaml \
+  --num-epochs 25 \
+  --num-workers 4 \
+  --device cuda \
+  --experiment-name mean-teacher-unet-scratch-25ep \
+  --run-description "Exploratory scratch Mean Teacher run using AeroPath labelled patches, ATM22 unlabelled patches, and positive class weight 3."
