@@ -14,10 +14,18 @@ What not to put here:
 - low-level patch-sampling code
 """
 
+from lung_airway_segmentation.training.config import (
+    build_semisupervised_argument_parser,
+    build_semisupervised_config_path_parser,
+)
+from lung_airway_segmentation.training.engine import run_semisupervised_training
+
 
 def main() -> None:
-    print("TODO: train the semi-supervised model.")
-
+    config_path_parser = build_semisupervised_config_path_parser()
+    config_args, _ = config_path_parser.parse_known_args()
+    args = build_semisupervised_argument_parser(config_args).parse_args()
+    run_semisupervised_training(args)
 
 if __name__ == "__main__":
     main()

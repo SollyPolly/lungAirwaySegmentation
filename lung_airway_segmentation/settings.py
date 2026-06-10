@@ -3,22 +3,17 @@
 This file should become the single home for stable project defaults so they are
 not redefined across scripts, notebooks, and modules.
 
-What to keep here:
-- repo-relative paths
-- stable default HU windows or crop margins
-- default artifact directories
-
-What not to keep here:
-- experiment-specific hyperparameters
-- model architecture details
 """
 
 from pathlib import Path
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
 PROJECT_ROOT = PACKAGE_ROOT.parent
+
 DATA_ROOT = PROJECT_ROOT / "data"
 RAW_AEROPATH_ROOT = DATA_ROOT / "AeroPath"
+RAW_ATM22_ROOT = DATA_ROOT / "ATM22"
+
 PROCESSED_ROOT = DATA_ROOT / "processed"
 CONFIG_ROOT = PROJECT_ROOT / "configs"
 RUNS_ROOT = PROJECT_ROOT / "runs"

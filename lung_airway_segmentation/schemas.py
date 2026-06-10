@@ -30,7 +30,7 @@ class LabelledCasePaths(TypedDict):
     case_id: str
     case_dir: Path
     ct: Path
-    lung: Path
+    lung: Path | None
     airway: Path
 
 class UnlabelledCasePaths(TypedDict):

@@ -1,18 +1,24 @@
-"""Dataset, dataloader, model, and optimizer builders for supervised training."""
+"""Dataset, dataloader, model, and optimizer builders for training."""
+
+import copy
 
 import torch
+import torch.nn as nn
 from monai.data import DataLoader, list_data_collate
 
+from lung_airway_segmentation.datasets.monai_atm22 import build_monai_atm22_dataset
 from lung_airway_segmentation.datasets.monai_aeropath import (
     build_monai_aeropath_datasets,
     build_monai_aeropath_full_volume_datasets,
 )
 from lung_airway_segmentation.datasets.splits import create_train_val_test_split
-from lung_airway_segmentation.io.case_layout import list_case_ids
+from lung_airway_segmentation.io.atm22_layout import list_case_ids as list_atm22_case_ids
+from lung_airway_segmentation.io.case_layout import list_case_ids as list_aeropath_case_ids
 from lung_airway_segmentation.losses.segmentation import CombinedSegmentationLoss
 from lung_airway_segmentation.models.baseline_unet import build_baseline_unet
 from lung_airway_segmentation.models.ct_fm_segresnet import build_ct_fm_segresnet
 from lung_airway_segmentation.preprocessing.geometry import normalize_margin
+from lung_airway_segmentation.training.config import resolve_project_path
 
 
 def build_model(device, model_config: dict):
@@ -57,7 +63,7 @@ def build_model(device, model_config: dict):
 
 def build_case_splits(data_root, training_config: dict) -> tuple[list[str], list[str], list[str]]:
     """Create deterministic train, validation, and test case splits."""
-    case_ids = list_case_ids(data_root)
+    case_ids = list_aeropath_case_ids(data_root)
     splits = training_config["splits"]
     return create_train_val_test_split(
         case_ids,
@@ -186,3 +192,43 @@ def build_training_components(device, model_config: dict, training_config: dict)
 def get_optimizer_learning_rates(optimizer) -> list[float]:
     """Return one learning-rate value per optimizer parameter group."""
     return [float(group["lr"]) for group in optimizer.param_groups]
+
+
+def build_teacher(student: nn.Module) -> nn.Module:
+    """Build a frozen EMA teacher initialized from the student."""
+    teacher = copy.deepcopy(student)
+    for param in teacher.parameters():
+        param.requires_grad_(False)
+    teacher.eval()
+    return teacher
+
+
+def build_unlabelled_dataloader(atm22_config: dict, training_config: dict) -> DataLoader:
+    """Build the ATM'22 loader used only for unlabeled consistency training."""
+    atm22_root = resolve_project_path(atm22_config["batch_root"])
+    atm22_ids = list_atm22_case_ids(atm22_root)
+    sampling = training_config["sampling"]
+    unlabelled_sampling = training_config.get("unlabelled_sampling", {})
+    preprocessing = atm22_config.get("preprocessing", {})
+    hu_window = tuple(float(value) for value in preprocessing.get("hu_window", (-1024, 600)))
+
+    unlabelled_dataset = build_monai_atm22_dataset(
+        atm22_ids,
+        batch_root=atm22_root,
+        patch_size=tuple(int(value) for value in sampling["patch_size"]),
+        patches_per_case=int(sampling["patches_per_case"]),
+        cache_rate=float(unlabelled_sampling.get("cache_rate", 0.0)),
+        hu_window=hu_window,
+    )
+
+    generator = torch.Generator()
+    generator.manual_seed(int(training_config["seed"]))
+
+    return DataLoader(
+        unlabelled_dataset,
+        batch_size=int(training_config["batch_size_unlabelled"]),
+        num_workers=int(training_config["num_workers"]),
+        shuffle=True,
+        collate_fn=list_data_collate,
+        generator=generator,
+    )

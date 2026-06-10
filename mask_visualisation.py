@@ -41,22 +41,31 @@ def _():
         DEFAULT_CROP_MARGIN,
         DEFAULT_HU_WINDOW,
         RAW_AEROPATH_ROOT,
+        RAW_ATM22_ROOT,
     )
+    from lung_airway_segmentation.schemas import PreprocessedCase
     from lung_airway_segmentation.preprocessing.geometry import crop_volume
     from lung_airway_segmentation.preprocessing.intensity import clip_ct_to_hu_window
     from lung_airway_segmentation.preprocessing.pipeline import preprocess_case
     from lung_airway_segmentation.io.case_layout import list_case_ids, resolve_case_paths
-    from lung_airway_segmentation.io.nifti import load_canonical_image
+    from lung_airway_segmentation.io.atm22_layout import (
+        list_case_ids as list_atm22_case_ids,
+        resolve_case_paths as resolve_atm22_case_paths,
+    )
+    from lung_airway_segmentation.io.nifti import load_canonical_image, verify_alignment
 
     return (
         DEFAULT_CROP_MARGIN,
         DEFAULT_HU_WINDOW,
         Path,
+        PreprocessedCase,
         RAW_AEROPATH_ROOT,
+        RAW_ATM22_ROOT,
         clip_ct_to_hu_window,
         crop_volume,
         go,
         json,
+        list_atm22_case_ids,
         list_case_ids,
         load_canonical_image,
         marching_cubes,
@@ -64,26 +73,22 @@ def _():
         nib,
         np,
         preprocess_case,
+        resolve_atm22_case_paths,
         resolve_case_paths,
+        verify_alignment,
     )
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    # AeroPath Raw vs Cropped Viewer
+    # Labelled Airway Dataset Viewer
 
-    This notebook uses the shared `preprocess_case(...)` function from
-    `lung_airway_segmentation.preprocessing.pipeline`. The preprocessing shown here keeps the original
-    voxel spacing and performs:
+    Select AeroPath or ATM'22 to inspect labelled CT volumes and airway masks.
 
-    - alignment checks
-    - lung-box cropping
-    - CT clipping and normalization for training output
-    - binary airway and lung masks
-
-    The 3D views show raw and cropped masks. The slice viewers below show
-    CT images with mask overlays for direct inspection.
+    AeroPath uses the shared lung-cropped preprocessing path. ATM'22 has no lung
+    masks in this layout, so its processed view retains the complete canonical
+    CT volume. The prediction viewer below remains AeroPath-run specific.
     """)
     return
 
@@ -95,9 +100,34 @@ def _(viewer_panel):
 
 
 @app.cell
-def _(DEFAULT_CROP_MARGIN, RAW_AEROPATH_ROOT, list_case_ids, mo):
-    data_root = RAW_AEROPATH_ROOT
-    case_ids = list_case_ids(data_root)
+def _(mo):
+    dataset_selector = mo.ui.dropdown(
+        {
+            "AeroPath": "aeropath",
+            "ATM'22": "atm22",
+        },
+        value="AeroPath",
+        label="Dataset",
+    )
+    return (dataset_selector,)
+
+
+@app.cell
+def _(
+    DEFAULT_CROP_MARGIN,
+    RAW_AEROPATH_ROOT,
+    RAW_ATM22_ROOT,
+    dataset_selector,
+    list_atm22_case_ids,
+    list_case_ids,
+    mo,
+):
+    if dataset_selector.value == "atm22":
+        data_root = RAW_ATM22_ROOT
+        case_ids = list_atm22_case_ids(data_root)
+    else:
+        data_root = RAW_AEROPATH_ROOT
+        case_ids = list_case_ids(data_root)
 
     case_selector = mo.ui.dropdown(
         case_ids,
@@ -126,7 +156,10 @@ def _(DEFAULT_CROP_MARGIN, RAW_AEROPATH_ROOT, list_case_ids, mo):
         step=20,
         label="Slice viewer height",
     )
-    show_lung_mask = mo.ui.switch(value=True, label="Show lung mask")
+    show_lung_mask = mo.ui.switch(
+        value=dataset_selector.value == "aeropath",
+        label="Show lung mask",
+    )
     show_airway_mask = mo.ui.switch(value=True, label="Show airway mask")
     return (
         case_selector,
@@ -141,36 +174,84 @@ def _(DEFAULT_CROP_MARGIN, RAW_AEROPATH_ROOT, list_case_ids, mo):
 
 @app.cell
 def _(
+    DEFAULT_HU_WINDOW,
+    PreprocessedCase,
     case_selector,
     crop_margin_slider,
     data_root,
+    dataset_selector,
     load_canonical_image,
     np,
     preprocess_case,
+    resolve_atm22_case_paths,
     resolve_case_paths,
+    verify_alignment,
 ):
     case_id = case_selector.value
     crop_margin_value = int(crop_margin_slider.value)
-    paths = resolve_case_paths(case_id, data_root=data_root)
+    dataset_name = "ATM'22" if dataset_selector.value == "atm22" else "AeroPath"
 
-    ct_img = load_canonical_image(paths["ct"])
-    lung_img = load_canonical_image(paths["lung"])
-    airway_img = load_canonical_image(paths["airway"])
+    if dataset_selector.value == "atm22":
+        paths = resolve_atm22_case_paths(case_id, batch_root=data_root)
+        if paths["airway"] is None:
+            raise ValueError(f"ATM'22 case {case_id} does not have an airway label.")
 
-    raw_ct = np.asarray(ct_img.dataobj, dtype=np.float32)
-    raw_lung_mask = np.asarray(lung_img.dataobj) > 0
-    raw_airway_mask = np.asarray(airway_img.dataobj) > 0
-    original_spacing = tuple(float(value) for value in ct_img.header.get_zooms()[:3])
-
-    processed_case = preprocess_case(
-        case_id,
-        data_root=data_root,
-        include_lung_mask=True,
-        crop_margin=crop_margin_value,
-    )
+        ct_img = load_canonical_image(paths["ct"])
+        airway_img = load_canonical_image(paths["airway"])
+        verify_alignment(
+            ct_img,
+            airway_img,
+            reference_name="ATM'22 CT",
+            other_name="ATM'22 airway mask",
+        )
+        raw_ct = np.asarray(ct_img.dataobj, dtype=np.float32)
+        raw_airway_mask = np.asarray(airway_img.dataobj) > 0
+        raw_lung_mask = None
+        original_spacing = tuple(float(value) for value in ct_img.header.get_zooms()[:3])
+        full_crop_box = tuple((0, int(size)) for size in raw_ct.shape)
+        processed_case = PreprocessedCase(
+            case_id=str(case_id),
+            ct=raw_ct,
+            airway_mask=raw_airway_mask,
+            lung_mask=None,
+            spacing=original_spacing,
+            affine=np.asarray(ct_img.affine, dtype=np.float64),
+            crop_box=full_crop_box,
+            metadata={
+                "supervision": "labeled",
+                "case_dir": paths["case_dir"],
+                "ct_path": paths["ct"],
+                "lung_mask_path": None,
+                "airway_mask_path": paths["airway"],
+                "original_shape": tuple(int(size) for size in raw_ct.shape),
+                "processed_shape": tuple(int(size) for size in raw_ct.shape),
+                "spacing": original_spacing,
+                "original_affine": np.asarray(ct_img.affine, dtype=np.float64),
+                "cropped_affine": np.asarray(ct_img.affine, dtype=np.float64),
+                "crop_margin": (0, 0, 0),
+                "hu_window": DEFAULT_HU_WINDOW,
+                "crop_source": "full_volume",
+            },
+        )
+    else:
+        paths = resolve_case_paths(case_id, data_root=data_root)
+        ct_img = load_canonical_image(paths["ct"])
+        lung_img = load_canonical_image(paths["lung"])
+        airway_img = load_canonical_image(paths["airway"])
+        raw_ct = np.asarray(ct_img.dataobj, dtype=np.float32)
+        raw_lung_mask = np.asarray(lung_img.dataobj) > 0
+        raw_airway_mask = np.asarray(airway_img.dataobj) > 0
+        original_spacing = tuple(float(value) for value in ct_img.header.get_zooms()[:3])
+        processed_case = preprocess_case(
+            case_id,
+            data_root=data_root,
+            include_lung_mask=True,
+            crop_margin=crop_margin_value,
+        )
     return (
         case_id,
         crop_margin_value,
+        dataset_name,
         original_spacing,
         processed_case,
         raw_airway_mask,
@@ -186,16 +267,10 @@ def _(crop_volume, processed_case, raw_ct):
 
 
 @app.cell
-def _(
-    DEFAULT_HU_WINDOW,
-    clip_ct_to_hu_window,
-    cropped_ct_hu,
-    processed_case,
-    raw_ct,
-):
+def _(DEFAULT_HU_WINDOW, cropped_ct_hu, processed_case, raw_ct):
     hu_window = DEFAULT_HU_WINDOW
-    raw_ct_display = clip_ct_to_hu_window(raw_ct, hu_window)
-    cropped_ct_display = clip_ct_to_hu_window(cropped_ct_hu, hu_window)
+    raw_ct_display = raw_ct
+    cropped_ct_display = cropped_ct_hu
     normalized_ct = processed_case.ct
     return cropped_ct_display, hu_window, normalized_ct, raw_ct_display
 
@@ -227,7 +302,12 @@ def _(
     shared_slice_slider = mo.ui.slider(
         0,
         int(raw_ct.shape[axis]) - 1,
-        value=default_mask_index(raw_lung_mask | raw_airway_mask, axis),
+        value=default_mask_index(
+            raw_airway_mask
+            if raw_lung_mask is None
+            else raw_lung_mask | raw_airway_mask,
+            axis,
+        ),
         step=1,
         label="Slice",
     )
@@ -251,16 +331,25 @@ def _(marching_cubes, np):
         ):
             stride += 1
 
-        volume = mask[::stride, ::stride, ::stride]
-        if not volume.any():
+        sampled_mask = mask[::stride, ::stride, ::stride]
+        foreground_coordinates = np.argwhere(sampled_mask)
+        if foreground_coordinates.size == 0:
             return None
 
         spacing = tuple(float(value) * stride for value in voxel_spacing)
+        lower = np.maximum(foreground_coordinates.min(axis=0) - 1, 0)
+        upper = np.minimum(
+            foreground_coordinates.max(axis=0) + 2,
+            sampled_mask.shape,
+        )
+        slices = tuple(slice(int(start), int(stop)) for start, stop in zip(lower, upper))
+        volume = sampled_mask[slices]
         mesh_vertices, mesh_faces, _, _ = marching_cubes(
             volume.astype(np.uint8),
             level=0.5,
             spacing=spacing,
         )
+        mesh_vertices += lower * np.asarray(spacing, dtype=np.float32)
         return {
             "vertices": mesh_vertices,
             "faces": mesh_faces,
@@ -294,7 +383,7 @@ def _(marching_cubes, np):
 def _(build_mask_mesh, processed_case, show_airway_mask, show_lung_mask):
     cropped_lung_mesh = (
         build_mask_mesh(processed_case.lung_mask, processed_case.spacing)
-        if show_lung_mask.value
+        if show_lung_mask.value and processed_case.lung_mask is not None
         else None
     )
     cropped_airway_mesh = (
@@ -311,6 +400,8 @@ def _(
     case_selector,
     crop_margin_slider,
     crop_margin_value,
+    dataset_name,
+    dataset_selector,
     hu_window,
     mesh_height_slider,
     mo,
@@ -321,9 +412,14 @@ def _(
     slice_height_slider,
 ):
     notes = [
+        f"Dataset: `{dataset_name}`",
         f"Original spacing: `{original_spacing[0]:.3f} x {original_spacing[1]:.3f} x {original_spacing[2]:.3f} mm`",
-        f"Crop margin: `{crop_margin_value}` voxels",
-        f"Crop box: `{processed_case.crop_box}`",
+        (
+            f"Crop margin: `{crop_margin_value}` voxels"
+            if dataset_name == "AeroPath"
+            else "Crop mode: `full volume` (ATM'22 has no lung mask)"
+        ),
+        f"Processed box: `{processed_case.crop_box}`",
         f"Processed shape: `{processed_case.metadata['processed_shape']}`",
         f"Display HU window: `{hu_window}`",
         "Mesh detail automatically uses the lowest safe stride for each mask.",
@@ -331,6 +427,7 @@ def _(
 
     controls = mo.vstack(
         [
+            dataset_selector,
             case_selector,
             crop_margin_slider,
             mesh_height_slider,
@@ -424,7 +521,7 @@ def _(
         )
         cropped_3d_view = mo.vstack(
             [
-                mo.md("### Cropped 3D Viewer"),
+                mo.md("### Processed 3D Viewer"),
                 mo.as_html(cropped_mesh_figure),
             ],
             gap=0.5,
@@ -437,6 +534,8 @@ def _(
     axis,
     extract_plane,
     go,
+    hu_window,
+    np,
     overlay_mask,
     raw_airway_mask,
     raw_ct_display,
@@ -447,7 +546,11 @@ def _(
     slice_height_slider,
 ):
     raw_shared_slice_index = int(shared_slice_slider.value)
-    raw_slice = extract_plane(raw_ct_display, axis, raw_shared_slice_index)
+    raw_slice = np.clip(
+        extract_plane(raw_ct_display, axis, raw_shared_slice_index),
+        hu_window[0],
+        hu_window[1],
+    )
     raw_slice_figure = go.Figure()
     raw_slice_figure.add_trace(
         go.Heatmap(
@@ -457,7 +560,7 @@ def _(
             hovertemplate="CT %{z:.1f}<extra></extra>",
         )
     )
-    if show_lung_mask.value:
+    if show_lung_mask.value and raw_lung_mask is not None:
         raw_slice_figure.add_trace(
             go.Heatmap(
                 z=overlay_mask(raw_lung_mask, axis, raw_shared_slice_index),
@@ -491,6 +594,8 @@ def _(
     cropped_ct_display,
     extract_plane,
     go,
+    hu_window,
+    np,
     overlay_mask,
     processed_case,
     shared_slice_slider,
@@ -506,7 +611,11 @@ def _(
 
     if crop_start <= cropped_source_slice_index < crop_stop:
         cropped_slice_index = cropped_source_slice_index - crop_start
-        cropped_slice = extract_plane(cropped_ct_display, axis, cropped_slice_index)
+        cropped_slice = np.clip(
+            extract_plane(cropped_ct_display, axis, cropped_slice_index),
+            hu_window[0],
+            hu_window[1],
+        )
         cropped_slice_figure.add_trace(
             go.Heatmap(
                 z=cropped_slice,
@@ -534,12 +643,12 @@ def _(
                 )
             )
         cropped_title = (
-            f"Cropped CT slice {cropped_slice_index} "
+            f"Processed CT slice {cropped_slice_index} "
             f"(raw slice {cropped_source_slice_index})"
         )
     else:
         cropped_title = (
-            f"Cropped CT unavailable for raw slice {cropped_source_slice_index} "
+            f"Processed CT unavailable for raw slice {cropped_source_slice_index} "
             f"(crop range {crop_start} to {crop_stop - 1})"
         )
         cropped_slice_figure.add_annotation(
@@ -1464,14 +1573,26 @@ def _(mo, prediction_slice_view, prediction_top_panel):
 
 
 @app.cell
-def _(mo, normalized_ct, prediction_panel, slice_panel, top_panel):
+def _(
+    dataset_name,
+    mo,
+    normalized_ct,
+    prediction_panel,
+    slice_panel,
+    top_panel,
+):
+    processed_note = (
+        f"`preprocess_case(...)` returns a normalized cropped CT for training with shape `{normalized_ct.shape}`."
+        if dataset_name == "AeroPath"
+        else f"ATM'22 is shown as a canonical full-volume CT with shape `{normalized_ct.shape}` because no lung mask is available."
+    )
     note = mo.md(
         f"""
         ## Notes
 
-        - `preprocess_case(...)` returns a normalized cropped CT for training with shape `{normalized_ct.shape}`.
+        - {processed_note}
         - The slice viewers display clipped CT values in the HU window used for preprocessing, not the normalized `[0, 1]` array.
-        - The cropped views remain at the original scan spacing.
+        - The processed views remain at the original scan spacing.
         """
     )
     viewer_panel = mo.vstack([top_panel, slice_panel, prediction_panel, note], gap=1.0)

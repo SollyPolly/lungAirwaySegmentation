@@ -4,6 +4,8 @@ __pycache__/
 __marimo__/
 *.pyc
 *.pt
+*.tmp
+.codex_tmp/
 
 /data/
 

@@ -1,4 +1,4 @@
-"""Config loading, CLI parsing, and validation for supervised baseline runs."""
+"""Config loading, CLI parsing, and validation for training runs."""
 
 import argparse
 from copy import deepcopy
@@ -11,8 +11,10 @@ from lung_airway_segmentation.settings import CONFIG_ROOT, PROJECT_ROOT
 
 
 DEFAULT_DATA_CONFIG = CONFIG_ROOT / "data" / "aeropath.yaml"
+DEFAULT_ATM22_CONFIG = CONFIG_ROOT / "data" / "atm22.yaml"
 DEFAULT_MODEL_CONFIG = CONFIG_ROOT / "model" / "baseline_unet.yaml"
 DEFAULT_TRAINING_CONFIG = CONFIG_ROOT / "training" / "baseline.yaml"
+DEFAULT_SEMISUPERVISED_TRAINING_CONFIG = CONFIG_ROOT / "training" / "teacher_student.yaml"
 
 
 def build_config_path_parser() -> argparse.ArgumentParser:
@@ -35,6 +37,19 @@ def build_config_path_parser() -> argparse.ArgumentParser:
         type=Path,
         default=DEFAULT_TRAINING_CONFIG,
         help="Path to the training YAML config.",
+    )
+    return parser
+
+
+def build_semisupervised_config_path_parser() -> argparse.ArgumentParser:
+    """Build the lightweight parser used to locate Mean Teacher configs."""
+    parser = build_config_path_parser()
+    parser.set_defaults(training_config=DEFAULT_SEMISUPERVISED_TRAINING_CONFIG)
+    parser.add_argument(
+        "--atm22-config",
+        type=Path,
+        default=DEFAULT_ATM22_CONFIG,
+        help="Path to the unlabeled ATM'22 dataset YAML config.",
     )
     return parser
 
@@ -128,6 +143,27 @@ def build_argument_parser(config_args: argparse.Namespace) -> argparse.ArgumentP
     return parser
 
 
+def build_semisupervised_argument_parser(
+    config_args: argparse.Namespace,
+) -> argparse.ArgumentParser:
+    """Build the Mean Teacher CLI while preserving baseline runtime overrides."""
+    parser = build_argument_parser(config_args)
+    parser.description = "Train the Mean Teacher airway segmentation model from YAML configs."
+    parser.add_argument(
+        "--atm22-config",
+        type=Path,
+        default=config_args.atm22_config,
+        help="Path to the unlabeled ATM'22 dataset YAML config.",
+    )
+    parser.add_argument(
+        "--batch-size-unlabelled",
+        type=int,
+        default=None,
+        help="Optional override for the ATM'22 batch size.",
+    )
+    return parser
+
+
 def build_resolved_training_config(
     base_training_config: dict,
     args: argparse.Namespace,
@@ -145,6 +181,8 @@ def build_resolved_training_config(
         resolved["num_workers"] = args.num_workers
     if args.cache_rate is not None:
         resolved["sampling"]["cache_rate"] = args.cache_rate
+    if getattr(args, "batch_size_unlabelled", None) is not None:
+        resolved["batch_size_unlabelled"] = args.batch_size_unlabelled
 
     return resolved
 
@@ -289,6 +327,38 @@ def validate_training_config(training_config: dict) -> None:
         raise ValueError("loss.dice_weight must be non-negative.")
     if float(loss_config.get("positive_class_weight", 1.0)) <= 0.0:
         raise ValueError("loss.positive_class_weight must be positive.")
+
+
+def validate_semisupervised_training_config(training_config: dict) -> None:
+    """Validate Mean Teacher settings in addition to shared baseline settings."""
+    validate_training_config(training_config)
+
+    if training_config["training_regime"] != "patch":
+        raise ValueError("Mean Teacher training currently requires training_regime = 'patch'.")
+    if int(training_config["batch_size_unlabelled"]) <= 0:
+        raise ValueError("batch_size_unlabelled must be positive.")
+
+    unlabelled_sampling = training_config.get("unlabelled_sampling", {})
+    if not 0.0 <= float(unlabelled_sampling.get("cache_rate", 0.0)) <= 1.0:
+        raise ValueError("unlabelled_sampling.cache_rate must be in [0.0, 1.0].")
+
+    teacher_config = training_config["teacher"]
+    if not 0.0 <= float(teacher_config["ema_decay"]) < 1.0:
+        raise ValueError("teacher.ema_decay must be in [0.0, 1.0).")
+    if int(teacher_config["warm_start_epochs"]) < 0:
+        raise ValueError("teacher.warm_start_epochs must be non-negative.")
+    if int(teacher_config.get("consistency_rampup_epochs", 0)) < 0:
+        raise ValueError("teacher.consistency_rampup_epochs must be non-negative.")
+    foreground_threshold = float(teacher_config["foreground_confidence_threshold"])
+    background_threshold = float(teacher_config["background_confidence_threshold"])
+    if not 0.0 <= background_threshold < foreground_threshold <= 1.0:
+        raise ValueError(
+            "Teacher confidence thresholds must satisfy "
+            "0 <= background < foreground <= 1."
+        )
+
+    if float(training_config["loss"]["consistency_weight"]) < 0.0:
+        raise ValueError("loss.consistency_weight must be non-negative.")
 
 
 def resolve_device(device_name: str) -> torch.device:

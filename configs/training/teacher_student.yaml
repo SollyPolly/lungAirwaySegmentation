@@ -5,23 +5,63 @@
 # - weights for consistency and uncertainty-aware losses
 
 experiment_name: teacher_student_semisupervised
-seed: 7
-epochs: 300
-batch_size_labeled: 1
-batch_size_unlabeled: 1
+description: "Mean Teacher extension of the positive-class-weight-3 supervised patch baseline using ATM'22 as unlabeled data."
+seed: 15
+epochs: 50
+training_regime: patch
+batch_size: 1
+batch_size_unlabelled: 1
 num_workers: 4
+
+splits:
+  train_fraction: 0.80
+  val_fraction: 0.15
+  test_fraction: 0.05
 
 teacher:
   ema_decay: 0.99
-  warm_start_epochs: 20
+  warm_start_epochs: 10
+  consistency_rampup_epochs: 10
+  # Pseudo-label confidence is intentionally stricter than the provisional
+  # validation threshold because these voxels directly supervise ATM'22 data.
+  foreground_confidence_threshold: 0.95
+  background_confidence_threshold: 0.20
 
-pseudo_labels:
-  confidence_threshold: 0.8
-  uncertainty_threshold: 0.15
+
+sampling:
+  patch_size: [96, 96, 96]
+  patches_per_case: 4
+  foreground_probability: 0.7
+  cache_rate: 0.5
+
+# ATM'22 volumes are substantially larger than AeroPath crops. Caching loaded
+# full volumes can exhaust host memory, so keep the unlabeled cache disabled.
+unlabelled_sampling:
+  cache_rate: 0.0
+
+validation:
+  validate_every: 1
+  roi_size: [96, 96, 96]
+  sw_batch_size: 1
+  inference_overlap: 0.75
+  # Match the weight-3 supervised run for checkpoint selection. Sweep saved
+  # validation probabilities after training before selecting final inference.
+  threshold: 0.75
+
+optimizer:
+  name: adamw
+  lr: 0.0003
+  weight_decay: 0.00001
+
+scheduler:
+  name: cosine
+  warmup_epochs: 10
+
+amp:
+  enabled: true
 
 loss:
-  supervised_dice_weight: 1.0
-  supervised_bce_weight: 1.0
-  cldice_weight: 0.3
-  distance_weight: 0.2
-  consistency_weight: 0.5
+  dice_weight: 1.0
+  bce_weight: 1.0
+  positive_class_weight: 3.0
+  consistency_weight: 1.0
