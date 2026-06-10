@@ -5,7 +5,9 @@ dataset_name: atm22
 batch_root: data/ATM22
 
 preprocessing:
-  hu_window: [-1024, 600]
+  # Match the labelled AeroPath preprocessing so teacher confidence is
+  # comparable across labelled and unlabelled CT patches.
+  hu_window: [-1024, 2048]
 
 # ATM'22 has no lung masks — CropForegroundd uses CT intensity to find the body extent.
 # Labels exist but are intentionally ignored during semi-supervised training.

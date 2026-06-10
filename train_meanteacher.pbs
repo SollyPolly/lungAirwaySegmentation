@@ -1,5 +1,5 @@
 #!/bin/bash
-#PBS -N MeanTeacher25
+#PBS -N MeanTeacherWS
 #PBS -l select=1:ncpus=8:mem=32gb:ngpus=1
 #PBS -l walltime=06:00:00
 #PBS -j oe
@@ -12,13 +12,19 @@ source "$HOME/miniforge3/etc/profile.d/conda.sh"
 conda activate ctfm
 
 python -V
+
+# Warm-start fine-tune: load the supervised baseline into student+teacher, then
+# train with ATM'22 consistency. Experiment name, epochs (40), lr, thresholds,
+# and pos_weight all come from teacher_student.yaml — do not override them here.
+# The 0.665 supervised baseline (val Dice @ threshold 0.99). If this file is
+# missing on HPC the job fails loudly rather than silently training from scratch.
+INIT_CKPT="runs/baseline-unet-patch-th99-fix/2026-06-05__19-51-23__baseline_unet/best_model.pt"
+
 python -u -m scripts.train_semisupervised \
   --data-config configs/data/aeropath.yaml \
   --atm22-config configs/data/atm22.yaml \
   --model-config configs/model/baseline_unet.yaml \
   --training-config configs/training/teacher_student.yaml \
-  --num-epochs 25 \
+  --init-checkpoint "$INIT_CKPT" \
   --num-workers 4 \
-  --device cuda \
-  --experiment-name mean-teacher-unet-scratch-25ep \
-  --run-description "Exploratory scratch Mean Teacher run using AeroPath labelled patches, ATM22 unlabelled patches, and positive class weight 3."
+  --device cuda

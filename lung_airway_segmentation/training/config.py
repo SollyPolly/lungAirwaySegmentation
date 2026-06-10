@@ -161,6 +161,16 @@ def build_semisupervised_argument_parser(
         default=None,
         help="Optional override for the ATM'22 batch size.",
     )
+    parser.add_argument(
+        "--init-checkpoint",
+        type=Path,
+        default=None,
+        help=(
+            "Optional checkpoint to warm-start both student and teacher "
+            "(e.g. the supervised baseline best_model.pt). Overrides the "
+            "init_checkpoint field in the training config."
+        ),
+    )
     return parser
 
 
@@ -183,6 +193,8 @@ def build_resolved_training_config(
         resolved["sampling"]["cache_rate"] = args.cache_rate
     if getattr(args, "batch_size_unlabelled", None) is not None:
         resolved["batch_size_unlabelled"] = args.batch_size_unlabelled
+    if getattr(args, "init_checkpoint", None) is not None:
+        resolved["init_checkpoint"] = str(args.init_checkpoint)
 
     return resolved
 

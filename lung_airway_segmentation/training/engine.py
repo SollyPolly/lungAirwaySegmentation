@@ -364,6 +364,29 @@ def run_semisupervised_training(args: argparse.Namespace) -> None:
         model_config,
         resolved_training_config,
     )
+
+    # Warm-start: load supervised weights into the student before the teacher is
+    # copied from it, so both networks begin from the converged baseline and the
+    # teacher produces meaningful pseudo-labels from the first consistency step.
+    # The optimizer keeps in-place references to the student parameters, so
+    # loading after build_training_components is safe; optimizer state stays fresh.
+    init_checkpoint = resolved_training_config.get("init_checkpoint")
+    init_checkpoint_info = None
+    if init_checkpoint:
+        init_checkpoint_path = resolve_project_path(init_checkpoint)
+        if not init_checkpoint_path.is_file():
+            raise FileNotFoundError(f"init_checkpoint does not exist: {init_checkpoint_path}")
+        checkpoint_payload = torch.load(init_checkpoint_path, map_location=device)
+        student.load_state_dict(checkpoint_payload["model_state"])
+        init_checkpoint_info = {
+            "path": str(init_checkpoint_path),
+            "epoch": checkpoint_payload.get("epoch"),
+        }
+        print(
+            f"Warm-started student from {init_checkpoint_path} "
+            f"(checkpoint epoch {checkpoint_payload.get('epoch')})"
+        )
+
     teacher = build_teacher(student)
     teacher_config = resolved_training_config["teacher"]
     consistency_loss_fn = ConsistencyLoss(
@@ -431,6 +454,7 @@ def run_semisupervised_training(args: argparse.Namespace) -> None:
         "amp_enabled": use_amp,
         "model_name": model_config["model_name"],
         "checkpoint_model": "ema_teacher",
+        "init_checkpoint": init_checkpoint_info,
         "optimizer_name": resolved_training_config["optimizer"]["name"],
         "scheduler_name": resolved_training_config["scheduler"]["name"],
         "effective_labelled_batch_size": (
