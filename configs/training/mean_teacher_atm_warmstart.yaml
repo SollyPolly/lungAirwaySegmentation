@@ -1,0 +1,83 @@
+# Mean Teacher on ATM'22 (single-domain), WARM-STARTED from the supervised-ATM
+# baseline. The teacher begins as the converged 0.609 model, so its pseudo-labels
+# are useful from epoch 1 and we directly test "does consistency improve the
+# converged model?" — without the from-scratch convergence handicap that left
+# mean_teacher_atm.yaml still climbing at its final epoch.
+#
+# Run with (the --init-checkpoint path is set in train_meanteacher_warmstart.pbs):
+#   --data-config configs/data/atm22.yaml --atm22-config configs/data/atm22.yaml
+#   --init-checkpoint runs/supervised-atm-l20/<run>/best_model.pt
+# AeroPath is reserved as an OOD test.
+
+experiment_name: mean-teacher-atm-warmstart-l20
+description: "Mean Teacher on ATM'22 warm-started from supervised-atm-l20 (0.609). 20 labelled + 90 unlabelled, single-domain. AeroPath = OOD test."
+seed: 15
+epochs: 40
+training_regime: patch
+batch_size: 1
+batch_size_unlabelled: 1
+num_workers: 4
+
+# null here — the checkpoint path is run-specific, so it is passed on the CLI
+# (--init-checkpoint) from the PBS script rather than hard-coded in the config.
+init_checkpoint: null
+
+# Must match supervised_atm.yaml (counts + seed) so the warm-start checkpoint,
+# this run, and the supervised baseline all share the same test/val/labelled sets.
+labelled_split:
+  test_count: 20
+  val_count: 20
+  labelled_count: 20
+
+teacher:
+  ema_decay: 0.99
+  # Warm-started: the teacher is already converged, so no supervised warm-up.
+  # Phase consistency in gently over the first few epochs.
+  warm_start_epochs: 0
+  consistency_rampup_epochs: 5
+  # Below the 0.99 validation threshold so the teacher also pseudo-labels distal
+  # branches (moderate-confidence voxels), not just the confident proximal tree.
+  foreground_confidence_threshold: 0.80
+  background_confidence_threshold: 0.20
+
+sampling:
+  patch_size: [96, 96, 96]
+  patches_per_case: 4
+  foreground_probability: 0.7
+  cache_rate: 0.5
+
+# Unlabelled ATM'22 volumes are large and numerous; keep their cache disabled.
+unlabelled_sampling:
+  cache_rate: 0.0
+
+validation:
+  # 20 large val volumes — validate every few epochs at moderate overlap with
+  # batched windows (checkpoint SELECTION only; final test Dice via predict_case).
+  validate_every: 5
+  roi_size: [96, 96, 96]
+  sw_batch_size: 4
+  inference_overlap: 0.5
+  threshold: 0.99
+
+optimizer:
+  name: adamw
+  # Fine-tuning LR — ~1/3 of the from-scratch 3e-4. Preserves the converged
+  # features while letting the consistency signal move the model.
+  lr: 0.0001
+  weight_decay: 0.00001
+
+scheduler:
+  name: cosine
+  # No LR warm-up when fine-tuning; cosine over 40 epochs is fine because the
+  # model starts converged (it won't be starved mid-improvement like the
+  # from-scratch run was).
+  warmup_epochs: 0
+
+amp:
+  enabled: true
+
+loss:
+  dice_weight: 1.0
+  bce_weight: 1.0
+  positive_class_weight: 10.0
+  consistency_weight: 1.0
