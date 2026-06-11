@@ -6,12 +6,18 @@ import torch
 import torch.nn as nn
 from monai.data import DataLoader, list_data_collate
 
-from lung_airway_segmentation.datasets.monai_atm22 import build_monai_atm22_dataset
+from lung_airway_segmentation.datasets.monai_atm22 import (
+    build_monai_atm22_dataset,
+    build_monai_atm22_labelled_datasets,
+)
 from lung_airway_segmentation.datasets.monai_aeropath import (
     build_monai_aeropath_datasets,
     build_monai_aeropath_full_volume_datasets,
 )
-from lung_airway_segmentation.datasets.splits import create_train_val_test_split
+from lung_airway_segmentation.datasets.splits import (
+    create_semisupervised_split,
+    create_train_val_test_split,
+)
 from lung_airway_segmentation.io.atm22_layout import list_case_ids as list_atm22_case_ids
 from lung_airway_segmentation.io.case_layout import list_case_ids as list_aeropath_case_ids
 from lung_airway_segmentation.losses.segmentation import CombinedSegmentationLoss
@@ -61,32 +67,86 @@ def build_model(device, model_config: dict):
     return model.to(device)
 
 
-def build_case_splits(data_root, training_config: dict) -> tuple[list[str], list[str], list[str]]:
-    """Create deterministic train, validation, and test case splits."""
-    case_ids = list_aeropath_case_ids(data_root)
-    splits = training_config["splits"]
-    return create_train_val_test_split(
-        case_ids,
-        train_split=float(splits["train_fraction"]),
-        val_split=float(splits["val_fraction"]),
-        test_split=float(splits["test_fraction"]),
-        seed=int(training_config["seed"]),
-    )
+def resolve_case_splits(data_config: dict, training_config: dict) -> dict:
+    """Resolve case splits for either dataset as a unified mapping.
+
+    Returns keys ``labelled_train``, ``unlabelled_train``, ``val``, ``test``.
+    AeroPath uses fractional three-way splits and has an empty
+    ``unlabelled_train``; ATM'22 uses a count-based four-way semi-supervised
+    split so the same test/val sets are shared by the supervised baseline and
+    the Mean Teacher run (paired comparison).
+    """
+    dataset_name = str(data_config["dataset_name"]).lower()
+    seed = int(training_config["seed"])
+
+    if dataset_name == "aeropath":
+        data_root = resolve_project_path(data_config["raw_data_root"])
+        case_ids = list_aeropath_case_ids(data_root)
+        splits = training_config["splits"]
+        train_ids, val_ids, test_ids = create_train_val_test_split(
+            case_ids,
+            train_split=float(splits["train_fraction"]),
+            val_split=float(splits["val_fraction"]),
+            test_split=float(splits["test_fraction"]),
+            seed=seed,
+        )
+        return {
+            "labelled_train": train_ids,
+            "unlabelled_train": [],
+            "val": val_ids,
+            "test": test_ids,
+        }
+
+    if dataset_name == "atm22":
+        batch_root = resolve_project_path(data_config["batch_root"])
+        case_ids = list_atm22_case_ids(batch_root)
+        labelled_split = training_config["labelled_split"]
+        return create_semisupervised_split(
+            case_ids,
+            test_count=int(labelled_split["test_count"]),
+            val_count=int(labelled_split["val_count"]),
+            labelled_count=int(labelled_split["labelled_count"]),
+            seed=seed,
+        )
+
+    raise ValueError(f"Unsupported dataset_name for splits: {dataset_name}")
 
 
 def build_datasets(
     train_ids,
     val_ids,
-    data_root,
     data_config: dict,
     training_config: dict,
 ):
-    """Build train and validation datasets for the configured training regime."""
+    """Build labelled train and validation datasets for the configured dataset."""
+    dataset_name = str(data_config["dataset_name"]).lower()
     training_regime = training_config["training_regime"]
     sampling = training_config["sampling"]
     preprocessing = data_config["preprocessing"]
-    crop_margin_voxels = normalize_margin(preprocessing["crop_margin_voxels"])
     hu_window = tuple(float(value) for value in preprocessing["hu_window"])
+
+    if dataset_name == "atm22":
+        if training_regime != "patch":
+            raise ValueError(
+                "ATM'22 labelled training currently supports only training_regime = 'patch'."
+            )
+        batch_root = resolve_project_path(data_config["batch_root"])
+        return build_monai_atm22_labelled_datasets(
+            train_ids=train_ids,
+            val_ids=val_ids,
+            batch_root=batch_root,
+            patch_size=tuple(int(value) for value in sampling["patch_size"]),
+            patches_per_case=int(sampling["patches_per_case"]),
+            foreground_probability=float(sampling["foreground_probability"]),
+            cache_rate=float(sampling["cache_rate"]),
+            hu_window=hu_window,
+        )
+
+    if dataset_name != "aeropath":
+        raise ValueError(f"Unsupported dataset_name for datasets: {dataset_name}")
+
+    data_root = resolve_project_path(data_config["raw_data_root"])
+    crop_margin_voxels = normalize_margin(preprocessing["crop_margin_voxels"])
 
     if training_regime == "full_volume":
         return build_monai_aeropath_full_volume_datasets(
@@ -203,10 +263,20 @@ def build_teacher(student: nn.Module) -> nn.Module:
     return teacher
 
 
-def build_unlabelled_dataloader(atm22_config: dict, training_config: dict) -> DataLoader:
-    """Build the ATM'22 loader used only for unlabeled consistency training."""
+def build_unlabelled_dataloader(
+    atm22_config: dict,
+    training_config: dict,
+    case_ids,
+) -> DataLoader:
+    """Build the ATM'22 loader over an explicit set of unlabelled case IDs.
+
+    ``case_ids`` must be the unlabelled-train subset only — never the val or
+    test cases — so held-out cases do not leak into training as unlabelled data.
+    """
     atm22_root = resolve_project_path(atm22_config["batch_root"])
-    atm22_ids = list_atm22_case_ids(atm22_root)
+    atm22_ids = list(case_ids)
+    if not atm22_ids:
+        raise ValueError("build_unlabelled_dataloader received an empty case_ids set.")
     sampling = training_config["sampling"]
     unlabelled_sampling = training_config.get("unlabelled_sampling", {})
     preprocessing = atm22_config.get("preprocessing", {})

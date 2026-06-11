@@ -1,9 +1,15 @@
 #!/bin/bash
-#PBS -N MeanTeacherWS
-#PBS -l select=1:ncpus=8:mem=32gb:ngpus=1
-#PBS -l walltime=06:00:00
+#PBS -N MeanTeacherATM
+# CX3 gpu72 queue limits: up to 64 ncpus / 920 GB / 12 GPUs per user / 72 h walltime.
+# gpu_type is left empty (RCS-recommended) so the scheduler can place the job on
+# any of L40S (48 GB) / A100 (40 GB) / RTX6000 (24 GB) — all of which fit this
+# 96^3-patch UNet comfortably under AMP, and leaving it open starts the job
+# sooner. To pin a large GPU for 128^3 patch experiments, append
+# ":gpu_type=L40S" to the select line below.
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -l walltime=12:00:00
 #PBS -j oe
-#PBS -o /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation/train_meanteacher.out
+#PBS -o /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation/train_meanteacher_atm.out
 
 cd /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation || exit 1
 
@@ -11,20 +17,24 @@ module load miniforge/3
 source "$HOME/miniforge3/etc/profile.d/conda.sh"
 conda activate ctfm
 
+# Record the allocated hardware in the .out log so resource use can be tuned on
+# the next run (which GPU was assigned, how much memory it has).
 python -V
+nvidia-smi
 
-# Warm-start fine-tune: load the supervised baseline into student+teacher, then
-# train with ATM'22 consistency. Experiment name, epochs (40), lr, thresholds,
-# and pos_weight all come from teacher_student.yaml — do not override them here.
-# The 0.665 supervised baseline (val Dice @ threshold 0.99). If this file is
-# missing on HPC the job fails loudly rather than silently training from scratch.
-INIT_CKPT="runs/baseline-unet-patch-th99-fix/2026-06-05__19-51-23__baseline_unet/best_model.pt"
-
+# Mean Teacher on ATM'22 (single-domain): labelled + unlabelled both from ATM'22,
+# so the consistency claim is not confounded by a domain gap. AeroPath is kept as
+# a held-out OOD test. Requires data/ATM22/imagesTr AND data/ATM22/labelsTr on HPC.
+#
+# This runs the canonical FROM-SCRATCH config (self-contained, no checkpoint).
+# To WARM-START from the supervised-ATM baseline instead, first run
+# supervised_atm.yaml, then add to the command below:
+#   --init-checkpoint runs/supervised-atm-l20/<timestamp>__baseline_unet/best_model.pt
+# and in mean_teacher_atm.yaml set warm_start_epochs: 0, optimizer.lr: 0.0001, epochs: 40.
 python -u -m scripts.train_semisupervised \
-  --data-config configs/data/aeropath.yaml \
+  --data-config configs/data/atm22.yaml \
   --atm22-config configs/data/atm22.yaml \
   --model-config configs/model/baseline_unet.yaml \
-  --training-config configs/training/teacher_student.yaml \
-  --init-checkpoint "$INIT_CKPT" \
+  --training-config configs/training/mean_teacher_atm.yaml \
   --num-workers 4 \
   --device cuda

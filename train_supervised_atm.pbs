@@ -1,0 +1,31 @@
+#!/bin/bash
+#PBS -N SupervisedATM
+# Same CX3 gpu72 sizing as the Mean Teacher job (see train_meanteacher.pbs).
+# Supervised is lighter (one loader, fewer epochs), so a shorter walltime is fine.
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -l walltime=08:00:00
+#PBS -j oe
+#PBS -o /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation/train_supervised_atm.out
+
+cd /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation || exit 1
+
+module load miniforge/3
+source "$HOME/miniforge3/etc/profile.d/conda.sh"
+conda activate ctfm
+
+python -V
+nvidia-smi
+
+# Supervised baseline on labelled ATM'22 (20 labelled cases, labelled_split in the
+# config). This is BOTH the in-domain SSL baseline (the number Mt-ATM is compared
+# against) AND the warm-start source for a later warm-started Mean Teacher run.
+# Requires data/ATM22/imagesTr AND data/ATM22/labelsTr on HPC.
+#
+# Shares seed + labelled_split with mean_teacher_atm.yaml, so it trains/validates/
+# tests on exactly the same cases — a paired comparison.
+python -u -m scripts.train_baseline \
+  --data-config configs/data/atm22.yaml \
+  --model-config configs/model/baseline_unet.yaml \
+  --training-config configs/training/supervised_atm.yaml \
+  --num-workers 4 \
+  --device cuda

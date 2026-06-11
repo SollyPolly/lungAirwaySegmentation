@@ -1,0 +1,82 @@
+# Mean Teacher on ATM'22 (single-domain): labelled + unlabelled both from ATM,
+# so the consistency claim is not confounded by a domain gap. Run it with
+#   --data-config configs/data/atm22.yaml --atm22-config configs/data/atm22.yaml
+# AeroPath is reserved as an OOD test.
+#
+# Defaults below are the canonical FROM-SCRATCH setup (self-contained, no
+# checkpoint needed): a supervised warm-up then a consistency ramp.
+#
+# To WARM-START from the supervised-ATM baseline instead (faster, teacher is good
+# from epoch 1), pass --init-checkpoint <supervised-atm best_model.pt> and set
+# warm_start_epochs: 0, optimizer.lr: 0.0001, epochs: 40.
+
+experiment_name: mean-teacher-atm-l20
+description: "Mean Teacher on ATM'22: 20 labelled + 90 unlabelled (single-domain). AeroPath = OOD test."
+seed: 15
+epochs: 60
+training_regime: patch
+batch_size: 1
+batch_size_unlabelled: 1
+num_workers: 4
+
+# null = from scratch. Set via --init-checkpoint to warm-start student+teacher.
+init_checkpoint: null
+
+# Must match supervised_atm.yaml (counts + seed) so both train/validate/test on
+# the same cases. labelled_train = labelled half; the remaining train-pool cases
+# (110 - labelled_count = 90) become the unlabelled consistency set.
+labelled_split:
+  test_count: 20
+  val_count: 20
+  labelled_count: 20
+
+teacher:
+  ema_decay: 0.99
+  # From scratch: hold consistency off until the teacher has learned something,
+  # then ramp it in. For warm-start set both to 0 / a small ramp.
+  warm_start_epochs: 10
+  consistency_rampup_epochs: 10
+  # Below the 0.99 validation threshold so the teacher also pseudo-labels distal
+  # branches (moderate-confidence voxels), not just the confident proximal tree.
+  foreground_confidence_threshold: 0.80
+  background_confidence_threshold: 0.20
+
+sampling:
+  patch_size: [96, 96, 96]
+  patches_per_case: 4
+  foreground_probability: 0.7
+  cache_rate: 0.5
+
+# Unlabelled ATM'22 volumes are large and numerous; keep their cache disabled.
+unlabelled_sampling:
+  cache_rate: 0.0
+
+validation:
+  # ATM'22 has 20 large val volumes; validating every epoch at high overlap is
+  # very expensive (sliding window over ~512x512x400+ volumes). Validate every
+  # few epochs at moderate overlap with batched windows. This drives checkpoint
+  # SELECTION only — recompute the final test Dice at higher overlap via
+  # predict_case.py / evaluate_predictions.py.
+  validate_every: 5
+  roi_size: [96, 96, 96]
+  sw_batch_size: 4
+  inference_overlap: 0.5
+  threshold: 0.99
+
+optimizer:
+  name: adamw
+  lr: 0.0003
+  weight_decay: 0.00001
+
+scheduler:
+  name: cosine
+  warmup_epochs: 10
+
+amp:
+  enabled: true
+
+loss:
+  dice_weight: 1.0
+  bce_weight: 1.0
+  positive_class_weight: 10.0
+  consistency_weight: 1.0

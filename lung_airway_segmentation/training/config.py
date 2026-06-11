@@ -283,14 +283,29 @@ def validate_training_config(training_config: dict) -> None:
     if training_regime == "full_volume" and int(training_config["batch_size"]) != 1:
         raise ValueError("full_volume training currently requires batch_size = 1.")
 
-    splits = training_config["splits"]
-    total_fraction = (
-        float(splits["train_fraction"])
-        + float(splits["val_fraction"])
-        + float(splits["test_fraction"])
-    )
-    if abs(total_fraction - 1.0) > 1e-8:
-        raise ValueError("Train/val/test fractions must sum to 1.0.")
+    # Splits are dataset-dependent: AeroPath uses fractional three-way splits,
+    # ATM'22 uses a count-based four-way semi-supervised split. Validate whichever
+    # the config declares; require at least one.
+    splits = training_config.get("splits")
+    labelled_split = training_config.get("labelled_split")
+    if splits is None and labelled_split is None:
+        raise ValueError(
+            "Training config must define either 'splits' (fractions) or "
+            "'labelled_split' (counts)."
+        )
+    if splits is not None:
+        total_fraction = (
+            float(splits["train_fraction"])
+            + float(splits["val_fraction"])
+            + float(splits["test_fraction"])
+        )
+        if abs(total_fraction - 1.0) > 1e-8:
+            raise ValueError("Train/val/test fractions must sum to 1.0.")
+    if labelled_split is not None:
+        if int(labelled_split["test_count"]) < 0 or int(labelled_split["val_count"]) < 0:
+            raise ValueError("labelled_split test_count and val_count must be non-negative.")
+        if int(labelled_split["labelled_count"]) <= 0:
+            raise ValueError("labelled_split.labelled_count must be positive.")
 
     sampling = training_config["sampling"]
     if len(sampling["patch_size"]) != 3:

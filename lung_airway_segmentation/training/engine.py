@@ -9,13 +9,13 @@ import torch
 
 from lung_airway_segmentation.settings import RUNS_ROOT
 from lung_airway_segmentation.training.builders import (
-    build_case_splits,
     build_dataloaders,
     build_datasets,
     build_teacher,
     build_training_components,
     build_unlabelled_dataloader,
     get_optimizer_learning_rates,
+    resolve_case_splits,
 )
 from lung_airway_segmentation.training.config import (
     build_resolved_training_config,
@@ -103,10 +103,15 @@ def initialize_run_artifacts(run_dir, run_metadata, resolved_config):
     write_json(run_metadata, run_dir / "run_metadata.json")
     write_json(resolved_config, run_dir / "resolved_config.json")
 
-    notes_path = run_dir / "notes.txt"
+    notes_path = run_dir / "notes.md"
     if not notes_path.exists():
         notes_path.write_text(
-            "Add run notes here.\n",
+            "# Run notes\n\n"
+            "**TL;DR:** _one-line result + verdict_\n\n"
+            "## Config\n\n"
+            "## Result\n\n"
+            "## Insight (what this run tells us)\n\n"
+            "## Follow-ups\n",
             encoding="utf-8",
         )
 
@@ -126,13 +131,15 @@ def run_supervised_training(args: argparse.Namespace) -> None:
     device = resolve_device(args.device)
     torch.manual_seed(int(resolved_training_config["seed"]))
 
-    data_root = resolve_project_path(data_config["raw_data_root"])
-    train_ids, val_ids, test_ids = build_case_splits(data_root, resolved_training_config)
+    data_root = resolve_project_path(
+        data_config.get("raw_data_root") or data_config["batch_root"]
+    )
+    splits = resolve_case_splits(data_config, resolved_training_config)
+    train_ids, val_ids, test_ids = splits["labelled_train"], splits["val"], splits["test"]
 
     train_dataset, val_dataset = build_datasets(
         train_ids,
         val_ids,
-        data_root,
         data_config,
         resolved_training_config,
     )
@@ -338,13 +345,22 @@ def run_semisupervised_training(args: argparse.Namespace) -> None:
     device = resolve_device(args.device)
     torch.manual_seed(int(resolved_training_config["seed"]))
 
-    data_root = resolve_project_path(data_config["raw_data_root"])
-    train_ids, val_ids, test_ids = build_case_splits(data_root, resolved_training_config)
+    data_root = resolve_project_path(
+        data_config.get("raw_data_root") or data_config["batch_root"]
+    )
+    splits = resolve_case_splits(data_config, resolved_training_config)
+    train_ids, val_ids, test_ids = splits["labelled_train"], splits["val"], splits["test"]
+    unlabelled_ids = splits["unlabelled_train"]
+    if not unlabelled_ids:
+        raise ValueError(
+            "Mean Teacher training requires unlabelled cases. Use an ATM'22 data-config "
+            "with a 'labelled_split' that leaves cases unlabelled "
+            "(labelled_count below the train-pool size)."
+        )
 
     train_dataset, val_dataset = build_datasets(
         train_ids,
         val_ids,
-        data_root,
         data_config,
         resolved_training_config,
     )
@@ -357,6 +373,7 @@ def run_semisupervised_training(args: argparse.Namespace) -> None:
     unlabelled_loader = build_unlabelled_dataloader(
         atm22_config,
         resolved_training_config,
+        unlabelled_ids,
     )
 
     student, loss_fn, optimizer, scheduler = build_training_components(

@@ -1,0 +1,64 @@
+# Supervised baseline trained on labelled ATM'22.
+#
+# This is the in-domain reference for the semi-supervised ablation. Run it with
+#   --data-config configs/data/atm22.yaml
+# It shares its test/val split with mean_teacher_atm.yaml (identical
+# labelled_split counts + seed), so supervised vs Mean Teacher is a paired
+# comparison on the same held-out cases. AeroPath is reserved as an OOD test.
+#
+# Label-efficiency curve: vary labelled_count (e.g. 10 / 20 / 40). test/val stay
+# fixed, so only the lower-bound moves. labelled_count = train pool gives the
+# fully-supervised upper bound.
+
+experiment_name: supervised-atm-l20
+description: "Supervised ATM'22 baseline, 20 labelled cases. In-domain lower bound for the SSL ablation; AeroPath = OOD test."
+seed: 15
+epochs: 50
+training_regime: patch
+batch_size: 1
+num_workers: 4
+
+# Count-based four-way split of ATM'22. test and val are sacred and fixed;
+# labelled_count selects how many train-pool cases carry labels here. The
+# supervised baseline simply ignores the remaining (unlabelled) train cases.
+labelled_split:
+  test_count: 20
+  val_count: 20
+  labelled_count: 20
+
+sampling:
+  patch_size: [96, 96, 96]
+  patches_per_case: 4
+  foreground_probability: 0.7
+  # ATM'22 volumes are large; lower this (or pass --cache-rate 0.0) if the
+  # labelled set is big enough to strain host memory.
+  cache_rate: 0.5
+
+validation:
+  # ATM'22 has 20 large val volumes; validating every epoch at high overlap is
+  # very expensive (sliding window over ~512x512x400+ volumes). Validate every
+  # few epochs at moderate overlap with batched windows. This drives checkpoint
+  # SELECTION only — recompute the final test Dice at higher overlap via
+  # predict_case.py / evaluate_predictions.py.
+  validate_every: 5
+  roi_size: [96, 96, 96]
+  sw_batch_size: 4
+  inference_overlap: 0.5
+  threshold: 0.99
+
+optimizer:
+  name: adamw
+  lr: 0.0003
+  weight_decay: 0.00001
+
+scheduler:
+  name: cosine
+  warmup_epochs: 10
+
+amp:
+  enabled: true
+
+loss:
+  dice_weight: 1.0
+  bce_weight: 1.0
+  positive_class_weight: 10.0
