@@ -47,6 +47,7 @@ import numpy as np
 import torch
 from scipy import ndimage
 
+from lung_airway_segmentation.inference.postprocess import keep_largest_connected_component
 from lung_airway_segmentation.inference.sliding_window import predict_logits_for_volume
 from lung_airway_segmentation.metrics.topology import (
     _foreground_slices,
@@ -153,6 +154,8 @@ def main() -> None:
     bin_probs = {label: [] for label, _, _ in RADIUS_BINS}
     sweep_dice = {t: [] for t in SWEEP_THRESHOLDS}
     sweep_td = {t: [] for t in SWEEP_THRESHOLDS}
+    sweep_dice_lcc = {t: [] for t in SWEEP_THRESHOLDS}
+    sweep_td_lcc = {t: [] for t in SWEEP_THRESHOLDS}
     per_case = []
     for cid in cases:
         ct, gt = load_case(dataset_name, data_config, cid, hu_window)
@@ -171,8 +174,7 @@ def main() -> None:
         gt_skeleton = _skeletonize(target_component[td_slices])
         gt_skeleton_sum = int(gt_skeleton.sum())
 
-        def dice_td(threshold_value):
-            predicted = prob >= threshold_value
+        def metrics_for(predicted):
             intersection = int((predicted & gt).sum())
             dice_value = 2 * intersection / ((int(predicted.sum()) + gt_sum) or 1)
             td_value = (
@@ -182,14 +184,21 @@ def main() -> None:
             )
             return float(dice_value), float(td_value)
 
-        dice, td = dice_td(threshold)
+        dice, td = metrics_for(prob >= threshold)
         per_case.append({"case_id": cid, "airway_voxels": gt_sum, "dice": dice, "td": td})
         print(f"case {cid}: airway voxels {gt_sum:,}  | Dice@{threshold} {dice:.3f}  | TD@{threshold} {td:.3f}")
 
         for t in SWEEP_THRESHOLDS:
-            dice_t, td_t = dice_td(t)
-            sweep_dice[t].append(dice_t)
-            sweep_td[t].append(td_t)
+            pred_t = prob >= t
+            d_raw, td_raw = metrics_for(pred_t)
+            # LCC: keep only the largest connected component (the main airway tree),
+            # removing disconnected false-positive blobs.
+            pred_lcc = keep_largest_connected_component(pred_t) > 0
+            d_lcc, td_lcc = metrics_for(pred_lcc)
+            sweep_dice[t].append(d_raw)
+            sweep_td[t].append(td_raw)
+            sweep_dice_lcc[t].append(d_lcc)
+            sweep_td_lcc[t].append(td_lcc)
 
         for label, lo, hi in RADIUS_BINS:
             m = gt & (radius >= lo) & (radius < hi)
@@ -217,23 +226,33 @@ def main() -> None:
               f"{100*row['recall_at_threshold']:>6.1f}%  {100*row['recall_at_0.5']:>5.1f}%")
 
     # --- threshold sweep (mean over cases; reuses the probabilities above) ---
+    # LCC = largest connected component (removes disconnected false-positive blobs).
     print(f"\n--- threshold sweep (mean over {len(cases)} cases) ---")
-    print(f"{'thresh':>7}  {'Dice':>6}  {'TD':>6}")
+    print(f"{'thresh':>7}  {'Dice':>6}  {'Dice+LCC':>8}  {'TD':>6}  {'TD+LCC':>7}")
     sweep_out = []
     for t in SWEEP_THRESHOLDS:
-        mean_dice = float(np.mean(sweep_dice[t]))
-        mean_td = float(np.mean(sweep_td[t]))
-        sweep_out.append({"threshold": t, "dice": mean_dice, "td": mean_td})
-        print(f"{t:>7.2f}  {mean_dice:>6.3f}  {mean_td:>6.3f}")
+        row = {
+            "threshold": t,
+            "dice": float(np.mean(sweep_dice[t])),
+            "dice_lcc": float(np.mean(sweep_dice_lcc[t])),
+            "td": float(np.mean(sweep_td[t])),
+            "td_lcc": float(np.mean(sweep_td_lcc[t])),
+        }
+        sweep_out.append(row)
+        print(f"{t:>7.2f}  {row['dice']:>6.3f}  {row['dice_lcc']:>8.3f}  "
+              f"{row['td']:>6.3f}  {row['td_lcc']:>7.3f}")
     best_dice = max(sweep_out, key=lambda r: r["dice"])
+    best_dice_lcc = max(sweep_out, key=lambda r: r["dice_lcc"])
     print(
-        f"best Dice {best_dice['dice']:.3f} @ threshold {best_dice['threshold']:.2f}"
-        f"   (TD at that threshold: {best_dice['td']:.3f})"
+        f"best Dice (raw) {best_dice['dice']:.3f} @ {best_dice['threshold']:.2f}"
+        f"   |   best Dice+LCC {best_dice_lcc['dice_lcc']:.3f} @ {best_dice_lcc['threshold']:.2f}"
+        f"  (TD+LCC there {best_dice_lcc['td_lcc']:.3f})"
     )
     print(
-        "note: TD rises as the threshold drops (it is recall-like and ignores false "
-        "positives), so its max is degenerate — compare TD between models at a fixed "
-        "operating threshold (e.g. the Dice-optimal one), not at its own peak."
+        "note: TD is recall-like (ignores false positives) so its max at low thresholds "
+        "is degenerate; compare TD at a fixed operating threshold. LCC can only lower TD "
+        "at a fixed threshold, but by rescuing Dice it may unlock a lower-threshold / "
+        "higher-TD operating point."
     )
 
     out_path = run_dir / "distal_analysis.json"
