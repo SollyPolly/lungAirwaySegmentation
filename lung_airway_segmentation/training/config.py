@@ -358,6 +358,10 @@ def validate_training_config(training_config: dict) -> None:
         raise ValueError("loss.cldice_weight must be non-negative.")
     if int(loss_config.get("cldice_iterations", 10)) < 1:
         raise ValueError("loss.cldice_iterations must be >= 1.")
+    if int(loss_config.get("cldice_warmup_epochs", 0)) < 0:
+        raise ValueError("loss.cldice_warmup_epochs must be non-negative.")
+    if int(loss_config.get("cldice_rampup_epochs", 0)) < 0:
+        raise ValueError("loss.cldice_rampup_epochs must be non-negative.")
 
 
 def validate_semisupervised_training_config(training_config: dict) -> None:

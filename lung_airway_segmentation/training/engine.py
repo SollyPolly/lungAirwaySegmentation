@@ -172,6 +172,14 @@ def run_supervised_training(args: argparse.Namespace) -> None:
     sampling_config = resolved_training_config["sampling"]
     validation_config = resolved_training_config["validation"]
 
+    # clDice warm-up: the soft skeleton of an untrained model's near-uniform
+    # output is noise, so train Dice+BCE only for the first epochs, then ramp the
+    # clDice term in. loss_fn.cldice_weight is mutated per epoch in the loop below.
+    loss_config = resolved_training_config["loss"]
+    max_cldice_weight = float(loss_config.get("cldice_weight", 0.0))
+    cldice_warmup_epochs = int(loss_config.get("cldice_warmup_epochs", 0))
+    cldice_rampup_epochs = int(loss_config.get("cldice_rampup_epochs", 0))
+
     run_description = args.run_description
     if run_description is None:
         run_description = resolved_training_config.get("description")
@@ -222,6 +230,17 @@ def run_supervised_training(args: argparse.Namespace) -> None:
     initialize_run_artifacts(run_dir, run_metadata, resolved_config_artifact)
 
     for epoch in range(int(resolved_training_config["epochs"])):
+        if max_cldice_weight > 0.0:
+            epochs_after_warmup = max((epoch + 1) - cldice_warmup_epochs, 0)
+            if epochs_after_warmup <= 0:
+                loss_fn.cldice_weight = 0.0
+            elif cldice_rampup_epochs > 0:
+                loss_fn.cldice_weight = max_cldice_weight * min(
+                    epochs_after_warmup / cldice_rampup_epochs, 1.0
+                )
+            else:
+                loss_fn.cldice_weight = max_cldice_weight
+
         learning_rates_before_epoch = get_optimizer_learning_rates(optimizer)
         train_metrics = train_one_epoch(
             model=model,
@@ -239,6 +258,7 @@ def run_supervised_training(args: argparse.Namespace) -> None:
             "learning_rates_before_epoch": learning_rates_before_epoch,
             "train_loss": train_metrics["loss"],
             "train_dice": train_metrics["dice"],
+            "cldice_weight": float(getattr(loss_fn, "cldice_weight", 0.0)),
         }
 
         should_validate = (

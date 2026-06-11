@@ -6,9 +6,11 @@
 # (scripts/analyse_distal.py).
 
 experiment_name: supervised-atm-l20-cldice
-description: "Supervised ATM'22 (20 labelled) + soft clDice topology loss. Target: recover distal branches the volumetric baseline misses."
+description: "Supervised ATM'22 (20 labelled) + soft clDice topology loss (warm-up 15 + ramp 10). Target: recover distal branches the volumetric baseline misses."
 seed: 15
-epochs: 50
+# More epochs than the plain baseline: 15 are pure Dice+BCE warm-up before clDice
+# engages, and clDice slows convergence.
+epochs: 80
 training_regime: patch
 batch_size: 1
 num_workers: 4
@@ -48,8 +50,12 @@ loss:
   dice_weight: 1.0
   bce_weight: 1.0
   positive_class_weight: 10.0
-  # Soft centerline Dice. cldice_weight ~1.0 makes it comparable to the Dice term;
-  # cldice_iterations >= max airway radius in voxels (~10 at 96^3). Tune down if
-  # early training is unstable (soft skeletons of near-uniform masks are noisy).
+  # Soft centerline Dice. cldice_iterations >= max airway radius in voxels (~10).
+  # WARM-UP is essential: pure Dice+BCE for cldice_warmup_epochs (so the model
+  # first learns a sane mask), then ramp clDice 0 -> cldice_weight over
+  # cldice_rampup_epochs. The first clDice run skipped this (constant weight from
+  # epoch 1) and degraded everything — proximal included.
   cldice_weight: 1.0
   cldice_iterations: 10
+  cldice_warmup_epochs: 15
+  cldice_rampup_epochs: 10
