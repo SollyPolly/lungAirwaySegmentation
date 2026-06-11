@@ -48,7 +48,11 @@ import torch
 from scipy import ndimage
 
 from lung_airway_segmentation.inference.sliding_window import predict_logits_for_volume
-from lung_airway_segmentation.metrics.topology import tree_length_detected_from_masks
+from lung_airway_segmentation.metrics.topology import (
+    _foreground_slices,
+    _largest_connected_component,
+    _skeletonize,
+)
 from lung_airway_segmentation.preprocessing.geometry import normalize_margin
 from lung_airway_segmentation.training.builders import build_model
 from lung_airway_segmentation.training.config import (
@@ -65,6 +69,10 @@ RADIUS_BINS = [
     ("r=4-5", 3.5, 5.5),
     ("r>=6 (proximal)", 5.5, 1e9),
 ]
+
+# thresholds for the Dice/TD sweep (clDice models calibrate lower than pos_weight
+# baselines, so their optimal operating point is usually below 0.99).
+SWEEP_THRESHOLDS = [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 0.99]
 
 
 def parse_args() -> argparse.Namespace:
@@ -143,6 +151,8 @@ def main() -> None:
     print(f"dataset: {dataset_name}  | threshold {threshold}  | overlap {args.overlap}\n")
 
     bin_probs = {label: [] for label, _, _ in RADIUS_BINS}
+    sweep_dice = {t: [] for t in SWEEP_THRESHOLDS}
+    sweep_td = {t: [] for t in SWEEP_THRESHOLDS}
     per_case = []
     for cid in cases:
         ct, gt = load_case(dataset_name, data_config, cid, hu_window)
@@ -151,12 +161,36 @@ def main() -> None:
             sw_batch_size=4, overlap=args.overlap, use_amp=False,
         )
         prob = torch.sigmoid(logits).squeeze().cpu().numpy().astype(np.float32)
-        pred = prob >= threshold
         radius = ndimage.distance_transform_edt(gt)
-        dice = float(2 * (pred & gt).sum() / ((pred.sum() + gt.sum()) or 1))
-        td = float(tree_length_detected_from_masks(pred, gt))
-        per_case.append({"case_id": cid, "airway_voxels": int(gt.sum()), "dice": dice, "td": td})
-        print(f"case {cid}: airway voxels {int(gt.sum()):,}  | Dice@{threshold} {dice:.3f}  | TD@{threshold} {td:.3f}")
+        gt_sum = int(gt.sum())
+
+        # GT centerline once per case (largest connected component, then skeleton)
+        # — reused for the run-threshold TD and the whole threshold sweep.
+        target_component = _largest_connected_component(gt)
+        td_slices = _foreground_slices(target_component)
+        gt_skeleton = _skeletonize(target_component[td_slices])
+        gt_skeleton_sum = int(gt_skeleton.sum())
+
+        def dice_td(threshold_value):
+            predicted = prob >= threshold_value
+            intersection = int((predicted & gt).sum())
+            dice_value = 2 * intersection / ((int(predicted.sum()) + gt_sum) or 1)
+            td_value = (
+                int((gt_skeleton & predicted[td_slices]).sum()) / gt_skeleton_sum
+                if gt_skeleton_sum
+                else 1.0
+            )
+            return float(dice_value), float(td_value)
+
+        dice, td = dice_td(threshold)
+        per_case.append({"case_id": cid, "airway_voxels": gt_sum, "dice": dice, "td": td})
+        print(f"case {cid}: airway voxels {gt_sum:,}  | Dice@{threshold} {dice:.3f}  | TD@{threshold} {td:.3f}")
+
+        for t in SWEEP_THRESHOLDS:
+            dice_t, td_t = dice_td(t)
+            sweep_dice[t].append(dice_t)
+            sweep_td[t].append(td_t)
+
         for label, lo, hi in RADIUS_BINS:
             m = gt & (radius >= lo) & (radius < hi)
             if m.any():
@@ -182,12 +216,32 @@ def main() -> None:
               f"{row['mean_prob']:>6.3f}  {row['median_prob']:>6.3f}  {row['p90_prob']:>6.3f}  "
               f"{100*row['recall_at_threshold']:>6.1f}%  {100*row['recall_at_0.5']:>5.1f}%")
 
+    # --- threshold sweep (mean over cases; reuses the probabilities above) ---
+    print(f"\n--- threshold sweep (mean over {len(cases)} cases) ---")
+    print(f"{'thresh':>7}  {'Dice':>6}  {'TD':>6}")
+    sweep_out = []
+    for t in SWEEP_THRESHOLDS:
+        mean_dice = float(np.mean(sweep_dice[t]))
+        mean_td = float(np.mean(sweep_td[t]))
+        sweep_out.append({"threshold": t, "dice": mean_dice, "td": mean_td})
+        print(f"{t:>7.2f}  {mean_dice:>6.3f}  {mean_td:>6.3f}")
+    best_dice = max(sweep_out, key=lambda r: r["dice"])
+    print(
+        f"best Dice {best_dice['dice']:.3f} @ threshold {best_dice['threshold']:.2f}"
+        f"   (TD at that threshold: {best_dice['td']:.3f})"
+    )
+    print(
+        "note: TD rises as the threshold drops (it is recall-like and ignores false "
+        "positives), so its max is degenerate — compare TD between models at a fixed "
+        "operating threshold (e.g. the Dice-optimal one), not at its own peak."
+    )
+
     out_path = run_dir / "distal_analysis.json"
     out_path.write_text(json.dumps({
         "run": metadata.get("experiment_name"),
         "dataset": dataset_name, "cases": cases,
         "threshold": threshold, "overlap": args.overlap,
-        "per_case": per_case, "bins": bins_out,
+        "per_case": per_case, "bins": bins_out, "threshold_sweep": sweep_out,
     }, indent=2))
     print(f"\nSaved {out_path}")
 

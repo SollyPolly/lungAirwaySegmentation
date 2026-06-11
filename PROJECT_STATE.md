@@ -126,7 +126,7 @@ scripts/
   train_semisupervised.py  — mean-teacher entrypoint
   predict_case.py          — inference on one case
   evaluate_predictions.py  — Dice/precision/recall evaluation
-  sweep_threshold.py       — threshold sweep over saved probability volumes
+  analyse_distal.py        — distal-radius probability stratification + threshold sweep (Dice/TD)
 ```
 
 ---
@@ -147,7 +147,7 @@ scripts/
 
 - **Run**: 50 epochs, `pos_weight=3`, `threshold=0.75` at validation
 - **Reported best val Dice**: 0.141 (epoch 50) — **this was wrong**
-- **Threshold sweep result** (`sweep_threshold_checkpoint.py`, overlap=0.25): best Dice = **0.345 at threshold=0.99**
+- **Threshold sweep result** (`analyse_distal.py`, overlap=0.25): best Dice = **0.345 at threshold=0.99**
 - **Root cause**: threshold=0.75 at validation was wrong; same as the supervised baseline disaster (was 0.083 at 0.5 then 0.665 at 0.99)
 - **Precision problem**: even at threshold=0.99, precision is only 16–29% (too many false positives). Mean output probability across the whole volume is ~0.47 — the model with `pos_weight=3` doesn't penalise false positives enough
 - **Per-case Dice at 0.99**: case03=0.260, case25=0.377, case02=0.329, case20=0.414
@@ -195,7 +195,7 @@ Per epoch the labelled loader drives epoch length (21 cases × 4 patches = 84 st
 
 3. **Run Mean-Teacher-ATM**: `train_semisupervised --data-config configs/data/atm22.yaml --atm22-config configs/data/atm22.yaml --training-config configs/training/mean_teacher_atm.yaml`. Default config is canonical from-scratch; to warm-start from step 2 set `--init-checkpoint` + `warm_start_epochs: 0`, `lr: 1e-4`, `epochs: 40`. Watch early `teacher_confident_foreground_fraction` / `train_consistency_loss` (run 1 had consistency <1% of loss; raise `consistency_weight` if still negligible).
 
-4. **Sweep + compare**: `sweep_threshold_checkpoint.py` on each result; paired comparison of MT vs supervised-ATM on the ATM test set, plus the AeroPath-OOD column.
+4. **Sweep + compare**: `analyse_distal.py` on each result; paired comparison of MT vs supervised-ATM on the ATM test set, plus the AeroPath-OOD column.
 
 5. **AeroPath-OOD eval flow**: still to build — run an ATM-trained checkpoint over all 27 AeroPath cases via `predict_case.py` + `evaluate_predictions.py` (HU windows already match, both `[-1024, 2048]`).
 
