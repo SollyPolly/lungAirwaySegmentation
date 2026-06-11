@@ -8,7 +8,8 @@ from pathlib import Path
 import nibabel as nib
 import numpy as np
 
-from lung_airway_segmentation.io.case_layout import resolve_case_paths
+from lung_airway_segmentation.io.atm22_layout import resolve_case_paths as resolve_atm22_case_paths
+from lung_airway_segmentation.io.case_layout import resolve_case_paths as resolve_aeropath_case_paths
 from lung_airway_segmentation.io.nifti import load_canonical_image
 from lung_airway_segmentation.metrics.segmentation import (
     binary_confusion_counts_from_masks,
@@ -101,7 +102,10 @@ def resolve_data_root(run_dir: Path, data_root_override: Path | None) -> Path:
             candidate_paths.append(Path(run_metadata["data_root"]))
 
     resolved_config = load_json(run_dir / "resolved_config.json")
-    configured_data_root = resolved_config["data"]["raw_data_root"]
+    data_config = resolved_config["data"]
+    configured_data_root = data_config.get("raw_data_root", data_config.get("batch_root"))
+    if configured_data_root is None:
+        raise ValueError("Run data config must define raw_data_root or batch_root.")
     configured_path = Path(configured_data_root)
     if configured_path.is_absolute():
         candidate_paths.append(configured_path)
@@ -146,6 +150,7 @@ def evaluate_prediction_case(
     data_root: Path,
     prediction_filename: str,
     *,
+    dataset_name: str = "aeropath",
     include_topology_metrics: bool = False,
     branch_detection_threshold: float = 0.8,
 ) -> dict:
@@ -155,7 +160,12 @@ def evaluate_prediction_case(
     if not prediction_mask_path.is_file():
         raise FileNotFoundError(f"Missing predicted full-volume mask: {prediction_mask_path}")
 
-    case_paths = resolve_case_paths(case_id, data_root=data_root)
+    if dataset_name == "atm22":
+        case_paths = resolve_atm22_case_paths(case_id, batch_root=data_root)
+    elif dataset_name == "aeropath":
+        case_paths = resolve_aeropath_case_paths(case_id, data_root=data_root)
+    else:
+        raise ValueError(f"Unsupported evaluation dataset: {dataset_name}")
     if case_paths["airway"] is None:
         raise ValueError(f"Case {case_id} does not have a reference airway mask.")
 
@@ -266,6 +276,8 @@ def main() -> None:
     predictions_dir = args.predictions_dir.resolve() if args.predictions_dir is not None else run_dir / "predictions"
     output_dir = args.output_dir.resolve() if args.output_dir is not None else run_dir / "evaluation"
     data_root = resolve_data_root(run_dir, args.data_root)
+    resolved_config = load_json(run_dir / "resolved_config.json")
+    dataset_name = str(resolved_config["data"].get("dataset_name", "aeropath")).lower()
 
     case_dirs = list_prediction_case_dirs(predictions_dir, args.case_ids)
     if not case_dirs:
@@ -277,6 +289,7 @@ def main() -> None:
             case_dir,
             data_root,
             args.prediction_filename,
+            dataset_name=dataset_name,
             include_topology_metrics=args.topology_metrics,
             branch_detection_threshold=args.branch_detection_threshold,
         )

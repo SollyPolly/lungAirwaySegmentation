@@ -11,7 +11,7 @@ import torch
 from lung_airway_segmentation.inference.postprocess import keep_largest_connected_component
 from lung_airway_segmentation.inference.sliding_window import predict_logits_for_volume
 from lung_airway_segmentation.preprocessing.geometry import normalize_margin
-from lung_airway_segmentation.preprocessing.pipeline import preprocess_case
+from lung_airway_segmentation.preprocessing.pipeline import preprocess_atm22_case, preprocess_case
 from lung_airway_segmentation.training.builders import build_model
 from lung_airway_segmentation.training.config import resolve_device, resolve_project_path
 
@@ -19,7 +19,7 @@ from lung_airway_segmentation.training.config import resolve_device, resolve_pro
 def build_argument_parser() -> argparse.ArgumentParser:
     """Build the prediction CLI parser."""
     parser = argparse.ArgumentParser(
-        description="Run sliding-window inference for one AeroPath case from a saved run directory.",
+        description="Run sliding-window inference for one saved training case.",
     )
     parser.add_argument(
         "--run-dir",
@@ -30,7 +30,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--case-id",
         required=True,
-        help="AeroPath case ID to predict.",
+        help="Dataset case ID to predict.",
     )
     parser.add_argument(
         "--checkpoint",
@@ -54,7 +54,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--data-root",
         type=Path,
         default=None,
-        help="Optional override for the raw AeroPath root. Defaults to the resolved run config.",
+        help="Optional dataset-root override. Defaults to the resolved run config.",
     )
     parser.add_argument(
         "--device",
@@ -89,6 +89,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--save-probabilities",
         action="store_true",
         help="Also save the probability volume as a NIfTI file.",
+    )
+    parser.add_argument(
+        "--skip-save-ct",
+        action="store_true",
+        help="Do not save a duplicate cropped CT volume in the prediction directory.",
     )
     parser.add_argument(
         "--largest-component",
@@ -201,25 +206,35 @@ def main() -> None:
     checkpoint_path = resolve_checkpoint_path(run_dir, args.checkpoint, args.checkpoint_path)
     device = resolve_device(args.device)
 
+    data_config = resolved_config["data"]
+    configured_root = data_config.get("raw_data_root", data_config.get("batch_root"))
+    if configured_root is None:
+        raise ValueError("Run data config must define raw_data_root or batch_root.")
     data_root = (
         args.data_root.resolve()
         if args.data_root is not None
-        else resolve_project_path(resolved_config["data"]["raw_data_root"])
+        else resolve_project_path(configured_root)
     )
-    preprocessing_config = resolved_config["data"]["preprocessing"]
-    crop_margin = normalize_margin(
-        args.crop_margin
-        if args.crop_margin is not None
-        else preprocessing_config["crop_margin_voxels"]
-    )
-
-    case = preprocess_case(
-        args.case_id,
-        data_root=data_root,
-        include_lung_mask=True,
-        hu_window=tuple(float(value) for value in preprocessing_config["hu_window"]),
-        crop_margin=crop_margin,
-    )
+    preprocessing_config = data_config["preprocessing"]
+    hu_window = tuple(float(value) for value in preprocessing_config["hu_window"])
+    dataset_name = str(data_config.get("dataset_name", "aeropath")).lower()
+    if dataset_name == "atm22":
+        case = preprocess_atm22_case(args.case_id, batch_root=data_root, hu_window=hu_window)
+    elif dataset_name == "aeropath":
+        crop_margin = normalize_margin(
+            args.crop_margin
+            if args.crop_margin is not None
+            else preprocessing_config["crop_margin_voxels"]
+        )
+        case = preprocess_case(
+            args.case_id,
+            data_root=data_root,
+            include_lung_mask=True,
+            hu_window=hu_window,
+            crop_margin=crop_margin,
+        )
+    else:
+        raise ValueError(f"Unsupported prediction dataset: {dataset_name}")
 
     model, checkpoint = load_model_from_checkpoint(
         device,
@@ -265,7 +280,12 @@ def main() -> None:
     case_output_dir = output_root / str(case.case_id)
     case_output_dir.mkdir(parents=True, exist_ok=True)
 
-    save_nifti_volume(case.ct.astype(np.float32, copy=False), case.affine, case_output_dir / "ct_cropped.nii.gz")
+    if not args.skip_save_ct:
+        save_nifti_volume(
+            case.ct.astype(np.float32, copy=False),
+            case.affine,
+            case_output_dir / "ct_cropped.nii.gz",
+        )
     save_nifti_volume(prediction_cropped, case.affine, case_output_dir / "airway_pred_cropped.nii.gz")
     save_nifti_volume(
         prediction_full,
@@ -299,11 +319,13 @@ def main() -> None:
             original_shape,
             fill_value=0.0,
         )
-        save_nifti_volume(
-            probabilities_cropped,
-            case.affine,
-            case_output_dir / "airway_prob_cropped.nii.gz",
-        )
+        crop_is_full_volume = tuple(probabilities_cropped.shape) == original_shape
+        if not crop_is_full_volume:
+            save_nifti_volume(
+                probabilities_cropped,
+                case.affine,
+                case_output_dir / "airway_prob_cropped.nii.gz",
+            )
         save_nifti_volume(
             probabilities_full,
             case.metadata["original_affine"],

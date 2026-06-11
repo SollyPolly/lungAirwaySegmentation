@@ -7,6 +7,7 @@ intensity, and image I/O details to the dedicated helper modules.
 """
 import numpy as np
 
+from lung_airway_segmentation.io.atm22_layout import resolve_case_paths as resolve_atm22_case_paths
 from lung_airway_segmentation.io.case_layout import resolve_case_paths
 from lung_airway_segmentation.io.nifti import (
     load_canonical_image, ensure_3d, image_to_array, 
@@ -104,6 +105,66 @@ def preprocess_case(
         affine=affine_crop,
         crop_box=crop_box,
         metadata=metadata
+    )
+
+
+def preprocess_atm22_case(
+        case_id,
+        *,
+        batch_root,
+        hu_window=DEFAULT_HU_WINDOW,
+) -> PreprocessedCase:
+    """Load and preprocess one ATM'22 case consistently with validation transforms."""
+    paths = resolve_atm22_case_paths(case_id, batch_root=batch_root)
+    ct_img = load_canonical_image(paths["ct"])
+    ensure_3d(ct_img, "CT")
+
+    airway_img = None
+    if paths["airway"] is not None:
+        airway_img = load_canonical_image(paths["airway"])
+        ensure_3d(airway_img, "airway mask")
+        verify_alignment(ct_img, airway_img, reference_name="CT", other_name="airway mask")
+
+    spacing = spacing_from_image(ct_img)
+    original_affine = affine_from_image(ct_img, "CT")
+    ct_raw = image_to_array(ct_img, dtype=np.float32)
+    airway_raw = image_to_array(airway_img) if airway_img is not None else None
+
+    # Match ATM'22 MONAI validation: normalize first, then crop where image > 0.
+    ct_normalized = normalize_ct(ct_raw, hu_window)
+    crop_box = crop_box_from_mask(ct_normalized > 0, crop_margin=0)
+    ct_cropped = crop_volume(ct_normalized, crop_box)
+    airway_cropped = (
+        crop_volume((airway_raw > 0).astype(np.uint8, copy=False), crop_box)
+        if airway_raw is not None
+        else None
+    )
+    cropped_affine = affine_after_crop(original_affine, crop_box)
+
+    metadata: PreprocessedMetadata = {
+        "supervision": "labeled" if airway_raw is not None else "unlabeled",
+        "case_dir": paths["case_dir"],
+        "ct_path": paths["ct"],
+        "lung_mask_path": None,
+        "airway_mask_path": paths["airway"],
+        "original_shape": validate_3d_shape(ct_raw, "CT"),
+        "processed_shape": validate_3d_shape(ct_cropped, "cropped CT"),
+        "spacing": spacing,
+        "original_affine": original_affine,
+        "cropped_affine": cropped_affine,
+        "crop_margin": (0, 0, 0),
+        "hu_window": hu_window,
+        "crop_source": "full_volume",
+    }
+    return PreprocessedCase(
+        case_id=str(case_id).zfill(3),
+        ct=ct_cropped,
+        airway_mask=airway_cropped,
+        lung_mask=None,
+        spacing=spacing,
+        affine=cropped_affine,
+        crop_box=crop_box,
+        metadata=metadata,
     )
 
 

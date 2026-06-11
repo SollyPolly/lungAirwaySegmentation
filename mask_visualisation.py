@@ -12,7 +12,7 @@
 
 import marimo
 
-__generated_with = "0.23.6"
+__generated_with = "0.23.9"
 app = marimo.App()
 
 
@@ -88,7 +88,7 @@ def _(mo):
 
     AeroPath uses the shared lung-cropped preprocessing path. ATM'22 has no lung
     masks in this layout, so its processed view retains the complete canonical
-    CT volume. The prediction viewer below remains AeroPath-run specific.
+    CT volume. The prediction viewer below supports saved AeroPath and ATM'22 runs.
     """)
     return
 
@@ -728,11 +728,13 @@ def _(
     DEFAULT_HU_WINDOW,
     Path,
     RAW_AEROPATH_ROOT,
+    RAW_ATM22_ROOT,
     clip_ct_to_hu_window,
     json,
     load_canonical_image,
     nib,
     np,
+    resolve_atm22_case_paths,
     resolve_case_paths,
 ):
     prediction_run_root = Path(__file__).resolve().parent / "runs"
@@ -768,7 +770,11 @@ def _(
         if recorded_data_root:
             candidate_paths.append(Path(recorded_data_root))
 
-        configured_data_root = resolved_config.get("data", {}).get("raw_data_root")
+        data_config = resolved_config.get("data", {})
+        configured_data_root = data_config.get(
+            "raw_data_root",
+            data_config.get("batch_root"),
+        )
         if configured_data_root:
             configured_path = Path(configured_data_root)
             if configured_path.is_absolute():
@@ -776,13 +782,20 @@ def _(
             else:
                 candidate_paths.append((project_root / configured_path).resolve())
 
-        candidate_paths.append(RAW_AEROPATH_ROOT)
+        dataset_name = str(data_config.get("dataset_name", "aeropath")).lower()
+        candidate_paths.append(
+            RAW_ATM22_ROOT if dataset_name == "atm22" else RAW_AEROPATH_ROOT
+        )
 
         for candidate_path in candidate_paths:
             if candidate_path.exists():
                 return candidate_path.resolve()
 
-        return RAW_AEROPATH_ROOT.resolve()
+        return (
+            RAW_ATM22_ROOT.resolve()
+            if dataset_name == "atm22"
+            else RAW_AEROPATH_ROOT.resolve()
+        )
 
     def list_prediction_set_names(run_root, run_name):
         if run_name is None:
@@ -877,8 +890,15 @@ def _(
             else {}
         )
 
+        data_config = resolved_config.get("data", {})
+        dataset_name = str(data_config.get("dataset_name", "aeropath")).lower()
         data_root = resolve_prediction_data_root(run_metadata, resolved_config)
-        case_paths = resolve_case_paths(case_id, data_root=data_root)
+        if dataset_name == "atm22":
+            case_paths = resolve_atm22_case_paths(case_id, batch_root=data_root)
+        elif dataset_name == "aeropath":
+            case_paths = resolve_case_paths(case_id, data_root=data_root)
+        else:
+            raise ValueError(f"Unsupported prediction dataset: {dataset_name}")
 
         ct_image = load_canonical_image(case_paths["ct"])
         ct = np.asarray(ct_image.dataobj, dtype=np.float32)
@@ -911,11 +931,6 @@ def _(
             )
 
         probability_path = prediction_case_dir / "airway_prob_full.nii.gz"
-        probability_volume = (
-            np.asarray(nib.load(str(probability_path)).dataobj, dtype=np.float32)
-            if probability_path.exists()
-            else None
-        )
 
         history_entries = history.get("history", []) if isinstance(history, dict) else []
         best_metrics = history.get("best", {}) if isinstance(history, dict) else {}
@@ -923,6 +938,7 @@ def _(
         return {
             "run_dir": run_dir,
             "run_name": run_name,
+            "dataset_name": dataset_name,
             "prediction_set_name": prediction_set_name,
             "prediction_mask_filename": prediction_mask_filename,
             "case_id": str(case_id),
@@ -938,7 +954,9 @@ def _(
             "lung_mask": lung_mask,
             "true_mask": true_mask,
             "prediction_mask": prediction_mask,
-            "probability_volume": probability_volume,
+            # Probability maps are large and unused by this viewer. Keep only
+            # the path so opening ATM'22 predictions does not allocate ~600 MB.
+            "probability_volume": None,
             "spacing": spacing,
             "best_val_dice": best_metrics.get("val_dice"),
             "best_epoch": best_metrics.get("epoch"),
@@ -1394,6 +1412,7 @@ def _(
 
         prediction_notes = [
             f"- **Run**: {prediction_bundle['run_name']}",
+            f"- **Dataset**: `{prediction_bundle['dataset_name']}`",
             f"- **Prediction set**: `{prediction_bundle['prediction_set_name']}`",
             f"- **Prediction mask**: `{prediction_bundle['prediction_mask_filename']}`",
             f"- **Case**: `{prediction_bundle['case_id']}`",
