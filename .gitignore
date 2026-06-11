@@ -5,6 +5,7 @@ __marimo__/
 *.pyc
 *.pt
 *.tmp
+*.out
 .codex_tmp/
 
 /data/

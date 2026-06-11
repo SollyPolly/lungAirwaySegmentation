@@ -1,0 +1,49 @@
+#!/bin/bash
+#PBS -N AirwayTrain
+# CX3 gpu72 queue: up to 64 ncpus / 920 GB / 12 GPUs / 72 h. gpu_type left empty
+# (RCS-recommended) so the job starts on any of L40S/A100/RTX6000 — all fit this
+# 96^3-patch UNet under AMP. Pin ":gpu_type=L40S" for 128^3 experiments.
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -l walltime=12:00:00
+#PBS -j oe
+# Single reusable log — overwritten each run (per-run metrics live in runs/<exp>/).
+#PBS -o /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation/train.out
+
+cd /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation || exit 1
+
+module load miniforge/3
+source "$HOME/miniforge3/etc/profile.d/conda.sh"
+conda activate ctfm
+
+python -V
+nvidia-smi
+
+# =====================================================================
+# ONE reusable job script. Edit the active command below per run, qsub it,
+# and train.out is rewritten. Requires data/ATM22/{imagesTr,labelsTr} on HPC.
+# Commented blocks are ready-to-swap alternatives.
+# =====================================================================
+
+# --- (1) Supervised-ATM baseline (in-domain baseline + warm-start source) ---
+# python -u -m scripts.train_baseline \
+#   --data-config configs/data/atm22.yaml \
+#   --model-config configs/model/baseline_unet.yaml \
+#   --training-config configs/training/supervised_atm.yaml \
+#   --num-workers 4 --device cuda
+
+# --- (2) Mean Teacher ATM, from scratch (canonical) ---
+# python -u -m scripts.train_semisupervised \
+#   --data-config configs/data/atm22.yaml \
+#   --atm22-config configs/data/atm22.yaml \
+#   --model-config configs/model/baseline_unet.yaml \
+#   --training-config configs/training/mean_teacher_atm.yaml \
+#   --num-workers 4 --device cuda
+
+# --- (3) Mean Teacher ATM, warm-started from supervised-atm-l20 (ACTIVE) ---
+python -u -m scripts.train_semisupervised \
+  --data-config configs/data/atm22.yaml \
+  --atm22-config configs/data/atm22.yaml \
+  --model-config configs/model/baseline_unet.yaml \
+  --training-config configs/training/mean_teacher_atm_warmstart.yaml \
+  --init-checkpoint runs/supervised-atm-l20/2026-06-11__04-10-34__baseline_unet/best_model.pt \
+  --num-workers 4 --device cuda
