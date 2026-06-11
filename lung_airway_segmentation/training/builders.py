@@ -235,6 +235,8 @@ def build_training_components(device, model_config: dict, training_config: dict)
         bce_weight=float(loss_config["bce_weight"]),
         dice_weight=float(loss_config["dice_weight"]),
         positive_class_weight=float(loss_config.get("positive_class_weight", 1.0)),
+        cldice_weight=float(loss_config.get("cldice_weight", 0.0)),
+        cldice_iterations=int(loss_config.get("cldice_iterations", 10)),
     ).to(device)
 
     optimizer_config = training_config["optimizer"]

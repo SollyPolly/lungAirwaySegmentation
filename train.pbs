@@ -21,29 +21,44 @@ nvidia-smi
 # =====================================================================
 # ONE reusable job script. Edit the active command below per run, qsub it,
 # and train.out is rewritten. Requires data/ATM22/{imagesTr,labelsTr} on HPC.
+# Set --experiment-name / --run-description per run — they control runs/<name>/
+# and override whatever the YAML config declares.
 # Commented blocks are ready-to-swap alternatives.
 # =====================================================================
 
-# --- (1) Supervised-ATM baseline (in-domain baseline + warm-start source) ---
+# --- (ACTIVE) Supervised-ATM + clDice topology loss ---
+python -u -m scripts.train_baseline \
+  --data-config configs/data/atm22.yaml \
+  --model-config configs/model/baseline_unet.yaml \
+  --training-config configs/training/supervised_atm_cldice.yaml \
+  --experiment-name supervised-atm-l20-cldice \
+  --run-description "Supervised ATM 20 labelled + soft clDice (cldice_weight=1.0, iters=10). Topology loss for distal recovery." \
+  --num-workers 4 --device cuda
+
+# --- Supervised-ATM baseline (no clDice) ---
 # python -u -m scripts.train_baseline \
 #   --data-config configs/data/atm22.yaml \
 #   --model-config configs/model/baseline_unet.yaml \
 #   --training-config configs/training/supervised_atm.yaml \
+#   --experiment-name supervised-atm-l20 \
+#   --run-description "Supervised ATM 20 labelled baseline." \
 #   --num-workers 4 --device cuda
 
-# --- (2) Mean Teacher ATM, from scratch (canonical) ---
+# --- Mean Teacher ATM, from scratch ---
 # python -u -m scripts.train_semisupervised \
-#   --data-config configs/data/atm22.yaml \
-#   --atm22-config configs/data/atm22.yaml \
+#   --data-config configs/data/atm22.yaml --atm22-config configs/data/atm22.yaml \
 #   --model-config configs/model/baseline_unet.yaml \
 #   --training-config configs/training/mean_teacher_atm.yaml \
+#   --experiment-name mean-teacher-atm-l20 \
+#   --run-description "Mean Teacher ATM, from scratch." \
 #   --num-workers 4 --device cuda
 
-# --- (3) Mean Teacher ATM, warm-started from supervised-atm-l20 (ACTIVE) ---
-python -u -m scripts.train_semisupervised \
-  --data-config configs/data/atm22.yaml \
-  --atm22-config configs/data/atm22.yaml \
-  --model-config configs/model/baseline_unet.yaml \
-  --training-config configs/training/mean_teacher_atm_warmstart.yaml \
-  --init-checkpoint runs/supervised-atm-l20/2026-06-11__04-10-34__baseline_unet/best_model.pt \
-  --num-workers 4 --device cuda
+# --- Mean Teacher ATM, warm-started from supervised-atm-l20 ---
+# python -u -m scripts.train_semisupervised \
+#   --data-config configs/data/atm22.yaml --atm22-config configs/data/atm22.yaml \
+#   --model-config configs/model/baseline_unet.yaml \
+#   --training-config configs/training/mean_teacher_atm_warmstart.yaml \
+#   --init-checkpoint runs/supervised-atm-l20/2026-06-11__04-10-34__baseline_unet/best_model.pt \
+#   --experiment-name mean-teacher-atm-warmstart-l20 \
+#   --run-description "Mean Teacher ATM warm-started from supervised-atm-l20." \
+#   --num-workers 4 --device cuda

@@ -354,6 +354,10 @@ def validate_training_config(training_config: dict) -> None:
         raise ValueError("loss.dice_weight must be non-negative.")
     if float(loss_config.get("positive_class_weight", 1.0)) <= 0.0:
         raise ValueError("loss.positive_class_weight must be positive.")
+    if float(loss_config.get("cldice_weight", 0.0)) < 0.0:
+        raise ValueError("loss.cldice_weight must be non-negative.")
+    if int(loss_config.get("cldice_iterations", 10)) < 1:
+        raise ValueError("loss.cldice_iterations must be >= 1.")
 
 
 def validate_semisupervised_training_config(training_config: dict) -> None:

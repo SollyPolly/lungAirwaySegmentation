@@ -1,0 +1,55 @@
+# Supervised ATM'22 + clDice (topology-aware loss for distal recovery).
+# Identical to supervised_atm.yaml (same split/seed, so it is a paired comparison)
+# except the loss adds a soft centerline-Dice term. Run with:
+#   --data-config configs/data/atm22.yaml
+# Compare against supervised-atm-l20 (0.609) on Dice AND distal recall / TD
+# (scripts/analyse_distal.py).
+
+experiment_name: supervised-atm-l20-cldice
+description: "Supervised ATM'22 (20 labelled) + soft clDice topology loss. Target: recover distal branches the volumetric baseline misses."
+seed: 15
+epochs: 50
+training_regime: patch
+batch_size: 1
+num_workers: 4
+
+# Same counts + seed as supervised_atm.yaml -> identical test/val/labelled sets.
+labelled_split:
+  test_count: 20
+  val_count: 20
+  labelled_count: 20
+
+sampling:
+  patch_size: [96, 96, 96]
+  patches_per_case: 4
+  foreground_probability: 0.7
+  cache_rate: 0.5
+
+validation:
+  validate_every: 5
+  roi_size: [96, 96, 96]
+  sw_batch_size: 4
+  inference_overlap: 0.5
+  threshold: 0.99
+
+optimizer:
+  name: adamw
+  lr: 0.0003
+  weight_decay: 0.00001
+
+scheduler:
+  name: cosine
+  warmup_epochs: 10
+
+amp:
+  enabled: true
+
+loss:
+  dice_weight: 1.0
+  bce_weight: 1.0
+  positive_class_weight: 10.0
+  # Soft centerline Dice. cldice_weight ~1.0 makes it comparable to the Dice term;
+  # cldice_iterations >= max airway radius in voxels (~10 at 96^3). Tune down if
+  # early training is unstable (soft skeletons of near-uniform masks are noisy).
+  cldice_weight: 1.0
+  cldice_iterations: 10
