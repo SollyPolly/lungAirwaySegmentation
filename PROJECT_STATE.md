@@ -165,9 +165,11 @@ train.pbs                                        — ONE reusable HPC job script
 
 - **`analyse_distal.py`** is the workhorse, with **test-set hygiene in the defaults**.
   It (1) **selects a precision-constrained operating threshold** (max TD+LCC s.t.
-  topology-precision+LCC ≥ floor, default 0.80) and (2) **reports Dice / TD / BD /
+  **voxel**-precision+LCC ≥ floor, default 0.80) and (2) **reports Dice / TD / BD /
   clDice (+LCC)** at that fixed threshold, plus (3) the distal radius stratification +
-  threshold sweep. **Defaults to select+report on val** (develop here; single
+  threshold sweep. The sweep is **cheap** (no per-threshold skeletonisation);
+  clDice/topology-precision/BD are computed once at the chosen threshold, BD only on
+  the test report — a 20-case val run is minutes, not hours. **Defaults to select+report on val** (develop here; single
   inference pass): `python -m scripts.analyse_distal --run-dir <run> --overlap 0.5`.
   The sealed **test** table is opt-in — `--report-split test` selects on val, reports
   on test, and is the only mode that computes BD (the expensive ATM'22 branch parse).

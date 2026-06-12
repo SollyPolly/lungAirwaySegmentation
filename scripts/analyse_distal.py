@@ -4,18 +4,23 @@ Two jobs in one script, with **test-set hygiene baked into the defaults**:
 
 1. **Choose a defensible operating threshold** by sweeping thresholds on a split and
    picking the one that maximises tree-length detected (TD, +LCC) subject to a
-   topology-precision floor — recover as much tree as possible without leakage
-   exploding. Replaces picking the threshold by eye.
+   precision floor — recover as much tree as possible without leakage exploding.
 
 2. **Report the table** (Dice / TD / BD / clDice, +LCC) at that fixed threshold, per
    case and mean.
 
 **Develop on val, seal test.** By default this selects the op-point on **val** and
 reports on **val** — use it to compare configs (pos_weight, clDice weight, patch
-borders) without ever touching test. Run the final table on the sealed **test** split
-only when your models are frozen, by passing ``--report-split test``; that path
-selects the threshold on val and reports on test (no test-set tuning), and is the
-only mode that computes the expensive ATM'22 branch-detected (BD) metric.
+borders) without touching test. Run the final table on the sealed **test** split only
+when models are frozen, via ``--report-split test``; that path selects on val, reports
+on test (no test-set tuning), and is the only mode that computes the expensive ATM'22
+branch-detected (BD) metric.
+
+Performance: the threshold sweep is **cheap** — Dice, TD (reuses the GT skeleton), and
+**voxel** precision (TP/(TP+FP)); it does NOT skeletonise the prediction. Centerline
+metrics that need a prediction skeleton (clDice, topology precision, BD) are computed
+**once per case, at the chosen threshold only**, and BD (branch parsing) only on the
+test report. This keeps a 20-case val run to minutes, not hours.
 
 Usage:
     # development (default): select + report on val. Test stays sealed.
@@ -27,22 +32,21 @@ Usage:
     # quick smoke (cap cases)
     python -m scripts.analyse_distal --run-dir runs/<exp>/<run> --max-cases 2
 
-    # skip selection, fix the threshold yourself
-    python -m scripts.analyse_distal --run-dir runs/<exp>/<run> --threshold 0.7 --select-split none
-
-Defaults: select on val, **report on val** (pass --report-split test for the sealed
-final table), precision floor 0.80, overlap 0.5, the run's own checkpoint/model/data-
-config. Saved to <run-dir>/distal_analysis.json.
+Defaults: select on val, **report on val**, precision floor 0.80 (voxel precision),
+overlap 0.5, the run's own checkpoint/model/data-config. Saved to
+<run-dir>/distal_analysis.json.
 
 Notes / caveats:
 - "Radius" is per-voxel distance-to-wall (scipy EDT) — a cheap proxy for airway
   generation; r=1 is dominated by true distal branches but includes the one-voxel
   surface shell of thick airways. The recall *trend* across bins is the robust signal.
 - TD is recall-like (ignores false positives); read it at the fixed operating
-  threshold alongside a precision-side metric (topology precision / BD), never its max.
+  threshold alongside the precision floor / BD, never its max.
 - The val/val dev mode is mildly optimistic (threshold chosen on the same cases it's
   reported on) — fine for *ranking* configs; the unbiased number is the sealed test run.
-- BD (ATM'22 branch parsing) is computed only on the test report; dev rows show "—".
+- The precision FLOOR is on voxel precision (cheap, for selection); the per-case table
+  also reports clDice + topology precision at the chosen threshold. BD and clDice are
+  "—" in dev mode (they need the prediction skeleton) — run --report-split test for them.
 """
 
 import argparse
@@ -55,7 +59,6 @@ from scipy import ndimage
 
 from lung_airway_segmentation.inference.postprocess import keep_largest_connected_component
 from lung_airway_segmentation.inference.sliding_window import predict_logits_for_volume
-from lung_airway_segmentation.metrics.segmentation import binary_dice_score_from_masks
 from lung_airway_segmentation.metrics.topology import (
     _foreground_slices,
     _largest_connected_component,
@@ -80,9 +83,10 @@ RADIUS_BINS = [
     ("r>=6 (proximal)", 5.5, 1e9),
 ]
 
-# thresholds for the Dice/TD/precision sweep (clDice models calibrate lower than
-# pos_weight baselines, so their topology operating point is usually below 0.99).
-SWEEP_THRESHOLDS = [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 0.99]
+# Sweep grid. 0.3/0.4 dropped: degenerate (Dice ~0) and the fattest masks — by far
+# the slowest to post-process — so they only cost time. clDice models still calibrate
+# below the pos_weight baseline, so the useful operating range is ~0.5-0.9.
+SWEEP_THRESHOLDS = [0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 0.99]
 
 _SPLIT_KEYS = {"val": "val_case_ids", "test": "test_case_ids", "train": "train_case_ids"}
 
@@ -95,12 +99,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--report-split", choices=("val", "test", "train"), default="val",
                         help="Split to report the table on (default val — develop here). Pass 'test' for the sealed final table.")
     parser.add_argument("--precision-floor", type=float, default=0.80,
-                        help="Min topology-precision+LCC the chosen threshold must meet (default 0.80).")
+                        help="Min VOXEL precision (TP/(TP+FP)) +LCC the chosen threshold must meet (default 0.80).")
     parser.add_argument("--cases", type=str, default=None, help="Comma-separated case IDs to override the *report* split.")
     parser.add_argument("--max-cases", type=int, default=None, help="Cap cases per split (default: all).")
     parser.add_argument("--checkpoint", choices=("best", "last"), default="best")
     parser.add_argument("--threshold", type=float, default=None, help="Fix the operating threshold (skips selection).")
-    parser.add_argument("--overlap", type=float, default=0.5, help="Sliding-window overlap (0.5 default; 0.75 for headline).")
+    parser.add_argument("--overlap", type=float, default=0.5, help="Sliding-window overlap (0.5 default; 0.25 faster for dev).")
+    parser.add_argument("--sw-batch", type=int, default=8, help="Sliding-window batch size (raise on big GPUs to speed inference).")
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--data-config", type=Path, default=None, help="Override dataset to load cases from. Default: the run's data config.")
     return parser.parse_args()
@@ -141,10 +146,10 @@ def split_case_ids(metadata, split):
     return [str(c) for c in metadata.get("splits", {}).get(_SPLIT_KEYS[split], [])]
 
 
-def infer_probability(model, ct, *, device, roi_size, overlap):
+def infer_probability(model, ct, *, device, roi_size, overlap, sw_batch):
     logits = predict_logits_for_volume(
         model, ct, device=device, roi_size=roi_size,
-        sw_batch_size=4, overlap=overlap, use_amp=False,
+        sw_batch_size=sw_batch, overlap=overlap, use_amp=False,
     )
     return torch.sigmoid(logits).squeeze().cpu().numpy().astype(np.float32)
 
@@ -157,30 +162,28 @@ def gt_centerline(gt):
     return slices, skeleton, int(skeleton.sum())
 
 
-def cheap_dice_td(predicted, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum):
-    """Fast Dice + TD (skeleton recall) without re-skeletonising the prediction."""
-    intersection = int((predicted & gt).sum())
-    dice = 2 * intersection / ((int(predicted.sum()) + gt_sum) or 1)
+def cheap_metrics(predicted, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum):
+    """Dice, TD (skeleton recall), and VOXEL precision — no prediction skeletonisation."""
+    pred_sum = int(predicted.sum())
+    tp = int((predicted & gt).sum())
+    dice = 2 * tp / ((pred_sum + gt_sum) or 1)
+    precision = tp / (pred_sum or 1)
     td = (
         int((gt_skeleton & predicted[td_slices]).sum()) / gt_skeleton_sum
         if gt_skeleton_sum else 1.0
     )
-    return float(dice), float(td)
+    return float(dice), float(td), float(precision)
 
 
 def sweep_case(prob, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum):
-    """Per-threshold Dice/TD (raw + LCC) and topology-precision+LCC for one case."""
+    """Per-threshold Dice/TD (raw + LCC) and voxel-precision+LCC — all cheap."""
     rows = {}
     for t in SWEEP_THRESHOLDS:
         pred = prob >= t
-        dice_raw, td_raw = cheap_dice_td(pred, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum)
+        dice_raw, td_raw, _ = cheap_metrics(pred, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum)
         pred_lcc = keep_largest_connected_component(pred) > 0
-        dice_lcc, td_lcc = cheap_dice_td(pred_lcc, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum)
-        tprec_lcc = float(topology_precision_from_masks(pred_lcc, gt))
-        rows[t] = {
-            "dice": dice_raw, "dice_lcc": dice_lcc,
-            "td": td_raw, "td_lcc": td_lcc, "tprec_lcc": tprec_lcc,
-        }
+        dice_lcc, td_lcc, prec_lcc = cheap_metrics(pred_lcc, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum)
+        rows[t] = {"dice": dice_raw, "dice_lcc": dice_lcc, "td": td_raw, "td_lcc": td_lcc, "prec_lcc": prec_lcc}
     return rows
 
 
@@ -194,73 +197,79 @@ def mean_sweep(case_rows):
             "dice_lcc": float(np.mean([v["dice_lcc"] for v in vals])),
             "td": float(np.mean([v["td"] for v in vals])),
             "td_lcc": float(np.mean([v["td_lcc"] for v in vals])),
-            "tprec_lcc": float(np.mean([v["tprec_lcc"] for v in vals])),
+            "prec_lcc": float(np.mean([v["prec_lcc"] for v in vals])),
         })
     return out
 
 
 def select_operating_point(sweep, precision_floor):
-    """Max TD+LCC subject to topology-precision+LCC >= floor; else max precision."""
-    eligible = [r for r in sweep if r["tprec_lcc"] >= precision_floor]
+    """Max TD+LCC subject to voxel-precision+LCC >= floor; else max precision."""
+    eligible = [r for r in sweep if r["prec_lcc"] >= precision_floor]
     if eligible:
         best = max(eligible, key=lambda r: r["td_lcc"])
-        reason = f"max TD+LCC s.t. topo-precision+LCC >= {precision_floor:.2f}"
+        reason = f"max TD+LCC s.t. voxel-precision+LCC >= {precision_floor:.2f}"
     else:
-        best = max(sweep, key=lambda r: r["tprec_lcc"])
-        reason = f"no threshold met precision floor {precision_floor:.2f}; fell back to max topo-precision+LCC"
+        best = max(sweep, key=lambda r: r["prec_lcc"])
+        reason = f"no threshold met precision floor {precision_floor:.2f}; fell back to max voxel-precision+LCC"
     return float(best["threshold"]), reason
 
 
 def print_sweep(sweep, title):
     print(f"\n--- {title} ---")
-    print(f"{'thresh':>7}  {'Dice':>6}  {'Dice+LCC':>8}  {'TD':>6}  {'TD+LCC':>7}  {'TPrec+LCC':>9}")
+    print(f"{'thresh':>7}  {'Dice':>6}  {'Dice+LCC':>8}  {'TD':>6}  {'TD+LCC':>7}  {'Prec+LCC':>8}")
     for r in sweep:
         print(f"{r['threshold']:>7.2f}  {r['dice']:>6.3f}  {r['dice_lcc']:>8.3f}  "
-              f"{r['td']:>6.3f}  {r['td_lcc']:>7.3f}  {r['tprec_lcc']:>9.3f}")
+              f"{r['td']:>6.3f}  {r['td_lcc']:>7.3f}  {r['prec_lcc']:>8.3f}")
 
 
-def run_split(model, dataset_name, data_config, hu_window, cases, *, device, roi_size, overlap,
-              chosen_threshold=None, collect_bins=False):
+def run_split(model, dataset_name, data_config, hu_window, cases, *, device, roi_size, overlap, sw_batch,
+              chosen_threshold=None, compute_bd=False, collect_bins=False):
     """Inference over a list of cases.
 
-    Always returns the per-case threshold sweep. If ``chosen_threshold`` is given,
-    also computes the full ATM'22 table (Dice/TD/BD/clDice, +LCC) at that threshold.
-    If ``collect_bins`` is set, also accumulates radius-stratified probabilities.
+    Always computes the cheap per-case sweep. If ``chosen_threshold`` is set, also
+    builds the per-case table at that threshold: clDice + topology precision via a
+    single prediction skeletonisation, and BD (branch parse) only when ``compute_bd``.
+    If ``collect_bins`` is set, accumulates radius-stratified probabilities.
     """
-    case_sweeps = []
-    table_rows = []
+    case_sweeps, table_rows = [], []
     bin_probs = {label: [] for label, _, _ in RADIUS_BINS}
 
     for cid in cases:
         ct, gt = load_case(dataset_name, data_config, cid, hu_window)
         gt_sum = int(gt.sum())
         td_slices, gt_skeleton, gt_skeleton_sum = gt_centerline(gt)
-        prob = infer_probability(model, ct, device=device, roi_size=roi_size, overlap=overlap)
+        prob = infer_probability(model, ct, device=device, roi_size=roi_size, overlap=overlap, sw_batch=sw_batch)
 
         case_sweeps.append(sweep_case(prob, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum))
 
         if chosen_threshold is not None:
             pred = prob >= chosen_threshold
-            dice_raw, td_raw = cheap_dice_td(pred, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum)
+            dice_raw, td_raw, _ = cheap_metrics(pred, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum)
             pred_lcc = keep_largest_connected_component(pred) > 0
-            topo = airway_topology_metrics_from_masks(pred_lcc, gt)  # TD/BD/clDice/precision, +LCC
-            dice_lcc = float(binary_dice_score_from_masks(pred_lcc, gt))
+            dice_lcc, td_lcc, prec_lcc = cheap_metrics(pred_lcc, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum)
+            if compute_bd:
+                topo = airway_topology_metrics_from_masks(pred_lcc, gt)  # +BD branch parse (expensive)
+                td_lcc = float(topo["tree_length_detected"])
+                bd_lcc = float(topo["branch_detected"])
+                cldice_lcc = float(topo["cldice"])
+                tprec_lcc = float(topo["topology_precision"])
+                ref_b, det_b = int(topo["reference_branch_count"]), int(topo["detected_branch_count"])
+            else:
+                tprec_lcc = float(topology_precision_from_masks(pred_lcc, gt))  # one skeletonisation
+                denom = tprec_lcc + td_lcc
+                cldice_lcc = float(2.0 * tprec_lcc * td_lcc / denom) if denom > 0 else 0.0
+                bd_lcc = ref_b = det_b = None
             row = {
                 "case_id": cid, "airway_voxels": gt_sum,
-                "dice_lcc": dice_lcc,
-                "td_lcc": float(topo["tree_length_detected"]),
-                "bd_lcc": float(topo["branch_detected"]),
-                "cldice_lcc": float(topo["cldice"]),
-                "tprec_lcc": float(topo["topology_precision"]),
-                "reference_branches": int(topo["reference_branch_count"]),
-                "detected_branches": int(topo["detected_branch_count"]),
+                "dice_lcc": dice_lcc, "td_lcc": td_lcc, "bd_lcc": bd_lcc,
+                "cldice_lcc": cldice_lcc, "tprec_lcc": tprec_lcc, "prec_lcc": prec_lcc,
+                "reference_branches": ref_b, "detected_branches": det_b,
                 "dice_raw": dice_raw, "td_raw": td_raw,
             }
             table_rows.append(row)
+            bd_str = f"BD {bd_lcc:.3f}  " if bd_lcc is not None else ""
             print(f"case {cid}: voxels {gt_sum:,}  | +LCC@{chosen_threshold:.2f}  "
-                  f"Dice {dice_lcc:.3f}  TD {row['td_lcc']:.3f}  BD {row['bd_lcc']:.3f}  "
-                  f"clDice {row['cldice_lcc']:.3f}  TPrec {row['tprec_lcc']:.3f}  "
-                  f"({row['detected_branches']}/{row['reference_branches']} branches)")
+                  f"Dice {dice_lcc:.3f}  TD {td_lcc:.3f}  {bd_str}clDice {cldice_lcc:.3f}  Prec {prec_lcc:.3f}")
         else:
             print(f"case {cid}: voxels {gt_sum:,}  (swept)")
 
@@ -275,24 +284,21 @@ def run_split(model, dataset_name, data_config, hu_window, cases, *, device, roi
 
 
 def table_from_sweep(case_ids, case_sweeps, threshold):
-    """Build the +LCC table from an already-computed sweep (no BD — dev mode)."""
+    """Dev-mode table straight from the cheap sweep (Dice/TD/voxel-prec; no clDice/BD)."""
     rows = []
     for cid, cs in zip(case_ids, case_sweeps):
         r = cs[threshold]
-        td_lcc, tprec = r["td_lcc"], r["tprec_lcc"]
-        denom = tprec + td_lcc
-        cldice = float(2.0 * tprec * td_lcc / denom) if denom > 0 else 0.0
         rows.append({
             "case_id": cid,
-            "dice_lcc": r["dice_lcc"], "td_lcc": td_lcc, "bd_lcc": None,
-            "cldice_lcc": cldice, "tprec_lcc": tprec,
+            "dice_lcc": r["dice_lcc"], "td_lcc": r["td_lcc"], "prec_lcc": r["prec_lcc"],
+            "bd_lcc": None, "cldice_lcc": None, "tprec_lcc": None,
             "dice_raw": r["dice"], "td_raw": r["td"],
         })
     return rows
 
 
 def table_mean(rows):
-    keys = ["dice_lcc", "td_lcc", "bd_lcc", "cldice_lcc", "tprec_lcc", "dice_raw", "td_raw"]
+    keys = ["dice_lcc", "td_lcc", "bd_lcc", "cldice_lcc", "tprec_lcc", "prec_lcc", "dice_raw", "td_raw"]
     out = {}
     for k in keys:
         vals = [r[k] for r in rows if r.get(k) is not None]
@@ -339,9 +345,9 @@ def main() -> None:
     def cap(ids):
         return ids if args.max_cases is None else ids[: args.max_cases]
 
-    print(f"model: {metadata.get('experiment_name')}  | checkpoint {args.checkpoint}  | overlap {args.overlap}")
+    infer_kw = dict(device=device, roi_size=roi_size, overlap=args.overlap, sw_batch=args.sw_batch)
+    print(f"model: {metadata.get('experiment_name')}  | checkpoint {args.checkpoint}  | overlap {args.overlap}  | sw_batch {args.sw_batch}")
 
-    # report cases (resolved early so we can reuse selection inference when splits match)
     if args.cases:
         report_cases, report_label = [c.strip() for c in args.cases.split(",") if c.strip()], "custom"
     else:
@@ -363,8 +369,7 @@ def main() -> None:
         print(f"\nselecting operating point on {args.select_split} ({len(sel_cases)} cases)...")
         sel_sweeps, _, sel_bins = run_split(
             model, dataset_name, data_config, hu_window, sel_cases,
-            device=device, roi_size=roi_size, overlap=args.overlap,
-            collect_bins=same_split,  # reuse these for the report when the split matches
+            collect_bins=same_split, **infer_kw,
         )
         val_sweep = mean_sweep(sel_sweeps)
         print_sweep(val_sweep, f"{args.select_split} sweep (mean over {len(sel_cases)} cases)")
@@ -382,31 +387,33 @@ def main() -> None:
     reuse = same_split and chosen_threshold in SWEEP_THRESHOLDS
     if reuse:
         print(f"\nreporting on {report_label} ({len(report_cases)} cases) at {chosen_threshold:.2f}, +LCC "
-              "— reusing val inference (dev mode; BD omitted, run --report-split test for BD):")
-        report_sweeps = sel_sweeps
+              "— reusing val inference (dev mode; clDice/BD omitted, run --report-split test for them):")
+        report_sweeps, bin_probs = sel_sweeps, sel_bins
         table_rows = table_from_sweep(sel_cases, sel_sweeps, chosen_threshold)
-        bin_probs = sel_bins
         for r in table_rows:
             print(f"case {r['case_id']}: +LCC@{chosen_threshold:.2f}  Dice {r['dice_lcc']:.3f}  "
-                  f"TD {r['td_lcc']:.3f}  clDice {r['cldice_lcc']:.3f}  TPrec {r['tprec_lcc']:.3f}")
+                  f"TD {r['td_lcc']:.3f}  Prec {r['prec_lcc']:.3f}")
     else:
         if args.report_split == "test" and not args.cases:
             print("\n[note] reporting on the SEALED TEST split — only on frozen, pre-decided models. "
                   "Develop and tune on val.")
-        print(f"\nreporting on {report_label} ({len(report_cases)} cases) at {chosen_threshold:.2f}, +LCC:")
+        compute_bd = (args.report_split == "test")
+        print(f"\nreporting on {report_label} ({len(report_cases)} cases) at {chosen_threshold:.2f}, +LCC"
+              + (" (with BD branch parse)" if compute_bd else "") + ":")
         report_sweeps, table_rows, bin_probs = run_split(
             model, dataset_name, data_config, hu_window, report_cases,
-            device=device, roi_size=roi_size, overlap=args.overlap,
-            chosen_threshold=chosen_threshold, collect_bins=True,
+            chosen_threshold=chosen_threshold, compute_bd=compute_bd, collect_bins=True, **infer_kw,
         )
     report_sweep = mean_sweep(report_sweeps)
     mean_row = table_mean(table_rows)
 
-    bd_str = f"{mean_row['bd_lcc']:.3f}" if mean_row["bd_lcc"] is not None else "—(dev)"
+    def fmt(value):
+        return f"{value:.3f}" if value is not None else "—"
+
     print(f"\n=== TABLE ({report_label}, +LCC @ {chosen_threshold:.2f}) ===")
-    print(f"  MEAN  Dice {mean_row['dice_lcc']:.3f}  TD {mean_row['td_lcc']:.3f}  "
-          f"BD {bd_str}  clDice {mean_row['cldice_lcc']:.3f}  TPrec {mean_row['tprec_lcc']:.3f}   "
-          f"(raw Dice {mean_row['dice_raw']:.3f} / TD {mean_row['td_raw']:.3f})")
+    print(f"  MEAN  Dice {fmt(mean_row['dice_lcc'])}  TD {fmt(mean_row['td_lcc'])}  "
+          f"BD {fmt(mean_row['bd_lcc'])}  clDice {fmt(mean_row['cldice_lcc'])}  "
+          f"Prec {fmt(mean_row['prec_lcc'])}   (raw Dice {fmt(mean_row['dice_raw'])} / TD {fmt(mean_row['td_raw'])})")
 
     bins_out = build_bins_output(bin_probs, chosen_threshold)
     if bins_out:
@@ -419,7 +426,7 @@ def main() -> None:
         print_sweep(report_sweep, f"{report_label} sweep (mean over {len(report_cases)} cases)")
     print(
         "\nnote: TD is recall-like (ignores false positives) — read it at the fixed "
-        "operating threshold above, paired with TPrec/BD. Op-point chosen on "
+        f"operating threshold above, paired with Prec/BD. Op-point chosen on "
         f"{selected_on or 'a fixed threshold'}; "
         + ("dev mode (reported on the same split — mildly optimistic)." if reuse
            else "reported split is separate from selection." if selected_on and selected_on != report_label
@@ -441,7 +448,7 @@ def main() -> None:
         "report_split": report_label,
         "report_cases": report_cases,
         "dev_mode": bool(reuse),
-        "bd_computed": not reuse and any(r.get("bd_lcc") is not None for r in table_rows),
+        "bd_computed": any(r.get("bd_lcc") is not None for r in table_rows),
         "selection_sweep": val_sweep,
         "threshold_sweep": report_sweep,
         "table_per_case": table_rows,
