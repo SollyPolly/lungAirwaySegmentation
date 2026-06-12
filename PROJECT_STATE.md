@@ -66,35 +66,53 @@ low thresholds is degenerate — always compare TD at a *fixed* operating thresh
 paired with a precision-side metric (BD / topology precision, both in
 `metrics/topology.py`).
 
-### Diagnosis (2026-06-12): missing branches are mostly *below threshold*, not unlearned
+### Diagnosis (updated 2026-06-12, n=20 val): distal tree is below threshold — but recovering it isn't free
 
-The latest clDice run's `distal_analysis.json` reframes "many branches left
-unpredicted". The distal voxels (r=1) are **56% of all airway voxels**, and the
-model already predicts most of them — just at confidences the 0.99 operating point
-discards:
+Confirmed on the full 20 val cases (clDice model, `analyse_distal` dev run). The
+distal voxels (r=1) are **~50% of all airway voxels**; the model predicts most of
+them but at confidences the operating threshold discards:
 
-| Distal (r=1) recall | @0.99 | @0.50 |
+| Distal (r=1) recall | @op 0.95 | @0.50 |
 |---|---:|---:|
-| recall | **23.5%** | **76.8%** |
+| recall | **39.9%** | **79.5%** |
 
-Threshold sweep on the clDice model (+LCC):
+The catch is **precision**. Threshold sweep, +LCC, mean over 20 val cases:
 
-| op-point | Dice+LCC | TD+LCC |
-|---|---:|---:|
-| 0.50 | 0.509 | **0.604** |
-| 0.90 (Dice-optimal) | **0.701** | 0.315 |
-| 0.99 | 0.628 | 0.209 |
+| threshold | Dice+LCC | TD+LCC | voxel-Prec+LCC |
+|---|---:|---:|---:|
+| 0.50 | 0.512 | **0.592** | 0.364 |
+| 0.90 | **0.730** | 0.317 | 0.757 |
+| 0.95 (op @ floor 0.80) | 0.721 | 0.278 | 0.805 |
+| 0.99 | 0.658 | 0.210 | 0.860 |
 
-**Implication:** reporting near the Dice-optimal point (0.90) discards ~half the
-tree. For the topology narrative the operating point should sit at **~0.5–0.7 +
-LCC** (TD ≈ 0.60), with Dice reported but explicitly *not* the objective. This
-~doubles headline TD at **no training cost** — a reporting/operating-point change,
-not a modelling one. (It costs Dice, but Dice is not the objective for a tree.) It
-also relocates the next gains: they're about **calibration** (recover the
-sub-threshold branches) and **connectivity**, not raw capacity. Caveat: at 0.50 the
-raw Dice is 0.099 — the 0.50 point currently *leans entirely on LCC* to delete FP
-blobs. De-saturating the model (see `pos_weight` lesson below) is what makes a low
-operating point honest rather than an LCC rescue.
+The high TD at 0.50 comes with **voxel precision 0.36** — after LCC, ~⅔ of the
+predicted tree's voxels are false. A precision-constrained op-point (≥0.80 voxel
+precision) therefore lands at **~0.90–0.95**, TD ~0.28–0.32 — **not** the ~0.60 the
+raw TD sweep implied. **This qualifies the earlier "operate low → ~double TD for
+free" framing: TD's recall-like blindness to false positives hid heavy leakage.**
+
+**Fork resolved (n=18 val, clDice model):** topology precision is **0.64 @0.50** vs
+**0.86 @0.90**; voxel precision is 0.36 vs 0.76. So the low-threshold blow-up in voxel
+precision is **mostly radial over-segmentation** (fat tubes — 64% of the centreline is
+inside GT while only 36% of voxels are), i.e. **voxel precision was the wrong gate**.
+But the 22-pt topology-precision drop (0.86→0.64) is a **real leakage/false-branch
+component** — not purely benign.
+
+**Key consequence — clDice favours a LOW operating point.** clDice (the core topology
+metric, harmonic mean of topo-precision and TD) is **0.62 @0.50 vs 0.46 @0.90** —
+higher low, because at 0.50 precision (0.64) and TD (0.60) are balanced, whereas at
+0.90 TD (0.32) is the limiter. So the op-point should be selected by **clDice /
+topology precision (~0.5–0.6)**, not the voxel-precision floor (which forced 0.95,
+clDice 0.46). The residual leakage means **calibration (pos_weight)** is still a real
+lever — push topo-precision up at low thresholds for an even better clDice.
+
+Caveats: n=18, val, clDice-only; intermediate thresholds (0.6–0.7) unmeasured so the
+clDice peak may sit slightly above 0.5; and the **baseline (supervised-ATM) still needs
+the same run** — that comparison, not the clDice number alone, is the result.
+Trade-off to state plainly: at ~0.5 the *mask* is poor (Dice+LCC ~0.50, voxel-prec
+~0.36, fat walls) while the *tree* is good (clDice ~0.62) — a topology-first result,
+not a segmentation-quality one. (A centreline-preserving thinning post-process could
+later reclaim voxel precision without losing the tree — future scope.)
 
 ---
 
@@ -131,6 +149,7 @@ configs/
   training/    baseline.yaml                 — supervised AeroPath
                supervised_atm.yaml           — supervised ATM (the SSL baseline)
                supervised_atm_cldice.yaml    — supervised ATM + clDice (warm-up 15, ramp 10, weight 1.0, iters 10, 80 epochs)
+               supervised_atm_cldice_pw3.yaml — clDice + pos_weight=3, val threshold 0.5 (calibration ablation; ACTIVE next run)
                mean_teacher_atm.yaml          — MT single-domain (from scratch) [negative result]
                mean_teacher_atm_warmstart.yaml— MT single-domain (warm-started) [negative result]
                teacher_student.yaml           — pre-pivot cross-domain MT [superseded]
@@ -164,19 +183,21 @@ train.pbs                                        — ONE reusable HPC job script
 ## Tooling notes
 
 - **`analyse_distal.py`** is the workhorse, with **test-set hygiene in the defaults**.
-  It (1) **selects a precision-constrained operating threshold** (max TD+LCC s.t.
-  **voxel**-precision+LCC ≥ floor, default 0.80) and (2) **reports Dice / TD / BD /
-  clDice (+LCC)** at that fixed threshold, plus (3) the distal radius stratification +
-  threshold sweep. The sweep is **cheap** (no per-threshold skeletonisation);
-  clDice/topology-precision/BD are computed once at the chosen threshold, BD only on
-  the test report — a 20-case val run is minutes, not hours. **Defaults to select+report on val** (develop here; single
-  inference pass): `python -m scripts.analyse_distal --run-dir <run> --overlap 0.5`.
-  The sealed **test** table is opt-in — `--report-split test` selects on val, reports
-  on test, and is the only mode that computes BD (the expensive ATM'22 branch parse).
-  Other flags: `--threshold X --select-split none`, `--precision-floor`, `--max-cases N`
-  (smoke). Saves `distal_analysis.json` (`operating_point`, `table_per_case`/`table_mean`,
-  `selection_sweep`, `threshold_sweep`, `bins`, `dev_mode`). **Run the test table once
-  per model** (supervised vs +clDice), frozen, and stack the two `table_mean` rows.
+  It (1) **selects the operating threshold** — default `--select-by cldice`: max clDice
+  over `--cldice-candidates` (default 0.4,0.5,0.6; warns + says to widen if the peak is
+  at the candidate-range edge); `--select-by voxel-precision` is the fast no-skeletonise
+  alternative (TD s.t. voxel-precision ≥ `--precision-floor`) — and (2) **reports Dice /
+  TD / BD / clDice / TPrec (+LCC)** at that threshold, plus (3) distal radius
+  stratification + the cheap threshold sweep (grid now includes 0.3/0.4 for de-saturated
+  models). clDice/topology-precision are computed only at the candidates (or the chosen
+  threshold); BD only on the test report. **Defaults to select+report on val** (develop
+  here): `python -m scripts.analyse_distal --run-dir <run>` → `<run>/distal_analysis.json`.
+  Use `--out distal_analysis__<tag>.json` so runs don't clobber. The sealed **test**
+  table is opt-in: `--report-split test` (selects on val, reports on test, computes BD) —
+  run once per frozen model, stack the `table_mean` rows. JSON keys: `operating_point`
+  (+`cldice_candidates`), `cldice_candidate_scan`, `table_per_case`/`table_mean`,
+  `selection_sweep`, `threshold_sweep`, `bins`, `dev_mode`. ~3–4 min/case in clDice mode
+  → give ~2 h walltime.
 - **`predict_atm.py`** writes the layout `mask_visualisation.py` expects
   (`predictions/<case>/prediction_metadata.json` + `airway_pred_full.nii.gz` +
   `airway_pred_lcc_full.nii.gz` + `airway_prob_full.nii.gz`), in **canonical
@@ -247,10 +268,12 @@ train.pbs                                        — ONE reusable HPC job script
    BD/topology-precision ≥ bound), which lands well below 0.9 (~0.5–0.7 + LCC,
    TD ≈ 0.60). Free ~2× headline TD (see Diagnosis). Frame explicitly: "we operate
    where the tree is recovered; Dice is reported, not optimised."
-3. **`pos_weight` ablation** on the clDice model (pw ∈ {1, 3, 10}), val threshold
-   lowered to ~0.5 and selection made topology-aware. Goal: a calibrated model whose
-   natural threshold is ~0.5 and whose distal recall holds up *without* leaning on
-   LCC — and, either way, the ablation that answers the "why 0.99?" viva question.
+3. **`pos_weight` ablation** on the clDice model (pw ∈ {1, 3, 10}). **pw3 wired** as
+   the active train.pbs run (`supervised_atm_cldice_pw3.yaml`, val threshold 0.5);
+   pw1 next. Goal: a calibrated model that holds topology precision at low thresholds
+   (the pw10 model dropped to 0.64 @0.5) → higher clDice at the ~0.5–0.6 operating
+   point. NB checkpoint selection is still by val Dice@0.5 (volume-biased); making it
+   topology-aware (clDice/TD) is a separate engine change — offered, not yet done.
 
 **Tier 2 — push the topology contribution:**
 4. **clDice ablation:** `cldice_weight` ∈ {1, 1.5, 2}, +20 epochs (attempt 2 was

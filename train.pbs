@@ -26,14 +26,23 @@ nvidia-smi
 # Commented blocks are ready-to-swap alternatives.
 # =====================================================================
 
-# --- (ACTIVE) Supervised-ATM + clDice topology loss ---
+# --- (ACTIVE) Supervised-ATM + clDice, pos_weight=3 — calibration ablation ---
 python -u -m scripts.train_baseline \
   --data-config configs/data/atm22.yaml \
   --model-config configs/model/baseline_unet.yaml \
-  --training-config configs/training/supervised_atm_cldice.yaml \
-  --experiment-name supervised-atm-l20-cldice \
-  --run-description "Supervised ATM 20 labelled + soft clDice (cldice_weight=1.0, iters=10). Topology loss for distal recovery." \
+  --training-config configs/training/supervised_atm_cldice_pw3.yaml \
+  --experiment-name supervised-atm-l20-cldice-pw3 \
+  --run-description "Supervised ATM 20 labelled + clDice, pos_weight=3 (de-saturate; val threshold 0.5). Test whether calibration lifts topology precision at low thresholds / clDice." \
   --num-workers 4 --device cuda
+
+# --- Supervised-ATM + clDice, pos_weight=10 (DONE — the current clDice run) ---
+# python -u -m scripts.train_baseline \
+#   --data-config configs/data/atm22.yaml \
+#   --model-config configs/model/baseline_unet.yaml \
+#   --training-config configs/training/supervised_atm_cldice.yaml \
+#   --experiment-name supervised-atm-l20-cldice \
+#   --run-description "Supervised ATM 20 labelled + soft clDice (cldice_weight=1.0, iters=10). Topology loss for distal recovery." \
+#   --num-workers 4 --device cuda
 
 # --- Supervised-ATM baseline (no clDice) ---
 # python -u -m scripts.train_baseline \

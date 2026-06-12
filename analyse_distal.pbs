@@ -1,7 +1,7 @@
 #!/bin/bash
 #PBS -N AirwayAnalyse
 #PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
-#PBS -l walltime=12:00:00
+#PBS -l walltime=02:00:00
 #PBS -j oe
 #PBS -o /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation/analyse_distal.out
 
@@ -17,46 +17,44 @@ nvidia-smi
 # =====================================================================
 # Reusable distal/topology analysis job.
 #
-# Development runs select and report on validation only. Keep the held-out
-# test split sealed until model selection, threshold policy, precision floor,
-# and postprocessing choices are frozen.
+# Default = clDice op-point selection: picks the threshold that maximises clDice
+# over --cldice-candidates (default 0.4,0.5,0.6), selecting + reporting on val.
+# If the run prints "[warn] clDice peak is at the edge ...", widen the candidates
+# (e.g. --cldice-candidates 0.3,0.4,0.5,0.6,0.7) and re-run.
 #
-# Each run writes <run-dir>/distal_analysis.json and this log is overwritten.
+# Develop on val; only run --report-split test on frozen, pre-decided models.
+# Each block writes a DISTINCTLY-named JSON (--out) so runs don't clobber.
+# ~3-4 min/case (one skeletonisation per candidate) -> 20 cases ~1-1.5 h.
 # Comment the active block and uncomment one alternative when changing runs.
 # =====================================================================
 
-# --- (ACTIVE) clDice model: full validation analysis ---
+# --- SMOKE FIRST: 2 cases, validate the pipeline before any full run ---
+# python -u -m scripts.analyse_distal \
+#   --run-dir runs/supervised-atm-l20-cldice/2026-06-11__22-04-05__baseline_unet \
+#   --max-cases 2 --out distal_analysis__smoke.json --device cuda
+
+# --- (ACTIVE) clDice op-point eval, val (the pw10 clDice run, for the reference) ---
 python -u -m scripts.analyse_distal \
   --run-dir runs/supervised-atm-l20-cldice/2026-06-11__22-04-05__baseline_unet \
-  --select-split val \
-  --report-split val \
-  --precision-floor 0.80 \
-  --overlap 0.5 \
+  --out distal_analysis__cldice.json \
   --device cuda
 
-# --- Supervised ATM baseline: full validation analysis ---
+# --- pos_weight=3 clDice model (swap the run-dir in once training finishes) ---
+# python -u -m scripts.analyse_distal \
+#   --run-dir runs/supervised-atm-l20-cldice-pw3/<TIMESTAMP>__baseline_unet \
+#   --out distal_analysis__cldice.json --device cuda
+
+# --- Supervised-ATM baseline (clDice op-point, for the paired comparison) ---
 # python -u -m scripts.analyse_distal \
 #   --run-dir runs/supervised-atm-l20/2026-06-11__04-10-34__baseline_unet \
-#   --select-split val \
-#   --report-split val \
-#   --precision-floor 0.80 \
-#   --overlap 0.5 \
-#   --device cuda
+#   --out distal_analysis__cldice.json --device cuda
 
-# --- Quick validation smoke test for the active clDice run ---
+# --- FINAL ONLY: sealed test table (frozen models; selects on val, computes BD) ---
 # python -u -m scripts.analyse_distal \
 #   --run-dir runs/supervised-atm-l20-cldice/2026-06-11__22-04-05__baseline_unet \
-#   --select-split val \
-#   --report-split val \
-#   --max-cases 2 \
-#   --overlap 0.5 \
-#   --device cuda
+#   --report-split test --out distal_analysis__test.json --device cuda
 
-# --- FINAL ONLY: sealed test table after all choices are frozen ---
+# --- Fast cheap look (voxel-precision floor, no skeletonisation) ---
 # python -u -m scripts.analyse_distal \
 #   --run-dir runs/supervised-atm-l20-cldice/2026-06-11__22-04-05__baseline_unet \
-#   --select-split val \
-#   --report-split test \
-#   --precision-floor 0.80 \
-#   --overlap 0.5 \
-#   --device cuda
+#   --select-by voxel-precision --out distal_analysis__voxel.json --device cuda

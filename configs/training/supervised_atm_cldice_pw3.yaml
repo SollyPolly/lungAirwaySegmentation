@@ -1,0 +1,69 @@
+# Supervised ATM'22 + clDice, pos_weight=3 — CALIBRATION ABLATION.
+# Identical to supervised_atm_cldice.yaml (same split/seed -> paired comparison with
+# the pos_weight=10 clDice run AND the baseline) EXCEPT two coupled changes:
+#   - positive_class_weight 10 -> 3   (the ablation variable)
+#   - validation.threshold 0.99 -> 0.5  (MUST move with pos_weight: a de-saturated
+#     model no longer saturates to 0.99, so Dice@0.99 would mis-select the checkpoint)
+#
+# Hypothesis: pos_weight=10 over-penalises false negatives -> saturates probabilities
+# -> leakage at low thresholds (topology precision 0.86@0.9 dropped to 0.64@0.5 on the
+# pw10 clDice model) and forces a high operating point. Dropping pos_weight (Dice
+# handles class imbalance, clDice handles distal recall) should de-saturate, hold
+# topology precision higher at low thresholds, and lift clDice at the topology-optimal
+# (~0.5-0.6) operating point above the pw10 model's 0.62.
+#
+# Evaluate with scripts/analyse_distal.py; compare clDice at the topology-optimal
+# operating point vs supervised-atm-l20-cldice (pw10) and supervised-atm-l20 (baseline).
+# Run with: --data-config configs/data/atm22.yaml
+
+experiment_name: supervised-atm-l20-cldice-pw3
+description: "Supervised ATM'22 (20 labelled) + clDice (warm-up 15 + ramp 10), pos_weight=3, val threshold 0.5. Calibration ablation vs the pos_weight=10 clDice run."
+seed: 15
+epochs: 80
+training_regime: patch
+batch_size: 1
+num_workers: 4
+
+# Same counts + seed as supervised_atm.yaml / supervised_atm_cldice.yaml.
+labelled_split:
+  test_count: 20
+  val_count: 20
+  labelled_count: 20
+
+sampling:
+  patch_size: [96, 96, 96]
+  patches_per_case: 4
+  foreground_probability: 0.7
+  cache_rate: 0.5
+
+validation:
+  validate_every: 5
+  roi_size: [96, 96, 96]
+  sw_batch_size: 4
+  inference_overlap: 0.5
+  # De-saturated model: select checkpoints at a sane threshold, NOT 0.99.
+  # (val Dice here is Dice@0.5 — do NOT compare it against the pw10 run's Dice@0.99;
+  #  the real comparison is via analyse_distal at the topology-optimal operating point.)
+  threshold: 0.5
+
+optimizer:
+  name: adamw
+  lr: 0.0003
+  weight_decay: 0.00001
+
+scheduler:
+  name: cosine
+  warmup_epochs: 10
+
+amp:
+  enabled: true
+
+loss:
+  dice_weight: 1.0
+  bce_weight: 1.0
+  positive_class_weight: 3.0   # ABLATION: 10 -> 3 (de-saturate)
+  # clDice unchanged from the pw10 run so pos_weight is the only variable.
+  cldice_weight: 1.0
+  cldice_iterations: 10
+  cldice_warmup_epochs: 15
+  cldice_rampup_epochs: 10
