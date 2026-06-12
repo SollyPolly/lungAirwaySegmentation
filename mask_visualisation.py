@@ -978,12 +978,21 @@ def _(
 
 
 @app.cell
+def _(mo):
+    prediction_refresh_button = mo.ui.run_button(label="Refresh prediction runs")
+    return (prediction_refresh_button,)
+
+
+@app.cell
 def _(
     list_prediction_run_names,
     mo,
+    prediction_refresh_button,
     prediction_run_root,
     preferred_prediction_run_name,
 ):
+    # Filesystem changes are not reactive, so explicitly depend on this button.
+    _ = prediction_refresh_button.value
     prediction_run_names = list_prediction_run_names(prediction_run_root)
     prediction_runs_available = len(prediction_run_names) > 0
 
@@ -1349,6 +1358,7 @@ def _(
     prediction_case_selector,
     prediction_mask_selector,
     prediction_plane_selector,
+    prediction_refresh_button,
     prediction_run_selector,
     prediction_runs_available,
     prediction_set_selector,
@@ -1359,18 +1369,29 @@ def _(
     show_true_prediction_mask,
 ):
     if not prediction_runs_available:
-        prediction_controls = mo.md(
-            "## Saved Prediction Viewer\n\n"
-            "No run folders with saved predictions were found under `runs/`. "
-            "Run `scripts.predict_case` first."
+        prediction_controls = mo.vstack(
+            [
+                mo.md(
+                    "## Saved Prediction Viewer\n\n"
+                    "No run folders with saved predictions were found under `runs/`. "
+                    "Run `scripts.predict_case` first."
+                ),
+                prediction_refresh_button,
+            ],
+            gap=0.75,
         )
     elif prediction_bundle_error is not None:
         prediction_controls = mo.vstack(
             [
                 mo.md("## Saved Prediction Viewer"),
                 mo.hstack(
-                    [prediction_run_selector, prediction_set_selector, prediction_case_selector],
-                    widths=[1.6, 1.0, 0.8],
+                    [
+                        prediction_run_selector,
+                        prediction_set_selector,
+                        prediction_case_selector,
+                        prediction_refresh_button,
+                    ],
+                    widths=[1.6, 1.0, 0.8, 0.8],
                     gap=0.8,
                     wrap=True,
                     align="end",
@@ -1381,8 +1402,13 @@ def _(
         )
     else:
         prediction_primary_controls = mo.hstack(
-            [prediction_run_selector, prediction_set_selector, prediction_case_selector],
-            widths=[1.6, 1.0, 0.8],
+            [
+                prediction_run_selector,
+                prediction_set_selector,
+                prediction_case_selector,
+                prediction_refresh_button,
+            ],
+            widths=[1.6, 1.0, 0.8, 0.8],
             gap=0.8,
             wrap=True,
             align="end",

@@ -1,80 +1,124 @@
 # Lung Airway Segmentation — Project State
 
 **Dissertation project, Imperial College London. Deadline: September 7, 2026.**
+_Last updated: 2026-06-12._
 
 ---
 
-## Goal
+## Goal & narrative (current)
 
-Train a 3D U-Net for lung airway segmentation and show that semi-supervised
-learning (Mean Teacher) improves over a supervised baseline, with clDice topology
-analysis. Dissertation ablation: supervised / supervised+clDice / mean-teacher /
-mean-teacher+clDice.
+The project began as *unsupervised*, moved to *semi-supervised* (Mean Teacher), and
+has now settled on its strongest, evidence-backed shape: **topology-aware distal
+airway segmentation**. The arc that holds the dissertation together:
+
+1. **Diagnose** — airway segmentation fails on *distal* branches, and volumetric
+   metrics (Dice) hide it because thin branches are ~nothing by volume.
+2. **Fix it in the loss** — clDice (centerline/topology loss) recovers the distal
+   tree. **This is the core positive contribution.**
+3. **Unlock it with post-processing** — largest-connected-component (LCC) cleanup
+   turns the topology gain into a *free* one (no Dice cost).
+4. **Propagate it semi-supervised** — topology-filtered self-training on the
+   unlabelled ATM'22 cases (the SSL route that *replaces* Mean Teacher).
+5. **Mean Teacher is a documented negative result** (confirmation bias) that
+   motivates the pivot — examiners value a well-diagnosed negative.
+
+Everything is on **`main`** (the earlier `atm-primary-ssl` branch was merged).
 
 ---
 
-## DESIGN PIVOT (2026-06-11): ATM'22 is now the primary dataset
-
-The original design (AeroPath labelled + ATM'22 unlabelled, evaluate on AeroPath)
-had two fatal problems: (1) AeroPath's 27 cases give a 2-case test set —
-statistically meaningless; (2) AeroPath↔ATM'22 is a domain gap, so it tested
-cross-domain SSL, confounding the "does SSL help" claim.
-
-**New design — single-domain SSL on ATM'22, AeroPath as an OOD test:**
+## Datasets
 
 | Dataset | Cases | Role |
 |---------|-------|------|
-| ATM'22 | 150 (→300 with batch 2) | **Primary.** Split into labelled-train / unlabelled-train / val / test. Both supervised and Mean Teacher train here. |
-| AeroPath | 27 | **Held-out OOD test only** — "can a model trained on standard scans generalise to severe pathology?" Never in training. |
+| **ATM'22** | 150 (`data/ATM22/imagesTr` + `labelsTr`) | **Primary.** Split 20 labelled / 90 unlabelled / 20 val / 20 test (seed 15, count-based). Both supervised and SSL train here. |
+| **AeroPath** | 27 (`data/AeroPath/`) | **Held-out OOD test only** — "can a model trained on standard scans generalise to severe pathology?" Never in training. |
 
-- The SSL claim is now clean: supervised-ATM(20 labels) vs Mean-Teacher-ATM(20 labels + 90 unlabelled), **paired** on the same ATM test set. Difference = the unlabelled data.
-- Enables a **label-efficiency curve** (sweep `labelled_count` 10/20/40; test/val stay fixed).
-- The supervised-AeroPath 0.665 model is retained as a *reference* in the AeroPath-OOD column (a model that actually trained on pathology), **not** the SSL baseline.
-- Paths: ATM'22 `data/ATM22/` (`imagesTr/`, `labelsTr/`), layout `io/atm22_layout.py`; AeroPath `data/AeroPath/`, layout `io/case_layout.py`. Both on HPC (CX3/CX3-Phase2).
-
-Work is on branch **`atm-primary-ssl`** (additive refactor; AeroPath pathway preserved). Merge to `main` after a clean run.
+- HU window matched at **`[-1024, 2048]`** for both (so a model trained on one isn't out-of-distribution on the other).
+- Both on Imperial HPC (CX3/CX3-Phase2). ATM'22 **batch 2** (→~300 cases) is downloadable; the split is count-parameterised so only config numbers change when it lands.
+- Layouts: `io/atm22_layout.py`, `io/case_layout.py`.
 
 ---
 
-## Dataset-agnostic training architecture (branch `atm-primary-ssl`)
+## Headline results so far
 
-The labelled pathway is now driven by `data_config["dataset_name"]`, so supervised
-training runs on **either** dataset and Mean Teacher runs single-domain on ATM'22:
+**The operating recipe:** `clDice loss → threshold ~0.85–0.90 → LCC-6 post-processing`.
 
-- `datasets/splits.py::create_semisupervised_split` — count-based 4-way ATM split (test/val/labelled/unlabelled), seed-fixed; test/val invariant under `labelled_count` sweeps.
-- `datasets/monai_atm22.py::build_monai_atm22_labelled_datasets` — labelled ATM (CT + airway mask), CT-intensity foreground crop (no lung masks).
-- `training/builders.py::resolve_case_splits(data_config, training_config)` — returns unified `{labelled_train, unlabelled_train, val, test}`. AeroPath → fractional 3-way, empty `unlabelled_train`. ATM → 4-way counts.
-- `build_datasets` dispatches on `dataset_name`; `build_unlabelled_dataloader(atm22_config, cfg, case_ids)` is restricted to the unlabelled-train set (**leakage guard** — verified disjoint from val/test).
-- Config validation accepts either `splits` (fractions, AeroPath) or `labelled_split` (counts, ATM).
+| Model (ATM'22, in-domain) | Dice @ best op-point | TD (tree-length detected) | Verdict |
+|---------------------------|---------------------:|--------------------------:|---------|
+| Supervised-ATM (20 labels) | ~0.71 (+LCC @0.85) | **0.24** | in-domain baseline |
+| **Supervised-ATM + clDice** | ~0.70 (+LCC @0.90) | **0.32** | **+~40% TD at equal Dice** |
+| Mean-Teacher-ATM (both variants) | ≤ 0.50 | — | **degraded — negative result** |
 
-**How to run each job** (all reuse `configs/data/atm22.yaml` as the ATM data-config):
+*Numbers are means over 3 test cases (2/12/14) at sliding-window overlap 0.25–0.5; the full 20-case table is still to be produced.*
 
-| Job | Command (key args) |
-|-----|--------------------|
-| Supervised-AeroPath (existing 0.665) | `train_baseline --data-config aeropath.yaml --training-config baseline.yaml` |
-| Supervised-ATM (SSL baseline) | `train_baseline --data-config atm22.yaml --training-config supervised_atm.yaml` |
-| Mean-Teacher-ATM | `train_semisupervised --data-config atm22.yaml --atm22-config atm22.yaml --training-config mean_teacher_atm.yaml` |
+**Why clDice wins (measured, not asserted):** clDice produces a *connected* tree.
+Under LCC at threshold 0.50, clDice's TD drops only ~5% (0.636→0.604) while the
+baseline's drops ~32% (0.637→0.435) — the baseline finds distal voxels but leaves
+them as disconnected islands that LCC deletes; clDice wires them into the tree.
 
-Split locked in: **test 20 / val 20 / train-pool 110 (labelled 20 + unlabelled 90)** for the 150-case dataset; revisit to ~test 40 / val 30 / labelled 30 / unlabelled ~200 once ATM batch 2 lands (code is count-parameterised, so only config numbers change).
+**clDice trade is essentially free with LCC:** raw @0.99 it was −0.035 Dice for
++54% TD; with LCC at ~0.85–0.90 the Dice gap closes (~0.70 both) and clDice keeps
+~+40% TD. The clDice model's Dice peaks at 0.99 *without* LCC (no hidden lower
+optimum) — LCC is what unlocks the lower-threshold/higher-TD operating point.
+
+**Methodological note:** TD is recall-like (ignores false positives), so its max at
+low thresholds is degenerate — always compare TD at a *fixed* operating threshold,
+paired with a precision-side metric (BD / topology precision, both in
+`metrics/topology.py`).
+
+### Diagnosis (2026-06-12): missing branches are mostly *below threshold*, not unlearned
+
+The latest clDice run's `distal_analysis.json` reframes "many branches left
+unpredicted". The distal voxels (r=1) are **56% of all airway voxels**, and the
+model already predicts most of them — just at confidences the 0.99 operating point
+discards:
+
+| Distal (r=1) recall | @0.99 | @0.50 |
+|---|---:|---:|
+| recall | **23.5%** | **76.8%** |
+
+Threshold sweep on the clDice model (+LCC):
+
+| op-point | Dice+LCC | TD+LCC |
+|---|---:|---:|
+| 0.50 | 0.509 | **0.604** |
+| 0.90 (Dice-optimal) | **0.701** | 0.315 |
+| 0.99 | 0.628 | 0.209 |
+
+**Implication:** reporting near the Dice-optimal point (0.90) discards ~half the
+tree. For the topology narrative the operating point should sit at **~0.5–0.7 +
+LCC** (TD ≈ 0.60), with Dice reported but explicitly *not* the objective. This
+~doubles headline TD at **no training cost** — a reporting/operating-point change,
+not a modelling one. (It costs Dice, but Dice is not the objective for a tree.) It
+also relocates the next gains: they're about **calibration** (recover the
+sub-threshold branches) and **connectivity**, not raw capacity. Caveat: at 0.50 the
+raw Dice is 0.099 — the 0.50 point currently *leans entirely on LCC* to delete FP
+blobs. De-saturating the model (see `pos_weight` lesson below) is what makes a low
+operating point honest rather than an LCC rescue.
 
 ---
 
-## Phase Progress
+## Run inventory (key runs + verdicts)
 
-| Phase | Description | Status |
-|-------|-------------|--------|
-| 0 | Fix supervised baseline | **Complete** — val Dice = 0.665 at threshold=0.99 |
-| 1 | ATM'22 integration | **Complete** — dataset, layout, dataloader, smoke tests all working |
-| 2 | Mean-Teacher implementation | **Complete** — all components written and smoke-tested; ready to run on HPC |
-| 3 | clDice topology loss | Not started |
+Per-run detail lives in each run's `runs/<exp>/<ts>/notes.md` (local; `runs/` is gitignored).
 
----
+| Run | What | Result / verdict |
+|-----|------|------------------|
+| `baseline-unet-patch-th99-fix` | Supervised AeroPath | **0.665** @0.99. Now the AeroPath-OOD *reference*, not the SSL baseline. |
+| `ctfm-segresnet-corrected-50ep` | CT-FM pretrained SegResNet, AeroPath | **0.785** @0.99. **Reference ceiling only** (foundation model on a huge corpus) — NOT the method backbone. The method stays on the from-scratch UNet. |
+| `supervised-atm-l20` | Supervised ATM, 20 labels | **0.609** val @0.99 (ep45). **The in-domain SSL baseline** / warm-start source. |
+| `mean-teacher-unet-scratch-50ep` | MT run 1 (pw3/th75, scratch) | 0.141→0.345 swept. Mis-configured (wrong threshold + pos_weight). |
+| `mean-teacher-warmstart-pw10-th99` | MT cross-domain (AeroPath lab + ATM unlab) | Warm-started 0.654 → **degraded to 0.499**. Domain gap. |
+| `mean-teacher-atm-l20` | MT single-domain, from scratch | 0.459 @ep60, undertrained (still climbing). |
+| `mean-teacher-atm-warmstart-l20` | MT single-domain, warm-started | 0.597 (ep5, best) → **0.499 (ep40)**. Consistency *erodes* it. |
+| `supervised-atm-l20-cldice` (attempt 1) | clDice, **no warm-up** | 0.229, broke everything (proximal too). **Config bug** (clDice at full weight from epoch 1). |
+| `supervised-atm-l20-cldice` (attempt 2) | clDice, **warm-up 15 + ramp 10**, 80ep | **0.539** val @0.99; **+54% TD** vs baseline; with LCC → the headline win above. |
 
-## Supervised Baseline Result
-
-- Best val Dice: **0.665** (epoch 46 of run `baseline-unet-patch-th99-fix`)
-- Key finding: `pos_weight=10` in BCE shifts optimal threshold from 0.5 → 0.99. The model was always good; earlier 0.083 Dice was entirely due to wrong threshold at inference.
-- Per-case Dice: case20=0.870, case25=0.707, case02=0.623, case03=0.461
+**Mean Teacher = negative result.** Both single-domain MT runs converge to a
+~0.50 val basin *below* the 0.609 supervised optimum (warm-start slides down into
+it, from-scratch climbs up to it). Mechanism: confidence-masked MSE on an
+over-predicting teacher reinforces its own false positives (confirmation bias);
+the intensity-only perturbation is too weak to regularise. **Do not keep tuning MT.**
 
 ---
 
@@ -82,129 +126,159 @@ Split locked in: **test 20 / val 20 / train-pool 110 (labelled 20 + unlabelled 9
 
 ```
 configs/
-  data/
-    aeropath.yaml          — AeroPath paths and HU window
-    atm22.yaml             — ATM'22 batch_root and HU window
-  model/
-    baseline_unet.yaml     — MONAI UNet config
-  training/
-    baseline.yaml          — supervised training config
-    teacher_student.yaml   — mean-teacher config (threshold=0.99, warm_start=10, rampup=10)
+  data/        aeropath.yaml, atm22.yaml (dataset_name + batch_root + HU window)
+  model/       baseline_unet.yaml, (ct_fm_segresnet)
+  training/    baseline.yaml                 — supervised AeroPath
+               supervised_atm.yaml           — supervised ATM (the SSL baseline)
+               supervised_atm_cldice.yaml    — supervised ATM + clDice (warm-up 15, ramp 10, weight 1.0, iters 10, 80 epochs)
+               mean_teacher_atm.yaml          — MT single-domain (from scratch) [negative result]
+               mean_teacher_atm_warmstart.yaml— MT single-domain (warm-started) [negative result]
+               teacher_student.yaml           — pre-pivot cross-domain MT [superseded]
 
 lung_airway_segmentation/
-  io/
-    case_layout.py         — AeroPath path resolver
-    atm22_layout.py        — ATM'22 path resolver (list_case_ids, resolve_case_paths)
-  datasets/
-    monai_aeropath.py      — labelled MONAI dataset (patch + full-volume)
-    monai_atm22.py         — unlabelled MONAI dataset (CT-only, no labels)
-    patches.py             — patch sampling utilities
-    splits.py              — train/val/test split creation
-  schemas.py               — TypedDicts: LabelledCasePaths, UnlabelledCasePaths, etc.
-  losses/
-    segmentation.py        — CombinedSegmentationLoss (Dice + BCE, pos_weight=10)
-    semi_supervised.py     — ConsistencyLoss (confidence-masked MSE, fg/bg balanced)
-    topology.py            — clDice stub (not yet implemented)
-  models/
-    baseline_unet.py       — MONAI UNet wrapper
-    ct_fm_segresnet.py     — CT-FM pretrained SegResNet wrapper
-  training/
-    config.py              — YAML loading, CLI parsing, validation
-    builders.py            — factories: model, datasets, dataloaders, teacher, optimizer
-    loops.py               — train_one_epoch, validate_one_epoch (supervised)
-    teacher_student.py     — update_ema, generate_teacher_probabilities, train_semisupervised_epoch
-    engine.py              — run_supervised_training, run_semisupervised_training
-  inference/
-    sliding_window.py      — sliding window inference
-    postprocess.py         — binarize_logits, LCC post-processing
-  metrics/
-    segmentation.py        — Dice, precision, recall
-    topology.py            — topology metrics (tree length, branch count)
+  io/          case_layout.py, atm22_layout.py, nifti.py (load_canonical_image)
+  datasets/    monai_aeropath.py, monai_atm22.py (CT-only + build_monai_atm22_labelled_datasets),
+               splits.py (create_train_val_test_split + create_semisupervised_split), patches.py
+  losses/      segmentation.py  — CombinedSegmentationLoss = BCE(pos_weight) + Dice + (optional) clDice
+               topology.py      — soft_skeleton / soft_cldice_loss / SoftClDiceLoss  [IMPLEMENTED]
+               semi_supervised.py — ConsistencyLoss (MT; negative result)
+  models/      baseline_unet.py, ct_fm_segresnet.py
+  training/    config.py (YAML/CLI/validation), builders.py (resolve_case_splits, dataset-agnostic),
+               loops.py, teacher_student.py, engine.py (run_supervised_training w/ clDice warm-up ramp,
+               run_semisupervised_training w/ --init-checkpoint warm-start)
+  inference/   sliding_window.py, postprocess.py (binarize_logits, keep_largest_connected_component)
+  metrics/     segmentation.py (Dice/precision/recall), topology.py (clDice, TD, BD, branch parsing)
 
 scripts/
-  train_baseline.py        — supervised training entrypoint
-  train_semisupervised.py  — mean-teacher entrypoint
-  predict_case.py          — inference on one case
-  evaluate_predictions.py  — Dice/precision/recall evaluation
-  analyse_distal.py        — distal-radius probability stratification + threshold sweep (Dice/TD)
+  train_baseline.py / train_semisupervised.py   — training entrypoints
+  predict_case.py                                — AeroPath inference (saves airway_pred*_full.nii.gz)
+  predict_atm.py                                 — ATM inference, viewer-compatible (raw + LCC, canonical space)
+  analyse_distal.py                              — distal-radius prob stratification + Dice/TD threshold sweep + LCC
+  evaluate_predictions.py                        — Dice/precision/recall evaluation
+mask_visualisation.py                            — marimo 3D/slice viewer (datasets + saved predictions)
+train.pbs                                        — ONE reusable HPC job script (edit active block, → train.out)
 ```
 
 ---
 
-## Key Design Decisions
+## Tooling notes
 
-- **Config-first**: all hyperparameters in YAML. Each run saves `resolved_config.json`.
-- **Threshold = 0.99**: required because `pos_weight=10` shifts BCE decision boundary to ~0.91–0.99.
-- **Teacher validated, not student**: `validate_one_epoch` runs on the EMA teacher during semi-supervised training (more stable predictions).
-- **Checkpoint format**: `model_state` = teacher weights (for inference compatibility), `student_model_state` = student weights, `checkpoint_model = "ema_teacher"`.
-- **Unlabelled iterator cycles**: ATM'22 (150 cases) >> AeroPath train (~20 cases). The epoch length is determined by the labelled loader; `next_unlabelled_batch` restarts the ATM22 iterator when exhausted.
-- **ConsistencyLoss**: confidence-masked MSE. Only voxels where teacher probability ≥ 0.99 (foreground) or ≤ 0.20 (background) contribute. If no confident foreground voxels exist in a batch, returns zero loss via `student_probs.sum() * 0.0` (keeps computation graph intact).
-- **British English spelling** throughout: `labelled`, `unlabelled` (two l's).
-
----
-
-## Mean-Teacher Run 1 Result (`mean-teacher-unet-scratch-50ep`)
-
-- **Run**: 50 epochs, `pos_weight=3`, `threshold=0.75` at validation
-- **Reported best val Dice**: 0.141 (epoch 50) — **this was wrong**
-- **Threshold sweep result** (`analyse_distal.py`, overlap=0.25): best Dice = **0.345 at threshold=0.99**
-- **Root cause**: threshold=0.75 at validation was wrong; same as the supervised baseline disaster (was 0.083 at 0.5 then 0.665 at 0.99)
-- **Precision problem**: even at threshold=0.99, precision is only 16–29% (too many false positives). Mean output probability across the whole volume is ~0.47 — the model with `pos_weight=3` doesn't penalise false positives enough
-- **Per-case Dice at 0.99**: case03=0.260, case25=0.377, case02=0.329, case20=0.414
-
-## Decision: Run 2 is a Warm-Start Fine-Tune
-
-Run 1 was undertrained and mis-configured (cold teacher from scratch, `pos_weight=3`, wrong threshold), so it cannot be compared to the 0.665 supervised baseline. Run 2 changes the experimental design to **warm-start both student and teacher from the supervised `best_model.pt`**, then fine-tune with ATM'22 consistency. This makes the teacher's pseudo-labels good from epoch 1 and directly tests the hypothesis "does ATM'22 consistency improve a converged model".
-
-**New capability** (`engine.py` + `config.py`): `init_checkpoint` config field / `--init-checkpoint` CLI arg. When set, the supervised `model_state` is loaded into the student *before* `build_teacher` copies it, so both networks start converged. Optimizer state is intentionally **not** restored (fresh fine-tune). Recorded in `run_metadata.json` as `init_checkpoint`.
-
-**`teacher_student.yaml` settings for the warm-start run:**
-- `experiment_name`: `mean-teacher-warmstart-pw10-th99`
-- `init_checkpoint`: `null` (set via `--init-checkpoint <supervised best_model.pt>` at submit time)
-- `epochs`: **40** (fine-tune, not 100)
-- `optimizer.lr`: **1e-4** (~1/3 of baseline 3e-4 — adapt without forgetting)
-- `scheduler.warmup_epochs`: **0** (no LR warm-up when fine-tuning)
-- `teacher.warm_start_epochs`: **0** (teacher already converged)
-- `teacher.consistency_rampup_epochs`: **5** (gentle phase-in)
-- `teacher.foreground_confidence_threshold`: **0.80** (pseudo-label distal branches, not just proximal — see below)
-- `validation.threshold`: **0.99**, `loss.positive_class_weight`: **10.0** (match baseline)
-
-**Distal-branch reasoning** (the `fg_threshold=0.80` choice): with `pos_weight=10` the teacher is confident (≥0.99) on proximal airways but only moderately confident (0.5–0.9) on fine distal branches. If the pseudo-label threshold equals the 0.99 validation threshold, distal branches get **zero** consistency signal — defeating the point of the 150 unlabelled cases. Decoupling the pseudo-label threshold (0.80) from the validation threshold (0.99) lets ATM'22 supervise distal airways. The (0.80, 0.99) gap is the "uncertain zone" — its size over training is worth tracking as an ablation point.
+- **`analyse_distal.py`** is the workhorse, with **test-set hygiene in the defaults**.
+  It (1) **selects a precision-constrained operating threshold** (max TD+LCC s.t.
+  topology-precision+LCC ≥ floor, default 0.80) and (2) **reports Dice / TD / BD /
+  clDice (+LCC)** at that fixed threshold, plus (3) the distal radius stratification +
+  threshold sweep. **Defaults to select+report on val** (develop here; single
+  inference pass): `python -m scripts.analyse_distal --run-dir <run> --overlap 0.5`.
+  The sealed **test** table is opt-in — `--report-split test` selects on val, reports
+  on test, and is the only mode that computes BD (the expensive ATM'22 branch parse).
+  Other flags: `--threshold X --select-split none`, `--precision-floor`, `--max-cases N`
+  (smoke). Saves `distal_analysis.json` (`operating_point`, `table_per_case`/`table_mean`,
+  `selection_sweep`, `threshold_sweep`, `bins`, `dev_mode`). **Run the test table once
+  per model** (supervised vs +clDice), frozen, and stack the two `table_mean` rows.
+- **`predict_atm.py`** writes the layout `mask_visualisation.py` expects
+  (`predictions/<case>/prediction_metadata.json` + `airway_pred_full.nii.gz` +
+  `airway_pred_lcc_full.nii.gz` + `airway_prob_full.nii.gz`), in **canonical
+  (RAS+)** orientation via `load_canonical_image` so it overlays on the viewer's
+  CT/GT. `--threshold 0.90 --connectivity 6`. (An earlier MONAI-space, non-metadata
+  version did NOT appear in the viewer — that was the cause of the "can't select
+  the clDice run" issue, now fixed.)
+- **`train.pbs`** is a single reusable job script (user preference): edit the
+  active command block, `qsub`, output overwrites `train.out`. CX3 sizing:
+  `select=1:ncpus=8:mem=64gb:ngpus=1`, walltime 12h, gpu_type left empty.
 
 ---
 
-## Dataset Mismatch Notes
+## Key design decisions & lessons
 
-1. **HU window — RESOLVED.** `atm22.yaml` now uses `[-1024, 2048]`, matching AeroPath. This matters because the warm-started teacher *is* the AeroPath model: feeding it ATM'22 patches normalised with the old `[-1024, 600]` window made walls appear ~2× brighter than its training distribution (a −400 HU wall → 0.20 under AeroPath's window vs 0.38 under the old ATM'22 window), degrading pseudo-labels. Run 1 used the old window; this is now fixed (uncommitted change to `atm22.yaml`).
-
-2. **Spatial resolution** (unresolved): AeroPath are HR CTs (`CT_HR`). If ATM'22 has coarser voxel spacing, a 96³ patch covers different anatomical scales. No resampling applied. Accept for now; candidate for a later spacing-aware ablation.
+- **Config-first**: all hyperparameters in YAML; each run saves `resolved_config.json`.
+- **Threshold 0.99 for the supervised/baseline** because `pos_weight=10` saturates probabilities (the old "0.083 Dice" disasters were all wrong-threshold).
+- **clDice needs a warm-up**: pure Dice+BCE for ~15 epochs, then ramp clDice in — the soft skeleton of an untrained model is noise. Implemented as an epoch ramp in `run_supervised_training` (`cldice_warmup_epochs`, `cldice_rampup_epochs`).
+- **LCC (6-connectivity) is now standard post-processing** for airways (one connected tree). Most low-threshold false positives are disconnected blobs LCC removes.
+- **TD/topology vs Dice**: report TD at a fixed operating threshold + a precision-side metric; never TD's max.
+- **Dataset-agnostic training** via `resolve_case_splits(data_config, training_config)` → `{labelled_train, unlabelled_train, val, test}` (AeroPath = fractional 3-way w/ empty unlabelled; ATM = count-based 4-way). Leakage guard verified (unlabelled disjoint from val/test).
+- **British English** throughout (`labelled`, `unlabelled`).
+- **`pos_weight=10` + threshold 0.99 are coupled — and the coupling *is* the "funk".**
+  `DiceLoss(sigmoid=True)` already handles class imbalance; stacking BCE
+  `pos_weight=10` on top over-penalises false negatives and **saturates
+  probabilities** toward 1 — which is *why* the threshold has to live at 0.99 and
+  everything below is mush. clDice now supplies the distal-recall push that the high
+  `pos_weight` was standing in for, so the principled config to test is **BCE pw 1–3
+  + Dice + clDice**: it should de-saturate the output, move the natural threshold
+  back toward ~0.5 (better-calibrated, less LCC-dependent, fewer border blobs).
+  One-variable ablation, **but lower the val threshold at the same time** (next
+  bullet) or the comparison is rigged against the better-calibrated model.
+- **Checkpoint selection is biased toward proximal volume.** `best_model` is chosen
+  by **val Dice @ 0.99** (`engine.py`), which rewards the thick-airway operating
+  point — the opposite of the topology goal. Validate at ~0.5 (or select on
+  Dice@0.5+LCC / a TD proxy) so the saved epoch is the best *tree*, not the best
+  trachea. Also evaluate `last_model` — attempt 2 was still climbing at ep75/80.
+- **Patch borders: gaussian blending is already on** (`sliding_window.py`,
+  `mode="gaussian"`), so the seams are not naive constant-blend. Remaining causes:
+  (a) **low inference overlap** — headline predictions must use 0.5–0.75, not the
+  0.25 the analysis ran at; (b) **edge receptive-field** on 96³ patches with
+  foreground-centred sampling (`foreground_probability=0.7`) — the model rarely sees
+  a branch crossing a patch face with full context. The saturated-probability blobs
+  that "only LCC-6 removes" are the visible symptom; de-saturating (lower
+  `pos_weight`) + higher overlap + `foreground_probability≈0.5` all reduce them.
+  Optional: 128³ patches for more context if GPU memory allows.
+- **Test-set hygiene — develop on val, seal test.** With only 20 labelled cases the
+  val set carries every decision (operating point, pos_weight, clDice weight, patch
+  borders, SSL); the 20 test cases are touched **once**, at the end, on a frozen,
+  pre-decided model set (baseline, +clDice, final SSL), all reported together.
+  Repeated test peeking = implicit model selection = optimistic final numbers.
+  `analyse_distal` defaults to reporting on val; `--report-split test` is the
+  deliberate, rare final act (and the only mode that computes BD).
 
 ---
 
-## Unlabelled Case Usage Per Epoch
+## What needs to be done next (in priority order)
 
-Per epoch the labelled loader drives epoch length (21 cases × 4 patches = 84 steps); one ATM'22 batch is pulled per labelled step → ~84 of 600 ATM'22 batches per epoch (~14%). All 150 ATM'22 cases are eventually seen as the iterator cycles, but each ATM'22 case gets less per-case exposure than each AeroPath case. The unlabelled advantage is real but diluted per epoch — it acts as regularisation, not bulk gradient signal.
+**Tier 1 — lock the core result + de-funk the operating point (do first):**
+1. **Full 20-case test table** (Dice + TD + BD), supervised-ATM vs +clDice, at a
+   *fixed, defensible* operating point, overlap 0.5–0.75 + LCC. The dissertation's
+   core table — but it is the **sealed final eval**: develop/compare configs on val
+   first, freeze the models, then run `analyse_distal.py --report-split test` once for
+   `supervised-atm-l20` and `supervised-atm-l20-cldice` and stack the two `table_mean`
+   rows. (The default invocation reports on val, for development.)
+2. **Report the TD–precision operating curve and choose the op-point for topology,
+   not Dice.** Pick the threshold by a precision-side constraint (e.g. max TD s.t.
+   BD/topology-precision ≥ bound), which lands well below 0.9 (~0.5–0.7 + LCC,
+   TD ≈ 0.60). Free ~2× headline TD (see Diagnosis). Frame explicitly: "we operate
+   where the tree is recovered; Dice is reported, not optimised."
+3. **`pos_weight` ablation** on the clDice model (pw ∈ {1, 3, 10}), val threshold
+   lowered to ~0.5 and selection made topology-aware. Goal: a calibrated model whose
+   natural threshold is ~0.5 and whose distal recall holds up *without* leaning on
+   LCC — and, either way, the ablation that answers the "why 0.99?" viva question.
 
----
+**Tier 2 — push the topology contribution:**
+4. **clDice ablation:** `cldice_weight` ∈ {1, 1.5, 2}, +20 epochs (attempt 2 was
+   still inching up at ep75/80). Pick best by a *topology* val metric, not Dice@0.99.
+   Combine with (3) as a small grid, not a full factorial, to save GPU runs.
+5. **Patch borders:** inference overlap 0.5→0.75 for headline numbers; try
+   `foreground_probability≈0.5`; (optional) 128³ patches for more per-patch context.
 
-## What Needs to Be Done Next (in order)
+**Tier 3 — the SSL chapter (replaces Mean Teacher):**
+6. **Topology-filtered self-training.** clDice model pseudo-labels the 90 unlabelled
+   ATM cases; keep only topology-clean labels (**LCC + high confidence**, optionally
+   require TTA-flip agreement), add them (labelled cases up-weighted), retrain,
+   evaluate on val/test. **Why it should work where MT didn't:** hard, topology-
+   filtered labels instead of soft confidence-masked consistency on an over-
+   predicting teacher — so it cannot reinforce the teacher's own false positives
+   (the MT confirmation-bias mechanism). One round first; only iterate if round 1
+   helps. Named fallback if it stalls: **Cross-Pseudo Supervision (CPS)** — two nets
+   pseudo-label each other, diversity blunts confirmation bias (~2× compute).
+7. **Label-efficiency curve** (`labelled_count` 10/20/40) — cheap, supports the SSL story.
 
-1. **(Optional) Download ATM'22 batch 2** and consolidate into `data/ATM22/imagesTr` + `labelsTr` (layout auto-detects all `ATM_\d{3}` cases). Then bump the `labelled_split` counts in the ATM configs. Don't block on it — the pipeline works on the 150 now.
+**Tier 4 — generalisation + write-up:**
+8. **AeroPath-OOD** column: ATM-trained clDice model over all 27 AeroPath cases
+   (HU windows already match) — the "generalise to pathology?" result.
+9. **(Optional) ATM'22 batch 2** to grow the pools.
+10. **Write-up in parallel** — start the diagnosis/methods chapters now; the
+    operating-point and calibration story is already evidenced and writes itself.
 
-2. **Run supervised-ATM baseline** on HPC: `train_baseline --data-config configs/data/atm22.yaml --training-config configs/training/supervised_atm.yaml`. This is the in-domain SSL baseline (labelled_count=20) and produces the checkpoint to warm-start the MT from. Also run the upper bound (labelled_count = full train pool).
-
-3. **Run Mean-Teacher-ATM**: `train_semisupervised --data-config configs/data/atm22.yaml --atm22-config configs/data/atm22.yaml --training-config configs/training/mean_teacher_atm.yaml`. Default config is canonical from-scratch; to warm-start from step 2 set `--init-checkpoint` + `warm_start_epochs: 0`, `lr: 1e-4`, `epochs: 40`. Watch early `teacher_confident_foreground_fraction` / `train_consistency_loss` (run 1 had consistency <1% of loss; raise `consistency_weight` if still negligible).
-
-4. **Sweep + compare**: `analyse_distal.py` on each result; paired comparison of MT vs supervised-ATM on the ATM test set, plus the AeroPath-OOD column.
-
-5. **AeroPath-OOD eval flow**: still to build — run an ATM-trained checkpoint over all 27 AeroPath cases via `predict_case.py` + `evaluate_predictions.py` (HU windows already match, both `[-1024, 2048]`).
-
-6. **Phase 3**: implement clDice in `losses/topology.py` (port soft-skeleton from https://github.com/jocpae/clDice).
-
-**Note:** the warm-start PBS (`train_meanteacher.pbs`) and the old AeroPath-labelled `teacher_student.yaml` predate the pivot. They still work for the cross-domain option but are no longer the primary path — the ATM configs above supersede them.
-
----
-
-## Verified Notes (previously thought to be issues)
-
-- **Teacher/student augmentation IS differentiated.** Empirically checked: the ATM'22 batch exposes a distinct `teacher_image` (weak, spatial-only) vs `image` (strong, + intensity perturbation); mean abs diff ≈ 0.047. The old "they see identical augmentations / teacher_image never exists" note was wrong — the consistency mechanism works. Perturbation is intensity-only (spatial augs are shared); strengthening it (different spatial views) is a possible future refinement, not a bug.
+**Ruled out / parked:**
+- **Full unsupervised** — too high-risk for the timeline; no working precedent for airways.
+- **More Mean Teacher tuning** — two runs show it degrades (confirmation bias). Keep as the negative baseline.
+- **Two-stage distal refiner** (another paper's idea) — derivative *and* redundant with clDice (both target distal). Future-work mention only.
+- **Diffusion as segmenter** — still supervised, weaker for thin airways. (Diffusion/MAE *pretraining* on unlabelled CTs is the only unsupervised angle worth a stretch, after the core lands.)
+- **Switching to CT-FM backbone** — it's the reference ceiling, not the method.

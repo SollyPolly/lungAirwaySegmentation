@@ -1,0 +1,62 @@
+#!/bin/bash
+#PBS -N AirwayAnalyse
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -o /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation/analyse_distal.out
+
+cd /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation || exit 1
+
+module load miniforge/3
+source "$HOME/miniforge3/etc/profile.d/conda.sh"
+conda activate ctfm
+
+python -V
+nvidia-smi
+
+# =====================================================================
+# Reusable distal/topology analysis job.
+#
+# Development runs select and report on validation only. Keep the held-out
+# test split sealed until model selection, threshold policy, precision floor,
+# and postprocessing choices are frozen.
+#
+# Each run writes <run-dir>/distal_analysis.json and this log is overwritten.
+# Comment the active block and uncomment one alternative when changing runs.
+# =====================================================================
+
+# --- (ACTIVE) clDice model: full validation analysis ---
+python -u -m scripts.analyse_distal \
+  --run-dir runs/supervised-atm-l20-cldice/2026-06-11__22-04-05__baseline_unet \
+  --select-split val \
+  --report-split val \
+  --precision-floor 0.80 \
+  --overlap 0.5 \
+  --device cuda
+
+# --- Supervised ATM baseline: full validation analysis ---
+# python -u -m scripts.analyse_distal \
+#   --run-dir runs/supervised-atm-l20/2026-06-11__04-10-34__baseline_unet \
+#   --select-split val \
+#   --report-split val \
+#   --precision-floor 0.80 \
+#   --overlap 0.5 \
+#   --device cuda
+
+# --- Quick validation smoke test for the active clDice run ---
+# python -u -m scripts.analyse_distal \
+#   --run-dir runs/supervised-atm-l20-cldice/2026-06-11__22-04-05__baseline_unet \
+#   --select-split val \
+#   --report-split val \
+#   --max-cases 2 \
+#   --overlap 0.5 \
+#   --device cuda
+
+# --- FINAL ONLY: sealed test table after all choices are frozen ---
+# python -u -m scripts.analyse_distal \
+#   --run-dir runs/supervised-atm-l20-cldice/2026-06-11__22-04-05__baseline_unet \
+#   --select-split val \
+#   --report-split test \
+#   --precision-floor 0.80 \
+#   --overlap 0.5 \
+#   --device cuda
