@@ -26,23 +26,23 @@ nvidia-smi
 # Commented blocks are ready-to-swap alternatives.
 # =====================================================================
 
-# --- (ACTIVE) Supervised-ATM + clDice, pos_weight=3 — calibration ablation ---
+# ONE canonical clDice config: configs/training/supervised_atm_cldice.yaml (pw10 defaults).
+# Vary experiments via CLI overrides (--cldice-weight / --pos-weight / --val-threshold) —
+# NOT new YAMLs. resolved_config.json in each run dir snapshots exactly what ran.
+
+# --- (ACTIVE) clDice, clDice-weight 2.0 (override on the canonical pw10 config) ---
 python -u -m scripts.train_baseline \
   --data-config configs/data/atm22.yaml \
   --model-config configs/model/baseline_unet.yaml \
-  --training-config configs/training/supervised_atm_cldice_pw3.yaml \
-  --experiment-name supervised-atm-l20-cldice-pw3 \
-  --run-description "Supervised ATM 20 labelled + clDice, pos_weight=3 (de-saturate; val threshold 0.5). Test whether calibration lifts topology precision at low thresholds / clDice." \
+  --training-config configs/training/supervised_atm_cldice.yaml \
+  --cldice-weight 2.0 \
+  --experiment-name supervised-atm-l20-cldice-w2 \
+  --run-description "clDice weight 2.0 (override on pw10 config). Push topology further." \
   --num-workers 4 --device cuda
 
-# --- Supervised-ATM + clDice, pos_weight=10 (DONE — the current clDice run) ---
-# python -u -m scripts.train_baseline \
-#   --data-config configs/data/atm22.yaml \
-#   --model-config configs/model/baseline_unet.yaml \
-#   --training-config configs/training/supervised_atm_cldice.yaml \
-#   --experiment-name supervised-atm-l20-cldice \
-#   --run-description "Supervised ATM 20 labelled + soft clDice (cldice_weight=1.0, iters=10). Topology loss for distal recovery." \
-#   --num-workers 4 --device cuda
+# --- DONE runs (same canonical config, different overrides) ---
+#   pw10 reference clDice : (no overrides) --experiment-name supervised-atm-l20-cldice
+#   pos_weight=3 ablation : --pos-weight 3 --val-threshold 0.5 --experiment-name supervised-atm-l20-cldice-pw3  [negative result]
 
 # --- Supervised-ATM baseline (no clDice) ---
 # python -u -m scripts.train_baseline \

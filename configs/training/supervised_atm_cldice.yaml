@@ -55,7 +55,7 @@ loss:
   # first learns a sane mask), then ramp clDice 0 -> cldice_weight over
   # cldice_rampup_epochs. The first clDice run skipped this (constant weight from
   # epoch 1) and degraded everything — proximal included.
-  cldice_weight: 1.0
+  cldice_weight: 2.0
   cldice_iterations: 10
   cldice_warmup_epochs: 15
   cldice_rampup_epochs: 10

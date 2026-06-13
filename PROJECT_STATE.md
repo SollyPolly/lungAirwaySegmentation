@@ -41,25 +41,27 @@ Everything is on **`main`** (the earlier `atm-primary-ssl` branch was merged).
 
 ## Headline results so far
 
-**The operating recipe:** `clDice loss → threshold ~0.85–0.90 → LCC-6 post-processing`.
+**The operating recipe:** `clDice loss → clDice-optimal threshold (~0.5) → LCC-6 post-processing`.
 
-| Model (ATM'22, in-domain) | Dice @ best op-point | TD (tree-length detected) | Verdict |
-|---------------------------|---------------------:|--------------------------:|---------|
-| Supervised-ATM (20 labels) | ~0.71 (+LCC @0.85) | **0.24** | in-domain baseline |
-| **Supervised-ATM + clDice** | ~0.70 (+LCC @0.90) | **0.32** | **+~40% TD at equal Dice** |
-| Mean-Teacher-ATM (both variants) | ≤ 0.50 | — | **degraded — negative result** |
+**CORE RESULT (n=20 val, each model at its clDice-optimal op-point, gated tool, 2026-06-13):**
 
-*Numbers are means over 3 test cases (2/12/14) at sliding-window overlap 0.25–0.5; the full 20-case table is still to be produced.*
+| Model (ATM'22, in-domain) | op | clDice | TD+LCC | TPrec | Dice+LCC | Verdict |
+|---|---:|---:|---:|---:|---:|---|
+| Supervised baseline (20 labels) | 0.60 | 0.393 | 0.386 | 0.409 | 0.619 | baseline |
+| **Supervised + clDice (pw10)** | 0.50 | **0.615** | **0.592** | **0.651** | 0.512 | **+57% clDice, +53% TD, +59% TPrec** |
+| Mean-Teacher-ATM (both variants) | — | ≤0.50 Dice | — | — | — | degraded — negative result |
 
-**Why clDice wins (measured, not asserted):** clDice produces a *connected* tree.
-Under LCC at threshold 0.50, clDice's TD drops only ~5% (0.636→0.604) while the
-baseline's drops ~32% (0.637→0.435) — the baseline finds distal voxels but leaves
-them as disconnected islands that LCC deletes; clDice wires them into the tree.
+clDice is a **Pareto win on topology** — higher centreline recall (TD) *and* precision
+(TPrec) *and* their harmonic mean (clDice) — sacrificing only volumetric Dice
+(proximal-dominated). This is **val (development)**; the sealed-test table (+BD) is the
+final deliverable, run once on frozen models.
 
-**clDice trade is essentially free with LCC:** raw @0.99 it was −0.035 Dice for
-+54% TD; with LCC at ~0.85–0.90 the Dice gap closes (~0.70 both) and clDice keeps
-~+40% TD. The clDice model's Dice peaks at 0.99 *without* LCC (no hidden lower
-optimum) — LCC is what unlocks the lower-threshold/higher-TD operating point.
+**Why clDice wins (measured, n=20):** (1) **connectivity** — at 0.5 the clDice model loses
+only ~5% of TD to LCC (raw 0.625→0.592) while the baseline loses ~39% (0.610→0.372): the
+baseline finds distal voxels but leaves them as disconnected islands LCC deletes; clDice
+wires them into the tree. (2) **it unlocks the low operating point** — the baseline's
+topology precision at 0.5 is **0.099** (near-pure leakage), so it can't operate low and is
+forced to 0.6 (clDice still only 0.39); the clDice model operates at 0.5 with TPrec 0.65.
 
 **Methodological note:** TD is recall-like (ignores false positives), so its max at
 low thresholds is degenerate — always compare TD at a *fixed* operating threshold,
@@ -131,6 +133,8 @@ Per-run detail lives in each run's `runs/<exp>/<ts>/notes.md` (local; `runs/` is
 | `mean-teacher-atm-warmstart-l20` | MT single-domain, warm-started | 0.597 (ep5, best) → **0.499 (ep40)**. Consistency *erodes* it. |
 | `supervised-atm-l20-cldice` (attempt 1) | clDice, **no warm-up** | 0.229, broke everything (proximal too). **Config bug** (clDice at full weight from epoch 1). |
 | `supervised-atm-l20-cldice` (attempt 2) | clDice, **warm-up 15 + ramp 10**, 80ep | **0.539** val @0.99; **+54% TD** vs baseline; with LCC → the headline win above. |
+| `supervised-atm-l20-cldice` (re-eval, gated tool) | pw10 clDice op-point, val n=20 | **clDice 0.615** @0.50 (TD 0.59, Dice+LCC 0.51). The clean pw10 reference. |
+| `supervised-atm-l20-cldice-pw3` | clDice, **pos_weight=3** (de-saturate) | **clDice 0.494** @0.50 (TD 0.38, distal recall 65% vs 80%) — WORSE. De-saturation = negative result; keep pw10. |
 
 **Mean Teacher = negative result.** Both single-domain MT runs converge to a
 ~0.50 val basin *below* the 0.609 supervised optimum (warm-start slides down into
@@ -148,8 +152,7 @@ configs/
   model/       baseline_unet.yaml, (ct_fm_segresnet)
   training/    baseline.yaml                 — supervised AeroPath
                supervised_atm.yaml           — supervised ATM (the SSL baseline)
-               supervised_atm_cldice.yaml    — supervised ATM + clDice (warm-up 15, ramp 10, weight 1.0, iters 10, 80 epochs)
-               supervised_atm_cldice_pw3.yaml — clDice + pos_weight=3, val threshold 0.5 (calibration ablation; ACTIVE next run)
+               supervised_atm_cldice.yaml    — THE canonical clDice config (pw10: warm-up 15, ramp 10, weight 1.0, iters 10, 80 ep). Vary experiments via CLI overrides (`--cldice-weight` / `--pos-weight` / `--val-threshold`), NOT new YAMLs. resolved_config.json snapshots each run.
                mean_teacher_atm.yaml          — MT single-domain (from scratch) [negative result]
                mean_teacher_atm_warmstart.yaml— MT single-domain (warm-started) [negative result]
                teacher_student.yaml           — pre-pivot cross-domain MT [superseded]
@@ -220,16 +223,20 @@ train.pbs                                        — ONE reusable HPC job script
 - **TD/topology vs Dice**: report TD at a fixed operating threshold + a precision-side metric; never TD's max.
 - **Dataset-agnostic training** via `resolve_case_splits(data_config, training_config)` → `{labelled_train, unlabelled_train, val, test}` (AeroPath = fractional 3-way w/ empty unlabelled; ATM = count-based 4-way). Leakage guard verified (unlabelled disjoint from val/test).
 - **British English** throughout (`labelled`, `unlabelled`).
-- **`pos_weight=10` + threshold 0.99 are coupled — and the coupling *is* the "funk".**
-  `DiceLoss(sigmoid=True)` already handles class imbalance; stacking BCE
-  `pos_weight=10` on top over-penalises false negatives and **saturates
-  probabilities** toward 1 — which is *why* the threshold has to live at 0.99 and
-  everything below is mush. clDice now supplies the distal-recall push that the high
-  `pos_weight` was standing in for, so the principled config to test is **BCE pw 1–3
-  + Dice + clDice**: it should de-saturate the output, move the natural threshold
-  back toward ~0.5 (better-calibrated, less LCC-dependent, fewer border blobs).
-  One-variable ablation, **but lower the val threshold at the same time** (next
-  bullet) or the comparison is rigged against the better-calibrated model.
+- **`pos_weight=10` is load-bearing for distal recall — de-saturation is a NET LOSS
+  (pw3 ablation, n=20 val, 2026-06-13).** *Hypothesis was:* `DiceLoss(sigmoid=True)`
+  already handles imbalance, so high BCE `pos_weight` just saturates probabilities and
+  forces the 0.99 threshold; clDice should let `pos_weight` drop to de-saturate (cleaner,
+  less LCC-dependent). **Tested and refuted.** pw3 (`pos_weight=3`) vs pw10 at the
+  clDice-optimal 0.50: precision *improved* (TPrec 0.65→0.73, voxel 0.36→0.51, Dice+LCC
+  0.51→0.62) **but the tree collapsed** — TD 0.59→0.38, distal recall 79.5%→65.5%, so
+  **clDice 0.615→0.494 (worse)**. The aggressive FN penalty is what makes the model
+  commit on thin branches; remove it and it's tidy but timid. **Keep `pos_weight=10`;
+  do NOT run pw1** (trend is monotonic). Also: de-saturation did **not** reduce LCC
+  reliance (pw3 raw Dice@0.5 0.17, LCC gap 0.45 > pw10's 0.38) — the low-threshold blob
+  mess is inherent to the operating point, not calibration. **Confound ruled out:** pw3
+  `last_model` (clDice 0.503, TD 0.395) ≈ pw3 `best` (0.494, 0.379) — the topology drop
+  is genuinely pos_weight, not the Dice@0.5 selection. **pos_weight question CLOSED.**
 - **Checkpoint selection is biased toward proximal volume.** `best_model` is chosen
   by **val Dice @ 0.99** (`engine.py`), which rewards the thick-airway operating
   point — the opposite of the topology goal. Validate at ~0.5 (or select on
@@ -268,12 +275,12 @@ train.pbs                                        — ONE reusable HPC job script
    BD/topology-precision ≥ bound), which lands well below 0.9 (~0.5–0.7 + LCC,
    TD ≈ 0.60). Free ~2× headline TD (see Diagnosis). Frame explicitly: "we operate
    where the tree is recovered; Dice is reported, not optimised."
-3. **`pos_weight` ablation** on the clDice model (pw ∈ {1, 3, 10}). **pw3 wired** as
-   the active train.pbs run (`supervised_atm_cldice_pw3.yaml`, val threshold 0.5);
-   pw1 next. Goal: a calibrated model that holds topology precision at low thresholds
-   (the pw10 model dropped to 0.64 @0.5) → higher clDice at the ~0.5–0.6 operating
-   point. NB checkpoint selection is still by val Dice@0.5 (volume-biased); making it
-   topology-aware (clDice/TD) is a separate engine change — offered, not yet done.
+3. **`pos_weight` ablation — DONE (negative result).** pw3 (`pos_weight=3`) is worse:
+   clDice 0.494 vs pw10's 0.615 (TD 0.38 vs 0.59); de-saturation trades distal recall
+   for precision. **Keep pos_weight=10, pw1 cancelled.** See the pos_weight lesson.
+   Confound ruled out: pw3 `last` (clDice 0.503) ≈ `best` (0.494) → genuinely pos_weight.
+   **pos_weight question CLOSED.** (Topology-aware checkpoint selection in the engine is
+   still offered, not done — would tighten any *future* ablation.)
 
 **Tier 2 — push the topology contribution:**
 4. **clDice ablation:** `cldice_weight` ∈ {1, 1.5, 2}, +20 epochs (attempt 2 was

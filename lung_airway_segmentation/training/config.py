@@ -140,6 +140,24 @@ def build_argument_parser(config_args: argparse.Namespace) -> argparse.ArgumentP
         default=None,
         help="Optional override for the MONAI patch-cache rate.",
     )
+    parser.add_argument(
+        "--pos-weight",
+        type=float,
+        default=None,
+        help="Optional override for loss.positive_class_weight (BCE positive-class weight).",
+    )
+    parser.add_argument(
+        "--cldice-weight",
+        type=float,
+        default=None,
+        help="Optional override for loss.cldice_weight (clDice term weight).",
+    )
+    parser.add_argument(
+        "--val-threshold",
+        type=float,
+        default=None,
+        help="Optional override for validation.threshold (checkpoint-selection threshold; pair with --pos-weight).",
+    )
     return parser
 
 
@@ -191,6 +209,12 @@ def build_resolved_training_config(
         resolved["num_workers"] = args.num_workers
     if args.cache_rate is not None:
         resolved["sampling"]["cache_rate"] = args.cache_rate
+    if args.pos_weight is not None:
+        resolved["loss"]["positive_class_weight"] = args.pos_weight
+    if args.cldice_weight is not None:
+        resolved["loss"]["cldice_weight"] = args.cldice_weight
+    if args.val_threshold is not None:
+        resolved["validation"]["threshold"] = args.val_threshold
     if getattr(args, "batch_size_unlabelled", None) is not None:
         resolved["batch_size_unlabelled"] = args.batch_size_unlabelled
     if getattr(args, "init_checkpoint", None) is not None:
