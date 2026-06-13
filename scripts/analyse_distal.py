@@ -98,6 +98,8 @@ def parse_args() -> argparse.Namespace:
                         help="Split to report the table on (default val — develop here). Pass 'test' for the sealed final table.")
     parser.add_argument("--cldice-candidates", type=str, default="0.4,0.5,0.6",
                         help="Comma-separated thresholds clDice is maximised over (cldice mode). Widen if the peak is at the edge.")
+    parser.add_argument("--cldice-max-ratio", type=float, default=6.0,
+                        help="cldice mode: skip skeletonising a candidate whose LCC'd prediction exceeds this multiple of the GT voxel count (massive over-segmentation — never the clDice peak, and the slow ones to skeletonise).")
     parser.add_argument("--precision-floor", type=float, default=0.80,
                         help="voxel-precision mode only: min voxel-precision+LCC the chosen threshold must meet.")
     parser.add_argument("--cases", type=str, default=None, help="Comma-separated case IDs to override the *report* split.")
@@ -189,17 +191,26 @@ def sweep_case(prob, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum):
     return rows
 
 
-def topology_at(prob, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum, thresholds):
-    """clDice + topology precision (one skeletonisation each) at the given thresholds."""
+def topology_at(prob, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum, thresholds, max_ratio=6.0):
+    """clDice + topology precision (one skeletonisation each) at the given thresholds.
+
+    A candidate whose LCC'd prediction exceeds ``max_ratio`` x the GT voxel count is
+    skipped (tprec/clDice = None): such masks are massive over-segmentations — never
+    the clDice peak, and pathologically slow to skeletonise (a near-whole-lung blob on
+    a saturated model). This keeps the candidate scan affordable on saturated models.
+    """
     out = {}
     for t in thresholds:
         pred = prob >= t
         dice_raw, td_raw, _ = cheap_metrics(pred, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum)
         pred_lcc = keep_largest_connected_component(pred) > 0
         dice_lcc, td_lcc, prec_lcc = cheap_metrics(pred_lcc, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum)
-        tprec_lcc = float(topology_precision_from_masks(pred_lcc, gt))  # skeletonises the prediction
-        denom = tprec_lcc + td_lcc
-        cldice_lcc = float(2.0 * tprec_lcc * td_lcc / denom) if denom > 0 else 0.0
+        if gt_sum and int(pred_lcc.sum()) > max_ratio * gt_sum:
+            tprec_lcc = cldice_lcc = None  # gated: too large to skeletonise, not the peak
+        else:
+            tprec_lcc = float(topology_precision_from_masks(pred_lcc, gt))  # skeletonises the prediction
+            denom = tprec_lcc + td_lcc
+            cldice_lcc = float(2.0 * tprec_lcc * td_lcc / denom) if denom > 0 else 0.0
         out[t] = {
             "dice_raw": dice_raw, "td_raw": td_raw,
             "dice_lcc": dice_lcc, "td_lcc": td_lcc, "prec_lcc": prec_lcc,
@@ -224,17 +235,24 @@ def mean_sweep(case_rows):
 
 
 def mean_candidates(candidate_rows, thresholds):
-    """Mean clDice / topo-precision / TD per candidate threshold (for selection + display)."""
+    """Mean clDice / topo-precision / TD per candidate threshold (for selection + display).
+
+    Gated cells (clDice/tprec None) are excluded from those means; a candidate gated
+    for every case gets clDice None and is dropped from selection.
+    """
     out = []
     for t in thresholds:
         vals = [cr[t] for cr in candidate_rows]
+        cldice_vals = [v["cldice_lcc"] for v in vals if v["cldice_lcc"] is not None]
+        tprec_vals = [v["tprec_lcc"] for v in vals if v["tprec_lcc"] is not None]
         out.append({
             "threshold": t,
-            "cldice_lcc": float(np.mean([v["cldice_lcc"] for v in vals])),
-            "tprec_lcc": float(np.mean([v["tprec_lcc"] for v in vals])),
+            "cldice_lcc": float(np.mean(cldice_vals)) if cldice_vals else None,
+            "tprec_lcc": float(np.mean(tprec_vals)) if tprec_vals else None,
             "td_lcc": float(np.mean([v["td_lcc"] for v in vals])),
             "dice_lcc": float(np.mean([v["dice_lcc"] for v in vals])),
             "prec_lcc": float(np.mean([v["prec_lcc"] for v in vals])),
+            "n_valid": len(cldice_vals),
         })
     return out
 
@@ -252,11 +270,14 @@ def select_by_voxel_precision(sweep, precision_floor):
 
 
 def select_by_cldice(candidate_means):
-    """Threshold with max mean clDice; flag if it sits at the candidate-range edge."""
-    best = max(candidate_means, key=lambda r: r["cldice_lcc"])
-    thresholds = [r["threshold"] for r in candidate_means]
-    at_edge = len(thresholds) > 1 and best["threshold"] in (min(thresholds), max(thresholds))
-    reason = f"max clDice over candidates {thresholds}"
+    """Threshold with max mean clDice among non-gated candidates; flag edge peaks."""
+    valid = [r for r in candidate_means if r["cldice_lcc"] is not None]
+    if not valid:
+        return None, "all clDice candidates gated as over-segmented — lower the candidate range or raise --cldice-max-ratio", False
+    best = max(valid, key=lambda r: r["cldice_lcc"])
+    valid_thresholds = [r["threshold"] for r in valid]
+    at_edge = len(valid_thresholds) > 1 and best["threshold"] in (min(valid_thresholds), max(valid_thresholds))
+    reason = f"max clDice over candidates {[r['threshold'] for r in candidate_means]}"
     return float(best["threshold"]), reason, at_edge
 
 
@@ -269,15 +290,16 @@ def print_sweep(sweep, title):
 
 
 def print_candidates(candidate_means):
-    print(f"\n--- clDice candidate scan (+LCC) ---")
-    print(f"{'thresh':>7}  {'clDice':>7}  {'TPrec':>6}  {'TD':>6}  {'Dice':>6}")
+    print("\n--- clDice candidate scan (+LCC) ---")
+    print(f"{'thresh':>7}  {'clDice':>8}  {'TPrec':>6}  {'TD':>6}  {'Dice':>6}")
     for r in candidate_means:
-        print(f"{r['threshold']:>7.2f}  {r['cldice_lcc']:>7.3f}  {r['tprec_lcc']:>6.3f}  "
-              f"{r['td_lcc']:>6.3f}  {r['dice_lcc']:>6.3f}")
+        cl = f"{r['cldice_lcc']:.3f}" if r["cldice_lcc"] is not None else "gated"
+        tp = f"{r['tprec_lcc']:.3f}" if r["tprec_lcc"] is not None else "—"
+        print(f"{r['threshold']:>7.2f}  {cl:>8}  {tp:>6}  {r['td_lcc']:>6.3f}  {r['dice_lcc']:>6.3f}")
 
 
 def run_split(model, dataset_name, data_config, hu_window, cases, *, device, roi_size, overlap, sw_batch,
-              chosen_threshold=None, compute_bd=False, collect_bins=False, cldice_candidates=None):
+              chosen_threshold=None, compute_bd=False, collect_bins=False, cldice_candidates=None, cldice_max_ratio=6.0):
     """Inference over a list of cases.
 
     Always returns the cheap per-case sweep. If ``cldice_candidates`` is given, also
@@ -297,7 +319,7 @@ def run_split(model, dataset_name, data_config, hu_window, cases, *, device, roi
         case_sweeps.append(sweep_case(prob, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum))
 
         if cldice_candidates:
-            candidate_rows.append(topology_at(prob, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum, cldice_candidates))
+            candidate_rows.append(topology_at(prob, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum, cldice_candidates, cldice_max_ratio))
 
         if chosen_threshold is not None:
             pred = prob >= chosen_threshold
@@ -445,7 +467,8 @@ def main() -> None:
         print(f"\nselecting operating point on {args.select_split} ({len(sel_cases)} cases) by {args.select_by}...")
         sel_sweeps, _, sel_bins, sel_candidates = run_split(
             model, dataset_name, data_config, hu_window, sel_cases,
-            collect_bins=same_split, cldice_candidates=want_candidates, **infer_kw,
+            collect_bins=same_split, cldice_candidates=want_candidates,
+            cldice_max_ratio=args.cldice_max_ratio, **infer_kw,
         )
         val_sweep = mean_sweep(sel_sweeps)
         print_sweep(val_sweep, f"{args.select_split} sweep (mean over {len(sel_cases)} cases)")
@@ -453,9 +476,12 @@ def main() -> None:
             candidate_means = mean_candidates(sel_candidates, candidates)
             print_candidates(candidate_means)
             chosen_threshold, selection_reason, at_edge = select_by_cldice(candidate_means)
+            if chosen_threshold is None:
+                raise SystemExit("clDice selection failed: " + selection_reason)
             if at_edge:
-                print(f"\n[warn] clDice peak is at the edge of the candidate range {candidates} — "
-                      f"the true optimum may be beyond it. Re-run with a wider --cldice-candidates.")
+                print(f"\n[warn] clDice peak is at the edge of the evaluated candidates — the optimum "
+                      f"may be beyond it. Re-run with a wider --cldice-candidates. (Candidates gated "
+                      f"as over-segmented are skipped, not edges — see the scan above.)")
         else:
             chosen_threshold, selection_reason = select_by_voxel_precision(val_sweep, args.precision_floor)
         selected_on = args.select_split

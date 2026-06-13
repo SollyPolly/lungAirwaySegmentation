@@ -1,7 +1,7 @@
 #!/bin/bash
 #PBS -N AirwayAnalyse
 #PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
-#PBS -l walltime=02:00:00
+#PBS -l walltime=04:00:00
 #PBS -j oe
 #PBS -o /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation/analyse_distal.out
 
