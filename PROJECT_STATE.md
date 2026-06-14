@@ -1,7 +1,7 @@
 # Lung Airway Segmentation — Project State
 
 **Dissertation project, Imperial College London. Deadline: September 7, 2026.**
-_Last updated: 2026-06-12._
+_Last updated: 2026-06-14._
 
 ---
 
@@ -55,6 +55,14 @@ clDice is a **Pareto win on topology** — higher centreline recall (TD) *and* p
 (TPrec) *and* their harmonic mean (clDice) — sacrificing only volumetric Dice
 (proximal-dominated). This is **val (development)**; the sealed-test table (+BD) is the
 final deliverable, run once on frozen models.
+
+**Update (2026-06-14): clDice weight=2 (`-w2`) is the new best topology model.** At 0.5
+(n=20 val): **clDice 0.683 / TPrec 0.794 / TD 0.608 / Dice+LCC 0.518** — dominates the
+pw10 row above on *every* metric, with a clean interior clDice peak at 0.5 (0.45→0.657,
+**0.5→0.683**, 0.55→0.660, 0.6→0.639, 0.65→0.621). **Candidate to freeze as the headline
+clDice model.** **Caveat (raw vs +LCC):** at 0.5 raw Dice is only ~0.13 → LCC lifts it to
+0.52, so **LCC is load-bearing**; weight=2 did *not* change this (raw Dice@0.5 = pw10's).
+See the LCC-reliance lesson below.
 
 **Why clDice wins (measured, n=20):** (1) **connectivity** — at 0.5 the clDice model loses
 only ~5% of TD to LCC (raw 0.625→0.592) while the baseline loses ~39% (0.610→0.372): the
@@ -135,6 +143,7 @@ Per-run detail lives in each run's `runs/<exp>/<ts>/notes.md` (local; `runs/` is
 | `supervised-atm-l20-cldice` (attempt 2) | clDice, **warm-up 15 + ramp 10**, 80ep | **0.539** val @0.99; **+54% TD** vs baseline; with LCC → the headline win above. |
 | `supervised-atm-l20-cldice` (re-eval, gated tool) | pw10 clDice op-point, val n=20 | **clDice 0.615** @0.50 (TD 0.59, Dice+LCC 0.51). The clean pw10 reference. |
 | `supervised-atm-l20-cldice-pw3` | clDice, **pos_weight=3** (de-saturate) | **clDice 0.494** @0.50 (TD 0.38, distal recall 65% vs 80%) — WORSE. De-saturation = negative result; keep pw10. |
+| `supervised-atm-l20-cldice-w2` | clDice, **weight=2** (n=20 val, close sweep) | **clDice 0.683** @0.50 (TPrec 0.79, TD 0.61, Dice+LCC 0.52) — **new best topology model**, dominates pw10 (0.615/0.65/0.59/0.51) on every metric; clean interior clDice peak @0.50. But raw Dice@0.5 ~0.13 (= pw10) → **LCC reliance unchanged**. |
 
 **Mean Teacher = negative result.** Both single-domain MT runs converge to a
 ~0.50 val basin *below* the 0.609 supervised optimum (warm-start slides down into
@@ -162,14 +171,17 @@ lung_airway_segmentation/
   datasets/    monai_aeropath.py, monai_atm22.py (CT-only + build_monai_atm22_labelled_datasets),
                splits.py (create_train_val_test_split + create_semisupervised_split), patches.py
   losses/      segmentation.py  — CombinedSegmentationLoss = BCE(pos_weight) + Dice + (optional) clDice
-               topology.py      — soft_skeleton / soft_cldice_loss / SoftClDiceLoss  [IMPLEMENTED]
+               topology.py      — soft_skeleton / soft_cldice_loss / SoftClDiceLoss [IMPLEMENTED]; persistent_homology_loss [EXPERIMENTAL — wired into CombinedSegmentationLoss but OFF by default (loss.topo_weight=0); enable via `--topo-weight`, needs `torch-topological`]
                semi_supervised.py — ConsistencyLoss (MT; negative result)
   models/      baseline_unet.py, ct_fm_segresnet.py
   training/    config.py (YAML/CLI/validation), builders.py (resolve_case_splits, dataset-agnostic),
                loops.py, teacher_student.py, engine.py (run_supervised_training w/ clDice warm-up ramp,
-               run_semisupervised_training w/ --init-checkpoint warm-start)
-  inference/   sliding_window.py, postprocess.py (binarize_logits, keep_largest_connected_component)
+               run_semisupervised_training w/ --init-checkpoint warm-start; both seed via
+               reproducibility.seed_everything + stamp git SHA / lib versions into run_metadata.json)
+  inference/   sliding_window.py, postprocess.py (binarize_logits, keep_largest_connected_component,
+               keep_component_containing_trachea — affine-aware trachea-seeded LCC, the default for predictions)
   metrics/     segmentation.py (Dice/precision/recall), topology.py (clDice, TD, BD, branch parsing)
+  reproducibility.py — seed_everything (RNG + deterministic cuDNN) + seeded DataLoaders (worker_init_fn/generator) + collect_environment_metadata (git SHA / lib versions)
 
 scripts/
   train_baseline.py / train_semisupervised.py   — training entrypoints
@@ -189,8 +201,12 @@ train.pbs                                        — ONE reusable HPC job script
   It (1) **selects the operating threshold** — default `--select-by cldice`: max clDice
   over `--cldice-candidates` (default 0.4,0.5,0.6; warns + says to widen if the peak is
   at the candidate-range edge); `--select-by voxel-precision` is the fast no-skeletonise
-  alternative (TD s.t. voxel-precision ≥ `--precision-floor`) — and (2) **reports Dice /
-  TD / BD / clDice / TPrec (+LCC)** at that threshold, plus (3) distal radius
+  alternative (TD s.t. voxel-precision ≥ `--precision-floor`) — and (2) **reports both
+  RAW (Dice / TD / Prec, no post-proc) and +LCC (Dice / TD / BD / clDice / TPrec / Prec)**
+  at that threshold, plus a **`lcc_retained_fraction` (LCC-kept)** column in
+  `table_mean`/`threshold_sweep` so post-processing reliance is a first-class number
+  (clDice/TPrec are +LCC-only — there is no raw clDice; skeletonising a raw low-threshold
+  blob is meaningless), plus (3) distal radius
   stratification + the cheap threshold sweep (grid now includes 0.3/0.4 for de-saturated
   models). clDice/topology-precision are computed only at the candidates (or the chosen
   threshold); BD only on the test report. **Defaults to select+report on val** (develop
@@ -208,6 +224,23 @@ train.pbs                                        — ONE reusable HPC job script
   CT/GT. `--threshold 0.90 --connectivity 6`. (An earlier MONAI-space, non-metadata
   version did NOT appear in the viewer — that was the cause of the "can't select
   the clDice run" issue, now fixed.)
+- **`mask_visualisation.py` — GT-confidence diagnostic** (marimo viewer, Saved
+  Prediction panel, `GT confidence (prob×truth)` toggle). Lazily loads
+  `airway_prob_full.nii.gz` and, for one case, shows: (1) **prob×GT slice overlay**
+  (true-airway voxels coloured by predicted P); (2) **3D GT skeleton coloured by
+  predicted P** — the "confidence falls off toward the periphery" figure; (3) a
+  **calibre-stratified confidence curve** — mean P on the true airway *vs* on the
+  adjacent background **shell** (≤2.5 vox), binned by **branch calibre**
+  (distance-to-wall at the nearest centreline voxel, so whole branches are classed
+  by thickness — deliberately *not* `analyse_distal`'s raw per-voxel distance-to-wall
+  bins, which lump every branch's surface into r=1 and hide the distal signal). The
+  op-threshold is drawn on; the heading prints a **separability gap** (airway−shell).
+  **Read:** distal airway ≈ shell → genuinely unseparable from adjacent tissue
+  (context/resolution problem); airway ≫ shell → operating-point problem
+  (recoverable). **Diagnostic only — masks prediction to GT, so it's
+  recall/separability, never a performance number** (pair with clDice / topology
+  precision). Torch-free (uses `skimage.skeletonize` directly, not the `metrics`
+  helpers, since marimo drops leading-underscore names from its dataflow).
 - **`train.pbs`** is a single reusable job script (user preference): edit the
   active command block, `qsub`, output overwrites `train.out`. CX3 sizing:
   `select=1:ncpus=8:mem=64gb:ngpus=1`, walltime 12h, gpu_type left empty.
@@ -217,9 +250,47 @@ train.pbs                                        — ONE reusable HPC job script
 ## Key design decisions & lessons
 
 - **Config-first**: all hyperparameters in YAML; each run saves `resolved_config.json`.
+- **Reproducibility-by-default for the paired comparison** (`deterministic: true`, the code
+  default — no config change needed). `reproducibility.seed_everything` seeds
+  Python/NumPy/torch(+CUDA) and forces deterministic cuDNN (autotuner off); the
+  train/val/unlabelled DataLoaders are now seeded (`worker_init_fn` + generator — the train
+  loader previously had neither). Every run's `run_metadata.json` also stamps the git
+  commit/branch/dirty flag + torch/monai/numpy/scipy versions, so each reported number is
+  traceable to exact code. The baseline-vs-clDice headline is a small mean difference, so this
+  removes seed/autotuner noise as a confound and makes runs auditable for the viva. **Tradeoff:**
+  deterministic cuDNN is slower on 3D convs — set `deterministic: false` only for throwaway speed
+  runs, never a reported number.
 - **Threshold 0.99 for the supervised/baseline** because `pos_weight=10` saturates probabilities (the old "0.083 Dice" disasters were all wrong-threshold).
 - **clDice needs a warm-up**: pure Dice+BCE for ~15 epochs, then ramp clDice in — the soft skeleton of an untrained model is noise. Implemented as an epoch ramp in `run_supervised_training` (`cldice_warmup_epochs`, `cldice_rampup_epochs`).
 - **LCC (6-connectivity) is now standard post-processing** for airways (one connected tree). Most low-threshold false positives are disconnected blobs LCC removes.
+- **LCC must be trachea-seeded, not largest-by-size — the "backboard" failure (2026-06-14).**
+  ATM'22 is **not lung-cropped** in this pipeline (no lung masks), so the full volume
+  includes the **CT table / positioning board** — a large, planar, *air-density* slab
+  (~same HU as airway lumen) that the model predicts as airway in **almost all ATM cases**.
+  Plain `keep_largest_connected_component` picks the component with the most voxels, so when
+  the airway tree **fragments** (e.g. pw3 at 0.5) the board outsizes the tree and **LCC
+  returns the board, not the airway** (TD≈0 for that case). Fix:
+  `keep_component_containing_trachea` (`inference/postprocess.py`) keeps the largest
+  component reaching the **central-superior** window (the trachea), excluding the
+  peripheral board; **superior axis is read from the affine** (robust to ATM's native
+  orientation vs AeroPath/predict_atm RAS+), with fallback to largest if the trachea isn't
+  predicted. Now the default in `analyse_distal.py` and `predict_atm.py`. **Consequence:
+  the pw3 negative-result numbers are partly confounded** (LCC may have returned the board)
+  — re-run pw3/pw10/w2 with trachea-seeded LCC before trusting the magnitudes. Another nail
+  in LCC brittleness (it can silently return the *wrong* structure), reinforcing the
+  LCC-reliance lesson above.
+- **LCC is load-bearing at the low operating point — and that's inherent, not fixable by
+  the loss (n=20 val).** At the clDice-optimal 0.5: **raw Dice ~0.13 → +LCC 0.52** (LCC
+  carries ~¾ of the final Dice), and **raw TD is *higher* than +LCC TD** (LCC also deletes
+  a few genuinely-disconnected true distal islands, ~6% recall cost). The raw-prediction
+  blobbiness is unchanged across **pw10 (0.13), pw3 (0.17), w2 (0.13)** — neither
+  pos_weight nor clDice weight tidies it, so it's a property of the *operating point*, not
+  calibration/loss. As the threshold rises the raw prediction tidies (raw Dice
+  0.13→0.38→0.46 @0.5/0.9/0.99) but clDice/TD fall with it — **no op-point is both
+  topology-strong and LCC-light**. **Only context (larger patches / higher overlap) is
+  expected to sharpen the raw prediction and reduce LCC reliance.** `analyse_distal` now
+  reports raw vs +LCC + `lcc_retained_fraction`, so this is auditable — write it up as a
+  stated limitation, not hidden.
 - **TD/topology vs Dice**: report TD at a fixed operating threshold + a precision-side metric; never TD's max.
 - **Dataset-agnostic training** via `resolve_case_splits(data_config, training_config)` → `{labelled_train, unlabelled_train, val, test}` (AeroPath = fractional 3-way w/ empty unlabelled; ATM = count-based 4-way). Leakage guard verified (unlabelled disjoint from val/test).
 - **British English** throughout (`labelled`, `unlabelled`).
@@ -264,6 +335,12 @@ train.pbs                                        — ONE reusable HPC job script
 ## What needs to be done next (in priority order)
 
 **Tier 1 — lock the core result + de-funk the operating point (do first):**
+0. **Re-run `analyse_distal` on pw10 / w2 / pw3 with the new trachea-seeded LCC**
+   (prerequisite for everything else). The prior JSONs used largest-by-size LCC, which can
+   return the **backboard** instead of the tree (see the backboard lesson) — so the current
+   val numbers (esp. pw3, possibly a few pw10/w2 cases) need refreshing before they're
+   trusted. Then re-decide the pos_weight question on clean numbers (this is what the
+   cancelled pw5 run was waiting on). Also re-generate viewer predictions via `predict_atm`.
 1. **Full 20-case test table** (Dice + TD + BD), supervised-ATM vs +clDice, at a
    *fixed, defensible* operating point, overlap 0.5–0.75 + LCC. The dissertation's
    core table — but it is the **sealed final eval**: develop/compare configs on val
@@ -283,9 +360,12 @@ train.pbs                                        — ONE reusable HPC job script
    still offered, not done — would tighten any *future* ablation.)
 
 **Tier 2 — push the topology contribution:**
-4. **clDice ablation:** `cldice_weight` ∈ {1, 1.5, 2}, +20 epochs (attempt 2 was
-   still inching up at ep75/80). Pick best by a *topology* val metric, not Dice@0.99.
-   Combine with (3) as a small grid, not a full factorial, to save GPU runs.
+4. **clDice ablation — weight=2 DONE, wins.** `cldice_weight=2` (`supervised-atm-l20-cldice-w2`,
+   n=20 val) beats weight=1/pw10 on *every* topology metric at 0.5 (clDice 0.683 vs 0.615,
+   TPrec 0.79 vs 0.65, TD 0.61 vs 0.59, Dice+LCC 0.52 vs 0.51), clean interior clDice peak
+   at 0.5. **Candidate to freeze as the headline clDice model.** Remaining (optional):
+   confirm vs weight=1.5 and the `last` checkpoint; otherwise weight=2 is the pick. Note it
+   did **not** reduce LCC reliance (raw Dice@0.5 ~0.13 = pw10) — see the LCC-reliance lesson.
 5. **Patch borders:** inference overlap 0.5→0.75 for headline numbers; try
    `foreground_probability≈0.5`; (optional) 128³ patches for more per-patch context.
 
@@ -310,6 +390,14 @@ train.pbs                                        — ONE reusable HPC job script
 
 **Ruled out / parked:**
 - **Full unsupervised** — too high-risk for the timeline; no working precedent for airways.
+- **Full-resolution full-volume training** — impractical for chest-CT airways (won't fit
+  the GPU at full res; downsampling kills distal detail; reintroduces the class imbalance
+  that foreground-centred patch sampling solves). **Larger patches (128³) are the lever
+  instead** — more topology context + fewer branches cut at patch faces + fewer border
+  artefacts, fits the L40S at batch 1. Worth a run via `--patch-size 128` (override; not
+  yet wired). Persistent-homology loss (`losses/topology.py::persistent_homology_loss`,
+  experimental stub) wants the whole-tree β₀=1 target, so it pairs with larger/full
+  volume (ideally a downsampled-full-volume topology auxiliary) — a stretch after the core lands.
 - **More Mean Teacher tuning** — two runs show it degrades (confirmation bias). Keep as the negative baseline.
 - **Two-stage distal refiner** (another paper's idea) — derivative *and* redundant with clDice (both target distal). Future-work mention only.
 - **Diffusion as segmenter** — still supervised, weaker for thin airways. (Diffusion/MAE *pretraining* on unlabelled CTs is the only unsupervised angle worth a stretch, after the core lands.)

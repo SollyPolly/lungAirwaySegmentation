@@ -7,6 +7,7 @@
 #     "pandas",
 #     "plotly",
 #     "scikit-image",
+#     "scipy",
 # ]
 # ///
 
@@ -28,6 +29,24 @@ def _():
 
 @app.cell
 def _():
+    # Distance-to-wall radius bins in voxels (label, lo, hi). Mirrors
+    # scripts/analyse_distal.py::RADIUS_BINS so the viewer's confidence curve uses
+    # the same distal definition as the headline numbers. Kept local (not imported)
+    # because analyse_distal pulls in torch, which this viewer deliberately avoids.
+    RADIUS_BINS = [
+        ("r=1 (distal)", 0.5, 1.5),
+        ("r=2", 1.5, 2.5),
+        ("r=3", 2.5, 3.5),
+        ("r=4-5", 3.5, 5.5),
+        ("r>=6 (proximal)", 5.5, 1e9),
+    ]
+    # Probability colourscale for GT-confidence views (low=cool, high=warm).
+    CONFIDENCE_COLORSCALE = "Turbo"
+    return CONFIDENCE_COLORSCALE, RADIUS_BINS
+
+
+@app.cell
+def _():
     import json
     from pathlib import Path
 
@@ -35,7 +54,9 @@ def _():
     import nibabel as nib
     import numpy as np
     import plotly.graph_objects as go
+    from scipy import ndimage
     from skimage.measure import marching_cubes
+    from skimage.morphology import skeletonize
 
     from lung_airway_segmentation.settings import (
         DEFAULT_CROP_MARGIN,
@@ -70,11 +91,13 @@ def _():
         load_canonical_image,
         marching_cubes,
         mo,
+        ndimage,
         nib,
         np,
         preprocess_case,
         resolve_atm22_case_paths,
         resolve_case_paths,
+        skeletonize,
         verify_alignment,
     )
 
@@ -1025,6 +1048,7 @@ def _(
     show_prediction_lung_mask = mo.ui.switch(value=False, label="Lung")
     show_true_prediction_mask = mo.ui.switch(value=True, label="Truth")
     show_predicted_mask = mo.ui.switch(value=True, label="Prediction")
+    show_gt_confidence = mo.ui.switch(value=False, label="GT confidence (prob×truth)")
     predicted_mask_opacity = mo.ui.slider(
         0.05,
         1.0,
@@ -1038,6 +1062,7 @@ def _(
         prediction_run_selector,
         prediction_runs_available,
         prediction_view_height_slider,
+        show_gt_confidence,
         show_predicted_mask,
         show_prediction_lung_mask,
         show_true_prediction_mask,
@@ -1238,8 +1263,139 @@ def _(
 
 @app.cell
 def _(
+    RADIUS_BINS,
+    ndimage,
+    nib,
+    np,
+    prediction_bundle,
+    show_gt_confidence,
+    skeletonize,
+):
+    # GT-confidence diagnostic: the predicted probability restricted to the
+    # ground-truth airway. Lazily loaded — the probability volume is large
+    # (~600 MB on ATM'22), so we only touch it when the toggle is on. Computes
+    # everything the views need: the full prob volume (slice overlay), the
+    # GT-skeleton points coloured by prob (3D), the radius-stratified mean prob
+    # (the "confidence falls off toward the periphery" curve), and a background
+    # SHELL just outside the airway, binned by the radius of the nearest airway
+    # voxel — the separability read (distal airway prob vs adjacent-tissue prob).
+    #
+    # NOTE: this masks the prediction to GT, discarding all false positives. It
+    # is a recall/confidence DIAGNOSTIC, never a performance number — pair it
+    # with the precision-side metrics (clDice / topology precision).
+    SHELL_VOXELS = 2.5  # background-shell thickness around the airway, in voxels.
+    if (
+        prediction_bundle is None
+        or not show_gt_confidence.value
+    ):
+        gt_confidence = None
+    elif prediction_bundle["probability_path"] is None:
+        gt_confidence = {
+            "error": "No airway_prob_full.nii.gz saved for this case — re-run predict_atm.py."
+        }
+    else:
+        _prob = np.asarray(
+            nib.load(str(prediction_bundle["probability_path"])).dataobj,
+            dtype=np.float32,
+        )
+        _gt = prediction_bundle["true_mask"]
+        if _prob.shape != _gt.shape:
+            gt_confidence = {
+                "error": f"probability shape {_prob.shape} != GT shape {_gt.shape}"
+            }
+        elif not _gt.any():
+            gt_confidence = {"error": "case has no ground-truth airway voxels"}
+        else:
+            _spacing = np.asarray(prediction_bundle["spacing"], dtype=np.float32)
+
+            # Work inside a padded bounding box of the airway: the shell distance
+            # transform with return_indices is memory-heavy on a full volume, and
+            # everything we need is local to the tree. Pad > shell width.
+            _where = np.where(_gt)
+            _bbox = tuple(
+                slice(
+                    max(0, int(ax.min()) - 4),
+                    min(int(size), int(ax.max()) + 5),
+                )
+                for ax, size in zip(_where, _gt.shape)
+            )
+            _offset = np.array([sl.start for sl in _bbox], dtype=np.float32)
+            _gt_c = _gt[_bbox]
+            _prob_c = _prob[_bbox]
+
+            # Skeleton + calibre. distance-to-wall at a centreline voxel is the
+            # local branch calibre (radius of the maximal inscribed sphere). We
+            # bin BOTH airway and shell voxels by the calibre of their NEAREST
+            # centreline voxel, so a whole branch is classified by its thickness
+            # — a cleaner distal/generation proxy than per-voxel wall distance,
+            # which lumps every branch's surface into r=1 and hides the distal
+            # signal. (This is why these bins can differ from analyse_distal's
+            # raw distance-to-wall RADIUS_BINS.)
+            _skeleton_c = skeletonize(_gt_c)
+            _radius = ndimage.distance_transform_edt(_gt_c)  # distance to wall
+            # Calibre of the nearest centreline voxel, for every voxel in the box.
+            _, _skel_idx = ndimage.distance_transform_edt(~_skeleton_c, return_indices=True)
+            _calibre = _radius[tuple(_skel_idx)]
+
+            # 3D: skeleton points (cropped index + offset → full-volume index → mm)
+            # coloured by the predicted probability at each centreline voxel.
+            _skeleton_points_mm = (
+                np.argwhere(_skeleton_c).astype(np.float32) + _offset
+            ) * _spacing
+            _skeleton_prob = _prob_c[_skeleton_c]
+
+            _prob_gt = _prob_c[_gt_c]
+            _calibre_gt = _calibre[_gt_c]
+
+            # Background shell: non-airway voxels within SHELL_VOXELS of the wall,
+            # binned by the calibre of the branch they hug.
+            _bg_dist = ndimage.distance_transform_edt(~_gt_c)
+            _shell = (~_gt_c) & (_bg_dist > 0) & (_bg_dist <= SHELL_VOXELS)
+            _prob_shell = _prob_c[_shell]
+            _calibre_shell = _calibre[_shell]
+
+            def _stratify(values, calibres):
+                rows = []
+                total = int(values.size)
+                for label, lo, hi in RADIUS_BINS:
+                    m = (calibres >= lo) & (calibres < hi)
+                    count = int(m.sum())
+                    if count == 0:
+                        continue
+                    p = values[m]
+                    rows.append(
+                        {
+                            "bin": label,
+                            "count": count,
+                            "pct": float(100.0 * count / total) if total else 0.0,
+                            "mean_prob": float(p.mean()),
+                            "median_prob": float(np.median(p)),
+                            "p10_prob": float(np.percentile(p, 10)),
+                            "p90_prob": float(np.percentile(p, 90)),
+                        }
+                    )
+                return rows
+
+            gt_confidence = {
+                "prob": _prob,
+                "gt": _gt,
+                "skeleton_points_mm": _skeleton_points_mm,
+                "skeleton_prob": _skeleton_prob,
+                "radius_curve": _stratify(_prob_gt, _calibre_gt),
+                "shell_curve": _stratify(_prob_shell, _calibre_shell),
+                "shell_voxels": SHELL_VOXELS,
+                "mean_prob": float(_prob_gt.mean()) if _prob_gt.size else 0.0,
+                "shell_mean_prob": float(_prob_shell.mean()) if _prob_shell.size else 0.0,
+            }
+    return (gt_confidence,)
+
+
+@app.cell
+def _(
+    CONFIDENCE_COLORSCALE,
     REPORT_CAMERA,
     go,
+    gt_confidence,
     mo,
     predicted_mask_opacity,
     prediction_bundle,
@@ -1248,6 +1404,7 @@ def _(
     prediction_mask_mesh,
     prediction_true_mesh,
     prediction_view_height_slider,
+    show_gt_confidence,
     show_predicted_mask,
     show_prediction_lung_mask,
     show_true_prediction_mask,
@@ -1316,6 +1473,32 @@ def _(
                 )
             )
 
+        if (
+            show_gt_confidence.value
+            and gt_confidence is not None
+            and "error" not in gt_confidence
+        ):
+            gt_confidence_points = gt_confidence["skeleton_points_mm"]
+            prediction_mesh_figure.add_trace(
+                go.Scatter3d(
+                    x=gt_confidence_points[:, 0],
+                    y=gt_confidence_points[:, 1],
+                    z=gt_confidence_points[:, 2],
+                    mode="markers",
+                    marker=dict(
+                        size=2,
+                        color=gt_confidence["skeleton_prob"],
+                        colorscale=CONFIDENCE_COLORSCALE,
+                        cmin=0.0,
+                        cmax=1.0,
+                        colorbar=dict(title="P(airway)", thickness=12, len=0.6, x=0.98),
+                        showscale=True,
+                    ),
+                    name="GT centreline confidence",
+                    hovertemplate="P(airway)=%{marker.color:.3f}<extra></extra>",
+                )
+            )
+
         if not prediction_mesh_figure.data:
             prediction_3d_view = mo.md("Enable at least one mask to display the saved prediction 3D view.")
         else:
@@ -1364,6 +1547,7 @@ def _(
     prediction_set_selector,
     prediction_slice_slider,
     prediction_view_height_slider,
+    show_gt_confidence,
     show_predicted_mask,
     show_prediction_lung_mask,
     show_true_prediction_mask,
@@ -1428,7 +1612,12 @@ def _(
             align="end",
         )
         prediction_mask_controls = mo.hstack(
-            [show_prediction_lung_mask, show_true_prediction_mask, show_predicted_mask],
+            [
+                show_prediction_lung_mask,
+                show_true_prediction_mask,
+                show_predicted_mask,
+                show_gt_confidence,
+            ],
             widths="equal",
             justify="start",
             gap=0.8,
@@ -1488,9 +1677,12 @@ def _(
 
 @app.cell
 def _(
+    CONFIDENCE_COLORSCALE,
     extract_plane,
     go,
+    gt_confidence,
     mo,
+    np,
     overlay_mask,
     predicted_mask_opacity,
     prediction_axis,
@@ -1498,6 +1690,7 @@ def _(
     prediction_bundle_error,
     prediction_slice_slider,
     prediction_view_height_slider,
+    show_gt_confidence,
     show_predicted_mask,
     show_prediction_lung_mask,
     show_true_prediction_mask,
@@ -1570,6 +1763,28 @@ def _(
                 )
             )
 
+        if (
+            show_gt_confidence.value
+            and gt_confidence is not None
+            and "error" not in gt_confidence
+        ):
+            gt_confidence_prob_plane = extract_plane(
+                gt_confidence["prob"], prediction_axis, prediction_slice_index
+            )
+            gt_confidence_truth_plane = extract_plane(
+                gt_confidence["gt"], prediction_axis, prediction_slice_index
+            )
+            prediction_slice_figure.add_trace(
+                go.Heatmap(
+                    z=np.where(gt_confidence_truth_plane, gt_confidence_prob_plane, np.nan),
+                    colorscale=CONFIDENCE_COLORSCALE,
+                    zmin=0.0,
+                    zmax=1.0,
+                    colorbar=dict(title="P(airway)", thickness=12, len=0.85),
+                    hovertemplate="P(airway)=%{z:.3f}<extra></extra>",
+                )
+            )
+
         prediction_slice_figure.update_layout(
             title=(
                 f"Saved prediction slice {prediction_slice_index} "
@@ -1591,6 +1806,130 @@ def _(
 
 
 @app.cell
+def _(
+    go,
+    gt_confidence,
+    mo,
+    prediction_bundle,
+    prediction_bundle_error,
+    prediction_view_height_slider,
+    show_gt_confidence,
+):
+    # Confidence-vs-calibre curve: mean predicted probability on the true airway
+    # and on the adjacent background shell, stratified by branch calibre. The
+    # operating threshold is drawn on so it is immediately visible which calibre
+    # bins sit below it (thresholded away) and whether airway separates from shell.
+    if (
+        not show_gt_confidence.value
+        or prediction_bundle is None
+        or prediction_bundle_error is not None
+    ):
+        gt_confidence_curve_view = mo.md("")
+    elif gt_confidence is not None and "error" in gt_confidence:
+        gt_confidence_curve_view = mo.md(
+            f"GT-confidence curve unavailable: `{gt_confidence['error']}`"
+        )
+    elif gt_confidence is None or not gt_confidence["radius_curve"]:
+        gt_confidence_curve_view = mo.md("No ground-truth airway voxels to stratify.")
+    else:
+        curve_rows = gt_confidence["radius_curve"]
+        shell_by_bin = {row["bin"]: row for row in gt_confidence.get("shell_curve", [])}
+        curve_labels = [row["bin"] for row in curve_rows]
+        curve_means = [row["mean_prob"] for row in curve_rows]
+        curve_err_up = [max(0.0, row["p90_prob"] - row["mean_prob"]) for row in curve_rows]
+        curve_err_down = [max(0.0, row["mean_prob"] - row["p10_prob"]) for row in curve_rows]
+        curve_customdata = [
+            (row["median_prob"], row["count"], row["pct"]) for row in curve_rows
+        ]
+        # Shell series aligned to the airway bins (None where a bin is absent).
+        shell_means = [
+            shell_by_bin[label]["mean_prob"] if label in shell_by_bin else None
+            for label in curve_labels
+        ]
+        shell_customdata = [
+            (
+                shell_by_bin[label]["median_prob"] if label in shell_by_bin else float("nan"),
+                shell_by_bin[label]["count"] if label in shell_by_bin else 0,
+            )
+            for label in curve_labels
+        ]
+
+        gt_confidence_curve_figure = go.Figure()
+        gt_confidence_curve_figure.add_trace(
+            go.Bar(
+                x=curve_labels,
+                y=curve_means,
+                error_y=dict(
+                    type="data",
+                    symmetric=False,
+                    array=curve_err_up,
+                    arrayminus=curve_err_down,
+                    thickness=1,
+                    width=4,
+                ),
+                marker_color="#277da1",
+                name="airway (true)",
+                customdata=curve_customdata,
+                hovertemplate=(
+                    "%{x}<br>airway mean P=%{y:.3f}<br>median P=%{customdata[0]:.3f}"
+                    "<br>voxels=%{customdata[1]:,} (%{customdata[2]:.1f}% of airway)"
+                    "<extra></extra>"
+                ),
+            )
+        )
+        gt_confidence_curve_figure.add_trace(
+            go.Bar(
+                x=curve_labels,
+                y=shell_means,
+                marker_color="#adb5bd",
+                name=f"background shell (≤{gt_confidence.get('shell_voxels', 2.5):g} vox)",
+                customdata=shell_customdata,
+                hovertemplate=(
+                    "%{x}<br>shell mean P=%{y:.3f}<br>median P=%{customdata[0]:.3f}"
+                    "<br>voxels=%{customdata[1]:,}<extra></extra>"
+                ),
+            )
+        )
+        gt_confidence_threshold = prediction_bundle["threshold"]
+        if gt_confidence_threshold is not None:
+            gt_confidence_curve_figure.add_hline(
+                y=float(gt_confidence_threshold),
+                line=dict(color="#d81b60", dash="dash", width=1.5),
+                annotation_text=f"op threshold {float(gt_confidence_threshold):.2f}",
+                annotation_position="top left",
+            )
+        gt_confidence_curve_figure.update_layout(
+            title="Predicted confidence: true airway vs adjacent tissue, by distance to wall",
+            height=int(prediction_view_height_slider.value),
+            margin=dict(l=10, r=10, t=55, b=0),
+            yaxis=dict(title="P(airway)", range=[0, 1]),
+            xaxis=dict(title="branch calibre (centreline radius, voxels)"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1.0),
+            barmode="group",
+            bargap=0.3,
+            bargroupgap=0.08,
+            plot_bgcolor="white",
+            paper_bgcolor="white",
+        )
+        gt_confidence_separability = (
+            gt_confidence["mean_prob"] - gt_confidence.get("shell_mean_prob", 0.0)
+        )
+        gt_confidence_curve_view = mo.vstack(
+            [
+                mo.md(
+                    f"### GT Confidence — Radius Stratification "
+                    f"(airway {gt_confidence['mean_prob']:.3f} vs shell "
+                    f"{gt_confidence.get('shell_mean_prob', 0.0):.3f} → "
+                    f"separability gap {gt_confidence_separability:+.3f})"
+                ),
+                mo.as_html(gt_confidence_curve_figure),
+            ],
+            gap=0.5,
+        )
+    return (gt_confidence_curve_view,)
+
+
+@app.cell
 def _(mo, prediction_3d_view, prediction_controls):
     prediction_top_panel = mo.hstack(
         [
@@ -1606,11 +1945,17 @@ def _(mo, prediction_3d_view, prediction_controls):
 
 
 @app.cell
-def _(mo, prediction_slice_view, prediction_top_panel):
+def _(
+    gt_confidence_curve_view,
+    mo,
+    prediction_slice_view,
+    prediction_top_panel,
+):
     prediction_panel = mo.vstack(
         [
             prediction_top_panel,
             prediction_slice_view,
+            gt_confidence_curve_view,
         ],
         gap=0.75,
     )

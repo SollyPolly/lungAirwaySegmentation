@@ -26,7 +26,7 @@ import nibabel as nib
 import numpy as np
 import torch
 
-from lung_airway_segmentation.inference.postprocess import keep_largest_connected_component
+from lung_airway_segmentation.inference.postprocess import keep_component_containing_trachea
 from lung_airway_segmentation.inference.sliding_window import predict_logits_for_volume
 from lung_airway_segmentation.io.atm22_layout import resolve_case_paths
 from lung_airway_segmentation.io.nifti import load_canonical_image
@@ -105,7 +105,9 @@ def main() -> None:
         if prob.shape != ct.shape:
             raise ValueError(f"prob shape {prob.shape} != CT shape {ct.shape}")
         pred = (prob >= args.threshold).astype(np.uint8)
-        pred_lcc = keep_largest_connected_component(pred, connectivity=args.connectivity).astype(np.uint8)
+        pred_lcc = keep_component_containing_trachea(
+            pred, connectivity=args.connectivity, affine=affine
+        ).astype(np.uint8)
 
         def dice(a):
             return float(2 * int((a.astype(bool) & gt).sum()) / ((int(a.sum()) + int(gt.sum())) or 1))

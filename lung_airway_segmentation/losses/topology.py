@@ -98,3 +98,90 @@ class SoftClDiceLoss(nn.Module):
 
     def forward(self, probabilities: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         return soft_cldice_loss(probabilities, targets.float(), self.iterations, self.smooth)
+
+
+# ===========================================================================
+# *** EXPERIMENTAL / STRETCH — persistent-homology topology loss ***
+#
+# NOT wired into CombinedSegmentationLoss and NOT on the dissertation critical
+# path. clDice (above) is the IMPLEMENTED topology loss. This is a reference /
+# starting point for "penalise wrong topology natively" — i.e. teach the network
+# to produce the single connected tree that LCC currently enforces in post-
+# processing. It is UNTESTED, SLOW (cubical persistence per volume per step), and
+# must be validated on a few cases before any real run. See PROJECT_STATE.md.
+#
+# Backend: optional `torch-topological` (differentiable cubical PH + Wasserstein).
+# `gudhi` can compute the diagrams too, but routing gradients to the critical
+# voxels by hand is version-dependent and error-prone — prefer torch-topological.
+#
+# WHERE IT IS CLEANEST: FULL volumes, where the airway tree's target topology is a
+# single connected component. On 96^3 patches the per-patch topology is noisy
+# (branches are cut at the patch faces, creating artificial births/deaths) — which
+# is one reason topology losses and larger/full-volume training pair well (Part 2).
+# ===========================================================================
+
+
+def persistent_homology_loss(
+    probabilities: torch.Tensor,
+    targets: torch.Tensor,
+    dimensions: tuple = (0,),
+) -> torch.Tensor:
+    """Topology loss = distance between predicted and GT persistence diagrams. [EXPERIMENTAL]
+
+    Hu et al. (2019): a segmentation has the right topology when its persistence
+    diagram matches the ground truth's. Build the (differentiable) cubical
+    persistence diagram of the predicted probability map and of the GT mask, then
+    minimise the Wasserstein distance between them. This pushes predicted features
+    (connected components in dim 0; loops in dim 1) toward the GT's — strengthening
+    real branches and annihilating spurious disconnected blobs — WITHOUT assuming a
+    fixed component count: a branch present in the GT is kept, one that is not is
+    removed, by the matching.
+
+    Why matching (not 'keep the k most-persistent components'): an airway tree is
+    one component but its filtration shows many transient ones (branches appear,
+    then merge). Real branches AND spurious blobs are both finite persistence pairs;
+    only matching to the GT diagram distinguishes them. A naive top-k rule is wrong
+    for trees — it keeps isolated blobs and kills connected branches.
+
+    Args:
+        probabilities: (B, 1, D, H, W) in [0, 1] (= sigmoid(logits)).
+        targets: (B, 1, D, H, W) binary ground truth.
+        dimensions: homology dimensions to penalise; (0,) = connected components only
+            (cheapest, most relevant to the disconnected-blob problem). Add 1 to also
+            penalise spurious loops (airway trees should have none).
+
+    Returns:
+        Scalar — mean Wasserstein diagram distance over the batch.
+
+    Wiring (when ready): like clDice, behind its own weight and an epoch warm-up
+    (the topology of an untrained network is noise):
+        total += topo_weight * persistent_homology_loss(probabilities, targets)
+    """
+    try:
+        from torch_topological.nn import CubicalComplex, WassersteinDistance
+    except ImportError as exc:  # pragma: no cover - optional backend
+        raise ImportError(
+            "persistent_homology_loss requires the optional `torch-topological` backend "
+            "(pip install torch-topological). EXPERIMENTAL / stretch — not on the critical path."
+        ) from exc
+
+    if probabilities.shape != targets.shape:
+        raise ValueError(
+            f"probabilities and targets must match: {tuple(probabilities.shape)} "
+            f"!= {tuple(targets.shape)}"
+        )
+
+    # VERIFY against your torch-topological version: the CubicalComplex / Distance
+    # API and the per-dimension structure it returns have shifted across releases.
+    cubical = CubicalComplex(dim=3)
+    wasserstein = WassersteinDistance(q=2)
+
+    batch_losses = []
+    for predicted, target in zip(probabilities[:, 0], targets[:, 0].float()):  # (D, H, W)
+        predicted_diagram = cubical(predicted)
+        target_diagram = cubical(target)
+        batch_losses.append(
+            sum(wasserstein(predicted_diagram[d], target_diagram[d]) for d in dimensions)
+        )
+
+    return torch.stack(batch_losses).mean()

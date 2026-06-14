@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 from monai.losses.dice import DiceLoss
 
-from lung_airway_segmentation.losses.topology import soft_cldice_loss
+from lung_airway_segmentation.losses.topology import persistent_homology_loss, soft_cldice_loss
 
 
 class CombinedSegmentationLoss(nn.Module):
@@ -30,6 +30,7 @@ class CombinedSegmentationLoss(nn.Module):
         positive_class_weight=1.0,
         cldice_weight=0.0,
         cldice_iterations=10,
+        topo_weight=0.0,
     ):
         super().__init__()
         if float(positive_class_weight) <= 0.0:
@@ -38,6 +39,8 @@ class CombinedSegmentationLoss(nn.Module):
             raise ValueError("cldice_weight must be non-negative.")
         if int(cldice_iterations) < 1:
             raise ValueError("cldice_iterations must be >= 1.")
+        if float(topo_weight) < 0.0:
+            raise ValueError("topo_weight must be non-negative.")
 
         self.bce_loss = nn.BCEWithLogitsLoss(
             pos_weight=torch.tensor([float(positive_class_weight)])
@@ -47,6 +50,9 @@ class CombinedSegmentationLoss(nn.Module):
         self.dice_weight = dice_weight
         self.cldice_weight = float(cldice_weight)
         self.cldice_iterations = int(cldice_iterations)
+        # EXPERIMENTAL persistent-homology term; 0.0 = off (default). Ramped by the
+        # engine like clDice. See losses/topology.py::persistent_homology_loss.
+        self.topo_weight = float(topo_weight)
 
     def forward(self, logits, targets):
         """Compute the weighted segmentation loss for logits and target masks."""
@@ -57,9 +63,17 @@ class CombinedSegmentationLoss(nn.Module):
 
         total_loss = self.bce_weight * bce + self.dice_weight * dice
 
+        # sigmoid is shared by the clDice and (experimental) topology terms.
+        probabilities = None
         if self.cldice_weight > 0.0:
             probabilities = torch.sigmoid(logits)
             cldice = soft_cldice_loss(probabilities, targets, self.cldice_iterations)
             total_loss = total_loss + self.cldice_weight * cldice
+
+        if self.topo_weight > 0.0:  # EXPERIMENTAL — off by default (topo_weight=0.0)
+            if probabilities is None:
+                probabilities = torch.sigmoid(logits)
+            topo = persistent_homology_loss(probabilities, targets)
+            total_loss = total_loss + self.topo_weight * topo
 
         return total_loss

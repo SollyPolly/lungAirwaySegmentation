@@ -8,6 +8,11 @@
 experiment_name: supervised-atm-l20-cldice
 description: "Supervised ATM'22 (20 labelled) + soft clDice topology loss (warm-up 15 + ramp 10). Target: recover distal branches the volumetric baseline misses."
 seed: 15
+# Reproducibility: seed Python/NumPy/torch + force deterministic cuDNN so the
+# paired baseline-vs-clDice comparison is not seed/autotuner noise. Costs some
+# throughput (cuDNN autotuner off, slower 3D convs) — set false only for
+# throwaway speed runs, never for a reported number. Defaults to true in code.
+deterministic: true
 # More epochs than the plain baseline: 15 are pure Dice+BCE warm-up before clDice
 # engages, and clDice slows convergence.
 epochs: 80
@@ -59,3 +64,9 @@ loss:
   cldice_iterations: 10
   cldice_warmup_epochs: 15
   cldice_rampup_epochs: 10
+  # EXPERIMENTAL — persistent-homology topology loss. 0.0 = OFF (default; live runs
+  # unaffected). Needs `torch-topological`. Enable via --topo-weight or here; it is
+  # ramped with the same warm-up as clDice. See losses/topology.py::persistent_homology_loss.
+  topo_weight: 0.0
+  topo_warmup_epochs: 15
+  topo_rampup_epochs: 10

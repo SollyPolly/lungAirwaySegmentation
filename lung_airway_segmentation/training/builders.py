@@ -24,6 +24,7 @@ from lung_airway_segmentation.losses.segmentation import CombinedSegmentationLos
 from lung_airway_segmentation.models.baseline_unet import build_baseline_unet
 from lung_airway_segmentation.models.ct_fm_segresnet import build_ct_fm_segresnet
 from lung_airway_segmentation.preprocessing.geometry import normalize_margin
+from lung_airway_segmentation.reproducibility import make_seeded_generator, seed_worker
 from lung_airway_segmentation.training.config import resolve_project_path
 
 
@@ -171,14 +172,29 @@ def build_datasets(
     )
 
 
-def build_dataloaders(train_dataset, val_dataset, batch_size: int, num_workers: int):
-    """Build train and validation dataloaders for baseline training."""
+def build_dataloaders(
+    train_dataset,
+    val_dataset,
+    batch_size: int,
+    num_workers: int,
+    seed: int | None = None,
+):
+    """Build train and validation dataloaders for baseline training.
+
+    Passing ``seed`` makes the train loader's shuffle order and per-worker RNG
+    reproducible across runs (the val loader is unshuffled but still gets the
+    worker seeding so any random transforms it runs are deterministic).
+    """
+    loader_generator = make_seeded_generator(seed) if seed is not None else None
+    worker_init_fn = seed_worker if seed is not None else None
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
         collate_fn=list_data_collate,
+        generator=loader_generator,
+        worker_init_fn=worker_init_fn,
     )
     val_loader = DataLoader(
         val_dataset,
@@ -186,6 +202,7 @@ def build_dataloaders(train_dataset, val_dataset, batch_size: int, num_workers: 
         shuffle=False,
         num_workers=num_workers,
         collate_fn=list_data_collate,
+        worker_init_fn=worker_init_fn,
     )
     return train_loader, val_loader
 
@@ -237,6 +254,7 @@ def build_training_components(device, model_config: dict, training_config: dict)
         positive_class_weight=float(loss_config.get("positive_class_weight", 1.0)),
         cldice_weight=float(loss_config.get("cldice_weight", 0.0)),
         cldice_iterations=int(loss_config.get("cldice_iterations", 10)),
+        topo_weight=float(loss_config.get("topo_weight", 0.0)),
     ).to(device)
 
     optimizer_config = training_config["optimizer"]
@@ -293,14 +311,12 @@ def build_unlabelled_dataloader(
         hu_window=hu_window,
     )
 
-    generator = torch.Generator()
-    generator.manual_seed(int(training_config["seed"]))
-
     return DataLoader(
         unlabelled_dataset,
         batch_size=int(training_config["batch_size_unlabelled"]),
         num_workers=int(training_config["num_workers"]),
         shuffle=True,
         collate_fn=list_data_collate,
-        generator=generator,
+        generator=make_seeded_generator(int(training_config["seed"])),
+        worker_init_fn=seed_worker,
     )

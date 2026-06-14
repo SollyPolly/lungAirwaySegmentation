@@ -30,6 +30,10 @@ from lung_airway_segmentation.training.teacher_student import train_semisupervis
 from lung_airway_segmentation.training.loops import train_one_epoch, validate_one_epoch
 from lung_airway_segmentation.losses.semi_supervised import ConsistencyLoss
 from lung_airway_segmentation.reporting.run_index import refresh_run_index
+from lung_airway_segmentation.reproducibility import (
+    collect_environment_metadata,
+    seed_everything,
+)
 
 
 def save_checkpoint(model, optimizer, epoch, metrics, output_path, scheduler=None):
@@ -129,7 +133,8 @@ def run_supervised_training(args: argparse.Namespace) -> None:
     validate_training_config(resolved_training_config)
 
     device = resolve_device(args.device)
-    torch.manual_seed(int(resolved_training_config["seed"]))
+    deterministic = bool(resolved_training_config.get("deterministic", True))
+    seed_everything(int(resolved_training_config["seed"]), deterministic=deterministic)
 
     data_root = resolve_project_path(
         data_config.get("raw_data_root") or data_config["batch_root"]
@@ -148,6 +153,7 @@ def run_supervised_training(args: argparse.Namespace) -> None:
         val_dataset,
         batch_size=int(resolved_training_config["batch_size"]),
         num_workers=int(resolved_training_config["num_workers"]),
+        seed=int(resolved_training_config["seed"]),
     )
 
     model, loss_fn, optimizer, scheduler = build_training_components(
@@ -179,6 +185,11 @@ def run_supervised_training(args: argparse.Namespace) -> None:
     max_cldice_weight = float(loss_config.get("cldice_weight", 0.0))
     cldice_warmup_epochs = int(loss_config.get("cldice_warmup_epochs", 0))
     cldice_rampup_epochs = int(loss_config.get("cldice_rampup_epochs", 0))
+    # EXPERIMENTAL persistent-homology term — same warm-up treatment as clDice
+    # (topology of an untrained model is noise). 0.0 = off (default).
+    max_topo_weight = float(loss_config.get("topo_weight", 0.0))
+    topo_warmup_epochs = int(loss_config.get("topo_warmup_epochs", 0))
+    topo_rampup_epochs = int(loss_config.get("topo_rampup_epochs", 0))
 
     run_description = args.run_description
     if run_description is None:
@@ -208,6 +219,8 @@ def run_supervised_training(args: argparse.Namespace) -> None:
         },
         "data_root": str(data_root),
         "device": str(device),
+        "deterministic": deterministic,
+        "environment": collect_environment_metadata(),
         "data_pipeline": training_regime,
         "amp_enabled": use_amp,
         "model_name": model_config["model_name"],
@@ -240,6 +253,17 @@ def run_supervised_training(args: argparse.Namespace) -> None:
                 )
             else:
                 loss_fn.cldice_weight = max_cldice_weight
+
+        if max_topo_weight > 0.0:
+            epochs_after_topo_warmup = max((epoch + 1) - topo_warmup_epochs, 0)
+            if epochs_after_topo_warmup <= 0:
+                loss_fn.topo_weight = 0.0
+            elif topo_rampup_epochs > 0:
+                loss_fn.topo_weight = max_topo_weight * min(
+                    epochs_after_topo_warmup / topo_rampup_epochs, 1.0
+                )
+            else:
+                loss_fn.topo_weight = max_topo_weight
 
         learning_rates_before_epoch = get_optimizer_learning_rates(optimizer)
         train_metrics = train_one_epoch(
@@ -363,7 +387,8 @@ def run_semisupervised_training(args: argparse.Namespace) -> None:
     validate_semisupervised_training_config(resolved_training_config)
 
     device = resolve_device(args.device)
-    torch.manual_seed(int(resolved_training_config["seed"]))
+    deterministic = bool(resolved_training_config.get("deterministic", True))
+    seed_everything(int(resolved_training_config["seed"]), deterministic=deterministic)
 
     data_root = resolve_project_path(
         data_config.get("raw_data_root") or data_config["batch_root"]
@@ -389,6 +414,7 @@ def run_semisupervised_training(args: argparse.Namespace) -> None:
         val_dataset,
         batch_size=int(resolved_training_config["batch_size"]),
         num_workers=int(resolved_training_config["num_workers"]),
+        seed=int(resolved_training_config["seed"]),
     )
     unlabelled_loader = build_unlabelled_dataloader(
         atm22_config,
@@ -487,6 +513,8 @@ def run_semisupervised_training(args: argparse.Namespace) -> None:
         "data_root": str(data_root),
         "unlabelled_data_root": str(atm22_root),
         "device": str(device),
+        "deterministic": deterministic,
+        "environment": collect_environment_metadata(),
         "data_pipeline": "mean_teacher_patch",
         "amp_enabled": use_amp,
         "model_name": model_config["model_name"],

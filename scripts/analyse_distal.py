@@ -49,7 +49,7 @@ import numpy as np
 import torch
 from scipy import ndimage
 
-from lung_airway_segmentation.inference.postprocess import keep_largest_connected_component
+from lung_airway_segmentation.inference.postprocess import keep_component_containing_trachea
 from lung_airway_segmentation.inference.sliding_window import predict_logits_for_volume
 from lung_airway_segmentation.metrics.topology import (
     _foreground_slices,
@@ -128,9 +128,11 @@ def load_case(dataset_name, data_config, case_id, hu_window):
             raise FileNotFoundError(f"ATM case {case_id} has no airway label.")
         loader = LoadImage(image_only=True, ensure_channel_first=True)
         scaler = ScaleIntensityRange(a_min=hu_window[0], a_max=hu_window[1], b_min=0.0, b_max=1.0, clip=True)
-        ct = scaler(loader(paths["ct"]))
+        ct_img = loader(paths["ct"])
+        affine = np.asarray(ct_img.affine, dtype=np.float64)  # native orientation → superior axis
+        ct = scaler(ct_img)
         gt = np.asarray(loader(paths["airway"])[0]) > 0
-        return ct, gt
+        return ct, gt, affine
 
     if dataset_name == "aeropath":
         from lung_airway_segmentation.preprocessing.pipeline import preprocess_case
@@ -141,7 +143,7 @@ def load_case(dataset_name, data_config, case_id, hu_window):
             case_id, data_root=data_root, include_lung_mask=False,
             hu_window=tuple(float(v) for v in hu_window), crop_margin=crop_margin,
         )
-        return torch.from_numpy(case.ct), case.airway_mask.astype(bool)
+        return torch.from_numpy(case.ct), case.airway_mask.astype(bool), np.asarray(case.affine, dtype=np.float64)
 
     raise ValueError(f"Unsupported dataset_name: {dataset_name}")
 
@@ -179,19 +181,24 @@ def cheap_metrics(predicted, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum
     return float(dice), float(td), float(precision)
 
 
-def sweep_case(prob, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum):
+def sweep_case(prob, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum, affine=None):
     """Per-threshold Dice/TD (raw + LCC) and voxel-precision+LCC over SWEEP_THRESHOLDS — all cheap."""
     rows = {}
     for t in SWEEP_THRESHOLDS:
         pred = prob >= t
-        dice_raw, td_raw, _ = cheap_metrics(pred, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum)
-        pred_lcc = keep_largest_connected_component(pred) > 0
+        dice_raw, td_raw, prec_raw = cheap_metrics(pred, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum)
+        pred_lcc = keep_component_containing_trachea(pred, affine=affine) > 0
         dice_lcc, td_lcc, prec_lcc = cheap_metrics(pred_lcc, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum)
-        rows[t] = {"dice": dice_raw, "dice_lcc": dice_lcc, "td": td_raw, "td_lcc": td_lcc, "prec_lcc": prec_lcc}
+        rows[t] = {
+            "dice": dice_raw, "dice_lcc": dice_lcc,
+            "td": td_raw, "td_lcc": td_lcc,
+            "prec": prec_raw, "prec_lcc": prec_lcc,
+            "lcc_retained_fraction": float(pred_lcc.sum() / max(int(pred.sum()), 1)),
+        }
     return rows
 
 
-def topology_at(prob, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum, thresholds, max_ratio=6.0):
+def topology_at(prob, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum, thresholds, max_ratio=6.0, affine=None):
     """clDice + topology precision (one skeletonisation each) at the given thresholds.
 
     A candidate whose LCC'd prediction exceeds ``max_ratio`` x the GT voxel count is
@@ -202,8 +209,8 @@ def topology_at(prob, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum, thres
     out = {}
     for t in thresholds:
         pred = prob >= t
-        dice_raw, td_raw, _ = cheap_metrics(pred, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum)
-        pred_lcc = keep_largest_connected_component(pred) > 0
+        dice_raw, td_raw, prec_raw = cheap_metrics(pred, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum)
+        pred_lcc = keep_component_containing_trachea(pred, affine=affine) > 0
         dice_lcc, td_lcc, prec_lcc = cheap_metrics(pred_lcc, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum)
         if gt_sum and int(pred_lcc.sum()) > max_ratio * gt_sum:
             tprec_lcc = cldice_lcc = None  # gated: too large to skeletonise, not the peak
@@ -212,9 +219,10 @@ def topology_at(prob, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum, thres
             denom = tprec_lcc + td_lcc
             cldice_lcc = float(2.0 * tprec_lcc * td_lcc / denom) if denom > 0 else 0.0
         out[t] = {
-            "dice_raw": dice_raw, "td_raw": td_raw,
+            "dice_raw": dice_raw, "td_raw": td_raw, "prec_raw": prec_raw,
             "dice_lcc": dice_lcc, "td_lcc": td_lcc, "prec_lcc": prec_lcc,
             "tprec_lcc": tprec_lcc, "cldice_lcc": cldice_lcc,
+            "lcc_retained_fraction": float(pred_lcc.sum() / max(int(pred.sum()), 1)),
         }
     return out
 
@@ -229,7 +237,9 @@ def mean_sweep(case_rows):
             "dice_lcc": float(np.mean([v["dice_lcc"] for v in vals])),
             "td": float(np.mean([v["td"] for v in vals])),
             "td_lcc": float(np.mean([v["td_lcc"] for v in vals])),
+            "prec": float(np.mean([v["prec"] for v in vals])),
             "prec_lcc": float(np.mean([v["prec_lcc"] for v in vals])),
+            "lcc_retained_fraction": float(np.mean([v["lcc_retained_fraction"] for v in vals])),
         })
     return out
 
@@ -251,7 +261,9 @@ def mean_candidates(candidate_rows, thresholds):
             "tprec_lcc": float(np.mean(tprec_vals)) if tprec_vals else None,
             "td_lcc": float(np.mean([v["td_lcc"] for v in vals])),
             "dice_lcc": float(np.mean([v["dice_lcc"] for v in vals])),
+            "prec_raw": float(np.mean([v["prec_raw"] for v in vals])),
             "prec_lcc": float(np.mean([v["prec_lcc"] for v in vals])),
+            "lcc_retained_fraction": float(np.mean([v["lcc_retained_fraction"] for v in vals])),
             "n_valid": len(cldice_vals),
         })
     return out
@@ -283,10 +295,12 @@ def select_by_cldice(candidate_means):
 
 def print_sweep(sweep, title):
     print(f"\n--- {title} ---")
-    print(f"{'thresh':>7}  {'Dice':>6}  {'Dice+LCC':>8}  {'TD':>6}  {'TD+LCC':>7}  {'Prec+LCC':>8}")
+    print(f"{'thresh':>7}  {'Dice':>6}  {'Dice+LCC':>8}  {'TD':>6}  {'TD+LCC':>7}  "
+          f"{'Prec':>6}  {'Prec+LCC':>8}  {'LCC kept':>8}")
     for r in sweep:
         print(f"{r['threshold']:>7.2f}  {r['dice']:>6.3f}  {r['dice_lcc']:>8.3f}  "
-              f"{r['td']:>6.3f}  {r['td_lcc']:>7.3f}  {r['prec_lcc']:>8.3f}")
+              f"{r['td']:>6.3f}  {r['td_lcc']:>7.3f}  {r['prec']:>6.3f}  "
+              f"{r['prec_lcc']:>8.3f}  {r['lcc_retained_fraction']:>8.3f}")
 
 
 def print_candidates(candidate_means):
@@ -311,21 +325,22 @@ def run_split(model, dataset_name, data_config, hu_window, cases, *, device, roi
     bin_probs = {label: [] for label, _, _ in RADIUS_BINS}
 
     for cid in cases:
-        ct, gt = load_case(dataset_name, data_config, cid, hu_window)
+        ct, gt, affine = load_case(dataset_name, data_config, cid, hu_window)
         gt_sum = int(gt.sum())
         td_slices, gt_skeleton, gt_skeleton_sum = gt_centerline(gt)
         prob = infer_probability(model, ct, device=device, roi_size=roi_size, overlap=overlap, sw_batch=sw_batch)
 
-        case_sweeps.append(sweep_case(prob, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum))
+        case_sweeps.append(sweep_case(prob, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum, affine))
 
         if cldice_candidates:
-            candidate_rows.append(topology_at(prob, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum, cldice_candidates, cldice_max_ratio))
+            candidate_rows.append(topology_at(prob, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum, cldice_candidates, cldice_max_ratio, affine))
 
         if chosen_threshold is not None:
             pred = prob >= chosen_threshold
-            dice_raw, td_raw, _ = cheap_metrics(pred, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum)
-            pred_lcc = keep_largest_connected_component(pred) > 0
+            dice_raw, td_raw, prec_raw = cheap_metrics(pred, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum)
+            pred_lcc = keep_component_containing_trachea(pred, affine=affine) > 0
             dice_lcc, td_lcc, prec_lcc = cheap_metrics(pred_lcc, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum)
+            lcc_retained_fraction = float(pred_lcc.sum() / max(int(pred.sum()), 1))
             if compute_bd:
                 topo = airway_topology_metrics_from_masks(pred_lcc, gt)  # +BD branch parse (expensive)
                 td_lcc = float(topo["tree_length_detected"])
@@ -343,7 +358,8 @@ def run_split(model, dataset_name, data_config, hu_window, cases, *, device, roi
                 "dice_lcc": dice_lcc, "td_lcc": td_lcc, "bd_lcc": bd_lcc,
                 "cldice_lcc": cldice_lcc, "tprec_lcc": tprec_lcc, "prec_lcc": prec_lcc,
                 "reference_branches": ref_b, "detected_branches": det_b,
-                "dice_raw": dice_raw, "td_raw": td_raw,
+                "dice_raw": dice_raw, "td_raw": td_raw, "prec_raw": prec_raw,
+                "lcc_retained_fraction": lcc_retained_fraction,
             })
             bd_str = f"BD {bd_lcc:.3f}  " if bd_lcc is not None else ""
             print(f"case {cid}: voxels {gt_sum:,}  | +LCC@{chosen_threshold:.2f}  "
@@ -372,7 +388,8 @@ def table_from_candidates(case_ids, candidate_rows, threshold):
             "case_id": cid,
             "dice_lcc": m["dice_lcc"], "td_lcc": m["td_lcc"], "prec_lcc": m["prec_lcc"],
             "tprec_lcc": m["tprec_lcc"], "cldice_lcc": m["cldice_lcc"], "bd_lcc": None,
-            "dice_raw": m["dice_raw"], "td_raw": m["td_raw"],
+            "dice_raw": m["dice_raw"], "td_raw": m["td_raw"], "prec_raw": m["prec_raw"],
+            "lcc_retained_fraction": m["lcc_retained_fraction"],
         })
     return rows
 
@@ -386,13 +403,18 @@ def table_from_sweep(case_ids, case_sweeps, threshold):
             "case_id": cid,
             "dice_lcc": r["dice_lcc"], "td_lcc": r["td_lcc"], "prec_lcc": r["prec_lcc"],
             "tprec_lcc": None, "cldice_lcc": None, "bd_lcc": None,
-            "dice_raw": r["dice"], "td_raw": r["td"],
+            "dice_raw": r["dice"], "td_raw": r["td"], "prec_raw": r["prec"],
+            "lcc_retained_fraction": r["lcc_retained_fraction"],
         })
     return rows
 
 
 def table_mean(rows):
-    keys = ["dice_lcc", "td_lcc", "bd_lcc", "cldice_lcc", "tprec_lcc", "prec_lcc", "dice_raw", "td_raw"]
+    keys = [
+        "dice_raw", "td_raw", "prec_raw",
+        "dice_lcc", "td_lcc", "bd_lcc", "cldice_lcc", "tprec_lcc", "prec_lcc",
+        "lcc_retained_fraction",
+    ]
     out = {}
     for k in keys:
         vals = [r[k] for r in rows if r.get(k) is not None]
@@ -529,11 +551,13 @@ def main() -> None:
     def fmt(value):
         return f"{value:.3f}" if value is not None else "—"
 
-    print(f"\n=== TABLE ({report_label}, +LCC @ {chosen_threshold:.2f}) ===")
-    print(f"  MEAN  Dice {fmt(mean_row['dice_lcc'])}  TD {fmt(mean_row['td_lcc'])}  "
+    print(f"\n=== TABLE ({report_label} @ {chosen_threshold:.2f}) ===")
+    print(f"  RAW   Dice {fmt(mean_row['dice_raw'])}  TD {fmt(mean_row['td_raw'])}  "
+          f"Prec {fmt(mean_row['prec_raw'])}")
+    print(f"  +LCC  Dice {fmt(mean_row['dice_lcc'])}  TD {fmt(mean_row['td_lcc'])}  "
           f"BD {fmt(mean_row['bd_lcc'])}  clDice {fmt(mean_row['cldice_lcc'])}  "
-          f"TPrec {fmt(mean_row['tprec_lcc'])}  Prec {fmt(mean_row['prec_lcc'])}   "
-          f"(raw Dice {fmt(mean_row['dice_raw'])} / TD {fmt(mean_row['td_raw'])})")
+          f"TPrec {fmt(mean_row['tprec_lcc'])}  Prec {fmt(mean_row['prec_lcc'])}  "
+          f"LCC-kept {fmt(mean_row['lcc_retained_fraction'])}")
 
     bins_out = build_bins_output(bin_probs, chosen_threshold)
     if bins_out:

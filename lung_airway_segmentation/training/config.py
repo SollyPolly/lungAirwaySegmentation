@@ -158,6 +158,12 @@ def build_argument_parser(config_args: argparse.Namespace) -> argparse.ArgumentP
         default=None,
         help="Optional override for validation.threshold (checkpoint-selection threshold; pair with --pos-weight).",
     )
+    parser.add_argument(
+        "--topo-weight",
+        type=float,
+        default=None,
+        help="Optional override for loss.topo_weight (EXPERIMENTAL persistent-homology term; 0 = off, needs torch-topological).",
+    )
     return parser
 
 
@@ -213,6 +219,8 @@ def build_resolved_training_config(
         resolved["loss"]["positive_class_weight"] = args.pos_weight
     if args.cldice_weight is not None:
         resolved["loss"]["cldice_weight"] = args.cldice_weight
+    if args.topo_weight is not None:
+        resolved["loss"]["topo_weight"] = args.topo_weight
     if args.val_threshold is not None:
         resolved["validation"]["threshold"] = args.val_threshold
     if getattr(args, "batch_size_unlabelled", None) is not None:
@@ -371,6 +379,9 @@ def validate_training_config(training_config: dict) -> None:
     if not isinstance(amp_config["enabled"], bool):
         raise ValueError("amp.enabled must be a boolean.")
 
+    if not isinstance(training_config.get("deterministic", True), bool):
+        raise ValueError("deterministic must be a boolean.")
+
     loss_config = training_config["loss"]
     if float(loss_config["bce_weight"]) < 0.0:
         raise ValueError("loss.bce_weight must be non-negative.")
@@ -386,6 +397,12 @@ def validate_training_config(training_config: dict) -> None:
         raise ValueError("loss.cldice_warmup_epochs must be non-negative.")
     if int(loss_config.get("cldice_rampup_epochs", 0)) < 0:
         raise ValueError("loss.cldice_rampup_epochs must be non-negative.")
+    if float(loss_config.get("topo_weight", 0.0)) < 0.0:
+        raise ValueError("loss.topo_weight must be non-negative.")
+    if int(loss_config.get("topo_warmup_epochs", 0)) < 0:
+        raise ValueError("loss.topo_warmup_epochs must be non-negative.")
+    if int(loss_config.get("topo_rampup_epochs", 0)) < 0:
+        raise ValueError("loss.topo_rampup_epochs must be non-negative.")
 
 
 def validate_semisupervised_training_config(training_config: dict) -> None:
