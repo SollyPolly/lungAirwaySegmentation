@@ -1,5 +1,5 @@
 # Controlled larger-context ablation of the frozen clDice-weight-2 model.
-# Compared with supervised_atm_cldice.yaml, only patch/validation window sizes
+# Compared with supervised_atm_topoloss.yaml, only patch/validation window sizes
 # and validation sliding-window batch size change.
 
 experiment_name: supervised-atm-l20-cldice-w2-patch128
@@ -49,6 +49,12 @@ loss:
   cldice_iterations: 10
   cldice_warmup_epochs: 15
   cldice_rampup_epochs: 10
+  # cbDice (radius-aware clDice; Shi et al., MICCAI 2024). OFF by default; enable via
+  # --cbdice-weight (warm-up uses the fields below). See supervised_atm_topoloss.yaml for notes.
+  cbdice_weight: 0.0
+  cbdice_iterations: 10
+  cbdice_warmup_epochs: 15
+  cbdice_rampup_epochs: 10
   topo_weight: 0.0
   topo_warmup_epochs: 15
   topo_rampup_epochs: 10

@@ -14,7 +14,7 @@ DEFAULT_DATA_CONFIG = CONFIG_ROOT / "data" / "aeropath.yaml"
 DEFAULT_ATM22_CONFIG = CONFIG_ROOT / "data" / "atm22.yaml"
 DEFAULT_MODEL_CONFIG = CONFIG_ROOT / "model" / "baseline_unet.yaml"
 DEFAULT_TRAINING_CONFIG = CONFIG_ROOT / "training" / "baseline.yaml"
-DEFAULT_SEMISUPERVISED_TRAINING_CONFIG = CONFIG_ROOT / "training" / "teacher_student.yaml"
+DEFAULT_SEMISUPERVISED_TRAINING_CONFIG = CONFIG_ROOT / "training" / "mean_teacher_atm.yaml"
 
 
 def build_config_path_parser() -> argparse.ArgumentParser:
@@ -153,6 +153,12 @@ def build_argument_parser(config_args: argparse.Namespace) -> argparse.ArgumentP
         help="Optional override for loss.cldice_weight (clDice term weight).",
     )
     parser.add_argument(
+        "--cbdice-weight",
+        type=float,
+        default=None,
+        help="Optional override for loss.cbdice_weight (cbDice radius-aware term weight; warm-up uses loss.cbdice_warmup_epochs/rampup_epochs from config).",
+    )
+    parser.add_argument(
         "--val-threshold",
         type=float,
         default=None,
@@ -219,6 +225,8 @@ def build_resolved_training_config(
         resolved["loss"]["positive_class_weight"] = args.pos_weight
     if args.cldice_weight is not None:
         resolved["loss"]["cldice_weight"] = args.cldice_weight
+    if args.cbdice_weight is not None:
+        resolved["loss"]["cbdice_weight"] = args.cbdice_weight
     if args.topo_weight is not None:
         resolved["loss"]["topo_weight"] = args.topo_weight
     if args.val_threshold is not None:
@@ -397,6 +405,14 @@ def validate_training_config(training_config: dict) -> None:
         raise ValueError("loss.cldice_warmup_epochs must be non-negative.")
     if int(loss_config.get("cldice_rampup_epochs", 0)) < 0:
         raise ValueError("loss.cldice_rampup_epochs must be non-negative.")
+    if float(loss_config.get("cbdice_weight", 0.0)) < 0.0:
+        raise ValueError("loss.cbdice_weight must be non-negative.")
+    if int(loss_config.get("cbdice_iterations", 10)) < 1:
+        raise ValueError("loss.cbdice_iterations must be >= 1.")
+    if int(loss_config.get("cbdice_warmup_epochs", 0)) < 0:
+        raise ValueError("loss.cbdice_warmup_epochs must be non-negative.")
+    if int(loss_config.get("cbdice_rampup_epochs", 0)) < 0:
+        raise ValueError("loss.cbdice_rampup_epochs must be non-negative.")
     if float(loss_config.get("topo_weight", 0.0)) < 0.0:
         raise ValueError("loss.topo_weight must be non-negative.")
     if int(loss_config.get("topo_warmup_epochs", 0)) < 0:

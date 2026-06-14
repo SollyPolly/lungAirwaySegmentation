@@ -1,12 +1,14 @@
-# Supervised ATM'22 + clDice (topology-aware loss for distal recovery).
+# Supervised ATM'22 + topology/geometry loss stack. ACTIVE loss: cbDice w=2 (radius-aware
+# centerline-boundary Dice); clDice OFF. Switch the active loss by editing the `loss:` weights
+# below (one config, edited in place — keeps the PBS free of loss-weight overrides).
 # Identical to supervised_atm.yaml (same split/seed, so it is a paired comparison)
-# except the loss adds a soft centerline-Dice term. Run with:
+# except for the added topology/geometry loss terms. Run with:
 #   --data-config configs/data/atm22.yaml
 # Compare against supervised-atm-l20 (0.609) on Dice AND distal recall / TD
 # (scripts/analyse_distal.py).
 
-experiment_name: supervised-atm-l20-cldice
-description: "Supervised ATM'22 (20 labelled) + soft clDice topology loss (warm-up 15 + ramp 10). Target: recover distal branches the volumetric baseline misses."
+experiment_name: supervised-atm-l20-cbdice-w2
+description: "Supervised ATM'22 (20 labelled) + cbDice w=2 (radius-aware centerline-boundary Dice, Shi et al. MICCAI 2024), swapping out clDice. Tests whether radius-aware supervision cuts fat-wall over-segmentation vs clDice-w2 at equal topology weight."
 seed: 15
 # Reproducibility: seed Python/NumPy/torch + force deterministic cuDNN so the
 # paired baseline-vs-clDice comparison is not seed/autotuner noise. Costs some
@@ -55,15 +57,24 @@ loss:
   dice_weight: 1.0
   bce_weight: 1.0
   positive_class_weight: 10.0
-  # Soft centerline Dice. cldice_iterations >= max airway radius in voxels (~10).
-  # WARM-UP is essential: pure Dice+BCE for cldice_warmup_epochs (so the model
-  # first learns a sane mask), then ramp clDice 0 -> cldice_weight over
-  # cldice_rampup_epochs. The first clDice run skipped this (constant weight from
-  # epoch 1) and degraded everything — proximal included.
-  cldice_weight: 2.0
+  # Topology/geometry loss — pick ONE active term by weight (set the other to 0).
+  # clDice (soft centerline Dice, radius-BLIND) — OFF here. Set cldice_weight>0 (cbdice 0)
+  # to run the clDice-w2 reference instead. cldice_iterations >= max airway radius (~10).
+  # Both terms NEED the warm-up: pure Dice+BCE for *_warmup_epochs, then ramp over
+  # *_rampup_epochs (the soft skeleton of an untrained model is noise).
+  cldice_weight: 0.0
   cldice_iterations: 10
   cldice_warmup_epochs: 15
   cldice_rampup_epochs: 10
+  # cbDice (centerline boundary Dice, Shi et al., MICCAI 2024; github.com/PengchengShi1220/cbDice)
+  # — the RADIUS-AWARE variant of clDice: folds the distance transform (local radius) into the
+  # centerline precision/sensitivity, adding the wall-thickness/calibre fidelity clDice lacks (the
+  # loss-level fix for fat distal tubes). ACTIVE at weight 2 (swaps out clDice). Warmed-up like
+  # clDice. NB: cbDice EDT runs on CPU (scipy) → slower per step than clDice.
+  cbdice_weight: 2.0
+  cbdice_iterations: 10
+  cbdice_warmup_epochs: 15
+  cbdice_rampup_epochs: 10
   # EXPERIMENTAL — persistent-homology topology loss. 0.0 = OFF (default; live runs
   # unaffected). Needs `torch-topological`. Enable via --topo-weight or here; it is
   # ramped with the same warm-up as clDice. See losses/topology.py::persistent_homology_loss.

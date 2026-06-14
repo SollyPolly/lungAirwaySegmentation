@@ -101,10 +101,167 @@ class SoftClDiceLoss(nn.Module):
 
 
 # ===========================================================================
+# Centerline Boundary Dice (cbDice) — geometry-aware topology loss.
+#
+# Reference: Pengcheng Shi, Jiesi Hu, Yanwu Yang, Zilve Gao, Wei Liu, Ting Ma,
+#   "Centerline Boundary Dice Loss for Vascular Segmentation", MICCAI 2024.
+#   Code: https://github.com/PengchengShi1220/cbDice  (loss/cbdice_loss.py).
+#
+# IDEA. clDice (above) scores the one-voxel skeleton overlap and is *radius-blind*:
+# combined with Dice it under-weights thin branches and tolerates over-thick tubes
+# ("diameter imbalance favouring larger vessels"). cbDice folds the Euclidean
+# distance transform (= local radius) into the centerline precision/sensitivity, so
+# the objective is matched to vessel *calibre* — it up-weights thin branches and
+# penalises radius (wall-thickness) mismatch between prediction and GT. This is the
+# loss-level lever for our fat-wall / radial-over-segmentation problem that the
+# operating point, pos_weight and clDice-weight provably cannot move.
+#
+# Faithful binary (single-channel sigmoid) adaptation of the repo's SoftcbDiceLoss.
+# As in the reference, the skeleton is taken on the *hard* mask under no_grad and the
+# distance/radius maps are fixed weights (the EDT is non-differentiable); the gradient
+# reaches the network only through the soft probabilities at the skeleton/mask.
+# Behaviour-preserving differences from the repo: (1) sigmoid foreground prob instead
+# of softmax max-channel; (2) the EDT is computed per-sample with scipy (unambiguous
+# 3D, no MONAI/cucim shape dependency); (3) the morphological soft_skeleton above is
+# used (the repo's default; its optional Euler-characteristic skeletonizer is an
+# nnU-Net dependency we skip); (4) we return ``1 - cbDice`` (>=0, identical gradient)
+# to match soft_cldice_loss rather than the repo's ``-cbDice``.
+# ===========================================================================
+
+
+def _edt_per_sample(binary_mask: torch.Tensor) -> torch.Tensor:
+    """Per-sample 3D Euclidean distance transform (distance to boundary = radius).
+
+    ``binary_mask`` is (B, D, H, W) in {0, 1}; returns the same shape/device. Used as
+    a fixed (non-differentiable) radius weight, so it runs on CPU via scipy — swap in
+    MONAI/cucim ``distance_transform_edt`` for a GPU speed-up if it becomes a bottleneck.
+    """
+    import numpy as np
+    from scipy import ndimage
+
+    array = binary_mask.detach().cpu().numpy().astype(bool)
+    out = np.zeros(array.shape, dtype=np.float32)
+    for index in range(array.shape[0]):
+        if array[index].any():
+            out[index] = ndimage.distance_transform_edt(array[index])
+    return torch.from_numpy(out).to(binary_mask.device)
+
+
+def _cbdice_combine_tensors(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
+    """Repo ``combine_tensors``: take ``b*c``, but ``a*c`` where a is set and b is not.
+
+    This is the radius-aware denominator: use the GT skeleton radius where it exists,
+    else the predicted skeleton radius — so a calibre mismatch between the predicted
+    and the true tube is exactly what the normalisation penalises.
+    """
+    a_c = a * c
+    b_c = b * c
+    combined = b_c.clone()
+    only_a = (a != 0) & (b == 0)
+    combined[only_a] = a_c[only_a]
+    return combined
+
+
+def _cbdice_get_weights(mask_soft: torch.Tensor, skel_soft: torch.Tensor, dim: int):
+    """Radius-normalised (distance, skeleton-radius, thin-branch-importance) maps.
+
+    Mirrors the repo ``get_weights``. ``mask_soft``/``skel_soft`` are soft for the
+    prediction (carry gradient) and binary for the GT. The radius normalisation is a
+    fixed weight (computed under no_grad from the hard mask); each returned map is
+    multiplied by the soft input so the gradient flows through the probabilities only.
+    """
+    mask_hard = (mask_soft > 0.5).float()
+    skel_hard = (skel_soft > 0.5).float()
+
+    with torch.no_grad():
+        distances = _edt_per_sample(mask_hard) * mask_hard
+        skel_radius = distances * skel_hard
+
+        dist_map_norm = torch.zeros_like(distances)
+        skel_radius_norm = torch.zeros_like(distances)
+        importance = torch.zeros_like(distances)
+        for index in range(distances.shape[0]):
+            radius_i = skel_radius[index]
+            radius_max = torch.clamp(radius_i.max(), min=1.0)
+            radius_min = torch.clamp(radius_i.min(), min=1.0)
+            dist_map_norm[index] = torch.clamp(distances[index], max=radius_max) / radius_max
+            skel_radius_norm[index] = radius_i / radius_max
+            # subtraction-based inverse (linear): thin branches (small radius) get the
+            # largest weight; squared in 3D. Non-skeleton voxels are zeroed next.
+            linear = (radius_max - radius_i + radius_min) / radius_max
+            importance[index] = linear if dim == 2 else linear ** 2
+        importance = importance * skel_hard
+
+    return dist_map_norm * mask_soft, skel_radius_norm * mask_soft, importance * skel_soft
+
+
+def soft_cbdice_loss(
+    probabilities: torch.Tensor,
+    targets: torch.Tensor,
+    iterations: int = 10,
+    smooth: float = 1.0,
+) -> torch.Tensor:
+    """Return ``1 - soft cbDice`` (centerline boundary Dice), averaged over the batch.
+
+    ``probabilities`` and ``targets`` are (B, 1, D, H, W) in [0, 1]
+    (probabilities = sigmoid(logits); targets = binary mask). Radius-aware centerline
+    Dice — see the reference/idea note above (Shi et al., MICCAI 2024).
+    """
+    if probabilities.shape != targets.shape:
+        raise ValueError(
+            f"probabilities and targets must match: {tuple(probabilities.shape)} "
+            f"!= {tuple(targets.shape)}"
+        )
+    if probabilities.ndim != 5:
+        raise ValueError(
+            f"soft_cbdice_loss expects 5D (B,1,D,H,W) tensors, got {tuple(probabilities.shape)}."
+        )
+
+    dim = 3
+    pred_prob = probabilities[:, 0]  # (B, D, H, W); carries the gradient
+
+    # Skeletons on the HARD masks, detached: the EDT and skeleton are fixed weights;
+    # the gradient reaches the network through the soft probabilities below.
+    with torch.no_grad():
+        true_mask = (targets[:, 0] > 0.5).float()
+        pred_hard = (pred_prob > 0.5).float()
+        skel_pred_hard = soft_skeleton(pred_hard.unsqueeze(1), iterations).squeeze(1)
+        skel_true = soft_skeleton(true_mask.unsqueeze(1), iterations).squeeze(1)
+
+    skel_pred_prob = skel_pred_hard * pred_prob  # gradient via pred_prob
+
+    q_vl, q_slvl, q_sl = _cbdice_get_weights(true_mask, skel_true, dim)
+    q_vp, q_spvp, q_sp = _cbdice_get_weights(pred_prob, skel_pred_prob, dim)
+
+    w_tprec = (torch.sum(q_sp * q_vl) + smooth) / (
+        torch.sum(_cbdice_combine_tensors(q_spvp, q_slvl, q_sp)) + smooth
+    )
+    w_tsens = (torch.sum(q_sl * q_vp) + smooth) / (
+        torch.sum(_cbdice_combine_tensors(q_slvl, q_spvp, q_sl)) + smooth
+    )
+    return 1.0 - 2.0 * (w_tprec * w_tsens) / (w_tprec + w_tsens)
+
+
+class SoftCbDiceLoss(nn.Module):
+    """Module wrapper around :func:`soft_cbdice_loss` (expects probabilities)."""
+
+    def __init__(self, iterations: int = 10, smooth: float = 1.0):
+        super().__init__()
+        if int(iterations) < 1:
+            raise ValueError("cbDice iterations must be >= 1.")
+        self.iterations = int(iterations)
+        self.smooth = float(smooth)
+
+    def forward(self, probabilities: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        return soft_cbdice_loss(probabilities, targets.float(), self.iterations, self.smooth)
+
+
+# ===========================================================================
 # *** EXPERIMENTAL / STRETCH — persistent-homology topology loss ***
 #
-# NOT wired into CombinedSegmentationLoss and NOT on the dissertation critical
-# path. clDice (above) is the IMPLEMENTED topology loss. This is a reference /
+# Wired into CombinedSegmentationLoss behind `topo_weight` (default 0.0 = OFF),
+# ramped like clDice — but OFF by default and NOT on the dissertation critical
+# path. clDice (above) is the primary, validated topology loss. This is a reference /
 # starting point for "penalise wrong topology natively" — i.e. teach the network
 # to produce the single connected tree that LCC currently enforces in post-
 # processing. It is UNTESTED, SLOW (cubical persistence per volume per step), and

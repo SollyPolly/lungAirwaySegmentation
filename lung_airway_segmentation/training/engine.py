@@ -185,6 +185,11 @@ def run_supervised_training(args: argparse.Namespace) -> None:
     max_cldice_weight = float(loss_config.get("cldice_weight", 0.0))
     cldice_warmup_epochs = int(loss_config.get("cldice_warmup_epochs", 0))
     cldice_rampup_epochs = int(loss_config.get("cldice_rampup_epochs", 0))
+    # cbDice — same warm-up treatment as clDice (the soft skeleton of an untrained
+    # model is noise). 0.0 = off (default).
+    max_cbdice_weight = float(loss_config.get("cbdice_weight", 0.0))
+    cbdice_warmup_epochs = int(loss_config.get("cbdice_warmup_epochs", 0))
+    cbdice_rampup_epochs = int(loss_config.get("cbdice_rampup_epochs", 0))
     # EXPERIMENTAL persistent-homology term — same warm-up treatment as clDice
     # (topology of an untrained model is noise). 0.0 = off (default).
     max_topo_weight = float(loss_config.get("topo_weight", 0.0))
@@ -254,6 +259,17 @@ def run_supervised_training(args: argparse.Namespace) -> None:
             else:
                 loss_fn.cldice_weight = max_cldice_weight
 
+        if max_cbdice_weight > 0.0:
+            epochs_after_cbdice_warmup = max((epoch + 1) - cbdice_warmup_epochs, 0)
+            if epochs_after_cbdice_warmup <= 0:
+                loss_fn.cbdice_weight = 0.0
+            elif cbdice_rampup_epochs > 0:
+                loss_fn.cbdice_weight = max_cbdice_weight * min(
+                    epochs_after_cbdice_warmup / cbdice_rampup_epochs, 1.0
+                )
+            else:
+                loss_fn.cbdice_weight = max_cbdice_weight
+
         if max_topo_weight > 0.0:
             epochs_after_topo_warmup = max((epoch + 1) - topo_warmup_epochs, 0)
             if epochs_after_topo_warmup <= 0:
@@ -283,6 +299,7 @@ def run_supervised_training(args: argparse.Namespace) -> None:
             "train_loss": train_metrics["loss"],
             "train_dice": train_metrics["dice"],
             "cldice_weight": float(getattr(loss_fn, "cldice_weight", 0.0)),
+            "cbdice_weight": float(getattr(loss_fn, "cbdice_weight", 0.0)),
         }
 
         should_validate = (

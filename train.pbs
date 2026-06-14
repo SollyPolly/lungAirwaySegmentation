@@ -1,9 +1,7 @@
 #!/bin/bash
 #PBS -N AirwayTrain
-# CX3 gpu72 queue: up to 64 ncpus / 920 GB / 12 GPUs / 72 h. gpu_type left empty
-# (RCS-recommended) so the job starts on any of L40S/A100/RTX6000 — all fit this
-# 96^3-patch UNet under AMP. Pin ":gpu_type=L40S" for 128^3 experiments.
-#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+# Pin the L40S for the active cbDice 96^3 experiment (96^3 is lighter; the pin is optional).
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1:gpu_type=L40S
 #PBS -l walltime=12:00:00
 #PBS -j oe
 # Single reusable log — overwritten each run (per-run metrics live in runs/<exp>/).
@@ -21,28 +19,29 @@ nvidia-smi
 # =====================================================================
 # ONE reusable job script. Edit the active command below per run, qsub it,
 # and train.out is rewritten. Requires data/ATM22/{imagesTr,labelsTr} on HPC.
-# Set --experiment-name / --run-description per run — they control runs/<name>/
-# and override whatever the YAML config declares.
+# The active YAML config carries experiment_name / description / loss weights, so the
+# command can stay bare; override per run with --experiment-name / --run-description / etc.
 # Commented blocks are ready-to-swap alternatives.
 # =====================================================================
 
-# ONE canonical clDice config: configs/training/supervised_atm_cldice.yaml (pw10 defaults).
-# Vary experiments via CLI overrides (--cldice-weight / --pos-weight / --val-threshold) —
-# NOT new YAMLs. resolved_config.json in each run dir snapshots exactly what ran.
+# The active loss run is fully defined IN supervised_atm_topoloss.yaml (loss weights +
+# experiment_name + description) — currently cbDice w=2 (clDice off). So this block carries
+# NO overrides. To run a different loss, edit that config's `loss:` block + experiment_name
+# (the alternatives below show the weights); resolved_config.json snapshots each run.
 
-# --- (ACTIVE) clDice, clDice-weight 2.0 (override on the canonical pw10 config) ---
+# --- (ACTIVE) cbDice w2 (96^3) — fully configured in supervised_atm_topoloss.yaml ---
 python -u -m scripts.train_baseline \
   --data-config configs/data/atm22.yaml \
   --model-config configs/model/baseline_unet.yaml \
-  --training-config configs/training/supervised_atm_cldice.yaml \
-  --cldice-weight 2.0 \
-  --experiment-name supervised-atm-l20-cldice-w2 \
-  --run-description "clDice weight 2.0 (override on pw10 config). Push topology further." \
+  --training-config configs/training/supervised_atm_topoloss.yaml \
   --num-workers 4 --device cuda
 
-# --- DONE runs (same canonical config, different overrides) ---
-#   pw10 reference clDice : (no overrides) --experiment-name supervised-atm-l20-cldice
-#   pos_weight=3 ablation : --pos-weight 3 --val-threshold 0.5 --experiment-name supervised-atm-l20-cldice-pw3  [negative result]
+# --- Alternative loss runs: edit supervised_atm_topoloss.yaml (loss weights + experiment_name) ---
+#   cbDice w2 (ACTIVE)       : cldice_weight 0, cbdice_weight 2   (exp supervised-atm-l20-cbdice-w2)
+#   clDice w2 (prev best)    : cldice_weight 2, cbdice_weight 0   (exp supervised-atm-l20-cldice-w2)        [DONE]
+#   clDice w1 (pw10 ref)     : cldice_weight 1, cbdice_weight 0   (exp supervised-atm-l20-cldice)           [DONE]
+#   pos_weight=3 [negative]  : cldice_weight 1, pos_weight 3, validation.threshold 0.5 (exp ...-cldice-pw3) [DONE]
+#   128^3 context (clDice w2): --training-config configs/training/supervised_atm_topoloss_large_patch.yaml  (exp ...-cldice-w2-patch128) [DONE]
 
 # --- Supervised-ATM baseline (no clDice) ---
 # python -u -m scripts.train_baseline \
