@@ -17,9 +17,11 @@ seed: 15
 # throughput (cuDNN autotuner off, slower 3D convs) — set false only for
 # throwaway speed runs, never for a reported number. Defaults to true in code.
 deterministic: true
-# More epochs than the plain baseline: 15 are pure Dice+BCE warm-up before clDice
-# engages, and clDice slows convergence.
-epochs: 80
+# More epochs than the plain baseline: 15 are pure Dice+BCE warm-up before the topology
+# terms engage, then a 10-epoch ramp (full weight ~ep25). The clDice+cbDice hybrid carries
+# two topology terms at heavier total weight, so it converges slower than either solo run
+# (both of which were still climbing at 75-80ep) — 100 epochs gives headroom past the ramp.
+epochs: 100
 training_regime: patch
 batch_size: 1
 num_workers: 4
