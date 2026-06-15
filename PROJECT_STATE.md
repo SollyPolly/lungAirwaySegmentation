@@ -7,7 +7,23 @@ _Last updated: 2026-06-14._
 
 ## ⏳ Active right now — handoff (2026-06-14)
 
-**The 4 `analyse_distal` trachea-seeded re-runs are DONE** (baseline, pw10, pw3, w2) — one clean
+**NOW TRAINING — cbDice w=2 (96³)** (`supervised_atm_topoloss.yaml`: cldice 0, cbdice 2; run
+`supervised-atm-l20-cbdice-w2`). The loss-level fat-wall fix. When done, compare vs clDice-w2: want
+raw Dice / voxel-precision **up** with TLD/clDice **held** (`analyse_distal` swap-in as usual).
+
+**128³ CONTEXT ABLATION — DONE, NEGATIVE (2026-06-14).** `runs/supervised-atm-l20-cldice-w2-large-patch/2026-06-14__19-28-25__baseline_unet/distal_analysis__patch128_close_sweep.json`
+(best ckpt, clDice-opt 0.52). Larger patches did **not** sharpen the distal prediction — the model went
+**conservative**. Vs 96³ w2: **clDice 0.683→0.334, TLD 0.608→0.224, distal r=1 recall 0.81→0.49**; meanwhile
+proximal mask quality *rose* (Dice+LCC 0.52→0.62, voxel-prec 0.37→0.57). So 128³ **traded the distal tree
+for cleaner proximal masks** — the opposite of the goal — and **refutes the "context sharpens the raw blob"
+hope** (raw Dice 0.131→0.094, lcc-kept 0.186→0.085: the raw prediction got *sparser*, not sharper).
+**96³ clDice-w2 remains the headline.** Before declaring patch size dead: (a) re-check the **`last`**
+checkpoint (`best` = val-Dice@0.99, a proximal bias amplified at 128³); (b) likely undertrained / sampling
+not retuned (80 ep, fg_prob 0.7, pos_weight 10 → worse per-patch class balance at 128³). Negative **as-run**.
+
+---
+
+**Earlier today — the 4 `analyse_distal` trachea-seeded re-runs are DONE** (baseline, pw10, pw3, w2) — one clean
 JSON per model, each carrying `lcc_retained_fraction` (= new code ran):
 - baseline: `runs/supervised-atm-l20/2026-06-11__04-10-34__baseline_unet/distal_analysis__baseline_tracheaLLC.json`
 - pw10:     `runs/supervised-atm-l20-cldice/2026-06-11__22-04-05__baseline_unet/distal_analysis__cldice__pw10_tracheaLLC.json`
@@ -37,6 +53,87 @@ each for `supervised-atm-l20` (baseline) and the frozen clDice model (w2), then 
 `table_mean` rows. **Code already committed (2026-06-14):** trachea-seeded LCC
 (`inference/postprocess.py`), affine threading + raw/LCC-kept (`scripts/analyse_distal.py`),
 `scripts/predict_atm.py`, and the GT-confidence viewer (`mask_visualisation.py`).
+
+---
+
+## ✅ DONE (2026-06-15) — topology-aware checkpoint selection (LCC-free)
+
+**Problem (was).** `best_model` was saved by val **Dice @ threshold 0.99** (`engine.py` ~L363) → rewards thick
+proximal volume, the opposite of the topology goal. A real confound, **amplified at 128³** (the more-precise
+model wins Dice@0.99 while abandoning the distal tree — see §7.6 / the 128³ run-inventory row).
+
+**Implemented (engine.py + loops.py).** Validation now also computes, on the **full 20-case val set at
+threshold 0.5, no LCC**, the hard-mask centreline metrics, and the engine saves **three** checkpoints:
+- `best_dice_model.pt` — highest val **Dice @ configured threshold** (0.99); the historical proximal-biased pick.
+- `best_topology_model.pt` — highest val **hard-mask clDice @0.5** (the centreline selector). Use this for
+  topology experiments.
+- `last_model.pt` — latest epoch (already saved).
+- `best_model.pt` — **kept as a compatibility alias = `best_dice_model.pt`** (same save condition), so existing
+  analysis scripts (`analyse_distal`, `predict_atm`) don't break. Both selections come from one run.
+
+**Selector REFINED — hard-mask clDice @0.5, NOT soft_cbdice** (decision 2026-06-15, supersedes the earlier
+soft_cbdice plan). Reasons: (1) the selector is a **raw, LCC-free clDice @0.5** — a close **proxy** for the
+final `analyse_distal` number (which is **trachea-LCC** clDice at the **val-selected** operating threshold), and
+much nearer to it than a soft loss; it is *not* an exact match (no LCC, fixed 0.5 vs selected threshold); (2)
+soft_cbdice selects for *geometric fidelity*, risking another tidy-but-timid model rather than the headline
+topology objective; (3) it internally thresholds at 0.5 anyway; (4) its scipy-EDT on full val volumes is slow;
+(5) hard clDice gives **consistent selection across clDice AND cbDice experiments** (a soft-cbdice selector would
+not). Uses the same binary clDice family as `metrics/topology.py::cldice_score_from_masks` (~L110), via the lean
+combined `hard_centerline_metrics_from_masks` (one prediction skeletonisation).
+
+**RAW, no LCC, NO volume gate (critical).** Selection runs on the raw 0.5 prediction. A healthy topology model
+*deliberately* produces a large, fragmented raw mask at 0.5 (8–35× GT volume before LCC), so it must **not** be
+volume-gated — an early version copied analyse_distal's 6× over-segmentation gate, which is only valid **after**
+LCC (where the disconnected false-positive bulk is gone) and would have scored every mature clDice-w2 epoch as
+clDice 0, pinning `best_topology_model` to the first checkpoint. Gate **removed** (`validation.topology_max_ratio`
+default `None`); it survives only as an *optional catastrophic* guard (set ≫ mature volume, e.g. 50×), and a gated
+case is **excluded** from the clDice mean (invalid), never scored 0. This deliberately keeps LCC **out** of
+selection — the goal is to surface models that need LCC *less*; raw-vs-+LCC final metrics then *quantify* the LCC
+reliance rather than hiding it.
+
+**No config knob for the selector** (all three checkpoints always saved; downstream opens the one it wants — this
+supersedes the older `validation.selection_metric` plan). The selection threshold *is* configurable via
+`validation.topology_threshold` (default 0.5) — e.g. the baseline's topology op-point is 0.70, so a baseline run
+could select at 0.70 to align selection with how it is later reported (logs/console report the resolved
+threshold, not a hardcoded 0.5). Topology metrics are computed **after the topology-loss warm-up only**
+(`max(cldice_warmup, cbdice_warmup)` epochs; 0 for a pure-Dice baseline → from the first validation) — the raw
+skeletonisation is most expensive on the messy early-epoch masks that can never win selection anyway. Tools select
+the checkpoint via `--checkpoint best|dice|topology|last` (`analyse_distal`, `predict_atm`; `best`=`dice` alias;
+old runs fall back to `best_model.pt` with a warning).
+
+**Per-validation logging (`history.json` + console):** hard clDice / topology-precision / TLD @ the topology
+threshold, Dice **@0.99** (configured), **predicted/GT foreground-volume ratio** (a live conservatism diagnostic
+— would have caught the 128³ collapse), **predicted component count** (a connectivity diagnostic; clDice itself
+is connectivity-blind) and **gated-case count** (cases too over-segmented to skeletonise), plus soft loss
+*components* — `val_bce_loss`, `val_dice_loss`, `val_soft_cldice_loss` always, `val_soft_cbdice_loss` only on
+cbDice runs. The `_loss` suffix flags direction: those are losses (lower better), `val_cldice` is a score (higher
+better). Computed in **one pass** via `loss_fn.compute_components(...)` (the expensive cbDice EDT runs once, not
+twice). `history.json` gains a `best_topology: {epoch, val_cldice, threshold, lcc:false}` block (also surfaced in
+the run index). The Mean-Teacher loop calls `validate_one_epoch(..., compute_topology=False)` — parked negative
+result, unchanged.
+
+**⚠️ Cost UNBENCHMARKED — but now LIVE-OBSERVABLE.** Each post-warm-up validation adds a full-volume float32 soft
+clDice pass + a raw-prediction skeletonisation per val case (×20). It **cannot hang** (skeletonize/soft-clDice are
+finite); the only risk is walltime. Local benchmark: skeletonising one raw mask is ~1 s (sparse) to ~10–22 s
+(messy/blobby, 8–16M fg voxels) → ~0.3–7 min added per validation. For the canonical config (80 ep,
+`validate_every 5`, warm-up 15) that is only **13 topology validations** → ≲1.5 h worst case, fine inside a 12 h
+walltime. Risk only at `validate_every 1` or pathologically large masks (the backboard inflates it — val is NOT
+LCC'd / NOT lung-cropped). **`train.out` is useless for watching (PBS spools stdout to the job's end)** — instead
+each epoch now logs **`val_seconds`** (+ `epoch_seconds`) to `history.json`, which IS written to the shared FS
+every validation, so `cat <run>/history.json` shows the real cost live. Levers if it bites: `validate_every` ↑,
+`topology_threshold` ↑ (smaller masks), or (not yet built) a `validation.topology_max_cases` subset cap.
+
+**Limitations (respect these; see [[feedback-verify-metric-claims]]):**
+1. Selection fixes the **proximal-bias axis ONLY** — separate from radius (cbDice **loss**) and connectivity
+   (LCC/PH at inference).
+2. **clDice ≠ connectivity** — it penalises false branches but does **not** require a single connected tree; no
+   inexpensive selector enforces one component without LCC/PH (which stay in the **inference/eval recipe only**,
+   never selection — user preference). Predicted component count *is* logged as a diagnostic, but is **not**
+   selected on.
+3. The selector is a **proxy, not the exact final metric**: raw + LCC-free + fixed threshold, vs the final
+   trachea-LCC clDice at the val-selected threshold. Closer than any soft proxy, but still confirm a
+   topology-selected checkpoint's `analyse_distal --checkpoint topology` clDice before trusting it over `dice`.
+4. For past runs (only best+last saved) the sole post-hoc lever is still the `last` checkpoint.
 
 ---
 
@@ -195,7 +292,8 @@ Per-run detail lives in each run's `runs/<exp>/<ts>/notes.md` (local; `runs/` is
 | `supervised-atm-l20-cldice` (attempt 2) | clDice, **warm-up 15 + ramp 10**, 80ep | **0.539** val @0.99; **+54% TD** vs baseline; with LCC → the headline win above. |
 | `supervised-atm-l20-cldice` (re-eval, gated tool) | pw10 clDice op-point, val n=20 | **clDice 0.615** @0.50 (TD 0.59, Dice+LCC 0.51). The clean pw10 reference. |
 | `supervised-atm-l20-cldice-pw3` | clDice, **pos_weight=3** (de-saturate) | **clDice 0.494** @0.50 (TD 0.38, distal recall 65% vs 80%) — WORSE. De-saturation = negative result; keep pw10. |
-| `supervised-atm-l20-cldice-w2` | clDice, **weight=2** (n=20 val, close sweep) | **clDice 0.683** @0.50 (TPrec 0.79, TD 0.61, Dice+LCC 0.52) — **new best topology model**, dominates pw10 (0.615/0.65/0.59/0.51) on every metric; clean interior clDice peak @0.50. But raw Dice@0.5 ~0.13 (= pw10) → **LCC reliance unchanged**. |
+| `supervised-atm-l20-cldice-w2` | clDice, **weight=2** (n=20 val, close sweep) | **clDice 0.683** @0.50 (TPrec 0.79, TD 0.61, Dice+LCC 0.52) — **headline topology model**, dominates pw10 (0.615/0.65/0.59/0.51) on every metric; clean interior clDice peak @0.50. But raw Dice@0.5 ~0.13 (= pw10) → **LCC reliance unchanged**. |
+| `supervised-atm-l20-cldice-w2-large-patch` | clDice w2, **128³ patches** (context ablation) | **NEGATIVE (as-run).** vs 96³ w2: clDice 0.683→**0.334**, TLD 0.61→**0.22**, distal recall 0.81→**0.49**; proximal mask *cleaner* (Dice+LCC 0.52→0.62, voxel-prec 0.37→0.57). Context made the model **conservative** — traded the tree for clean proximal; **refutes "context sharpens raw"** (raw Dice 0.131→0.094, lcc-kept 0.19→0.085). Check `last` ckpt + undertraining/sampling before final verdict. |
 
 **Mean Teacher = negative result.** Both single-domain MT runs converge to a
 ~0.50 val basin *below* the 0.609 supervised optimum (warm-start slides down into
@@ -342,9 +440,11 @@ train.pbs                                        — ONE reusable HPC job script
   pos_weight nor clDice weight tidies it, so it's a property of the *operating point*, not
   calibration/loss. As the threshold rises the raw prediction tidies (raw Dice
   0.13→0.38→0.46 @0.5/0.9/0.99) but clDice/TD fall with it — **no op-point is both
-  topology-strong and LCC-light**. **Two untested levers may sharpen the raw prediction / cut LCC
-  reliance: (1) *context* (larger patches / higher overlap — 128³ run live); (2) a *width-aware* loss
-  (cbDice / boundary), which BCE/Dice/clDice are not — see Literature-driven leads below.** `analyse_distal` now
+  topology-strong and LCC-light**. Two levers were proposed: **(1) context — TESTED & REFUTED (2026-06-14):**
+  128³ patches did NOT sharpen the raw prediction; the model went *conservative* (raw Dice 0.131→0.094,
+  distal recall 0.81→0.49, TLD 0.61→0.22) — it traded the distal tree for cleaner proximal masks, not a
+  sharper complete tree (negative as-run; caveats in the run inventory + writeup §7.6). **(2) a *width-aware*
+  loss (cbDice / boundary), which BCE/Dice/clDice are not — now training (cbDice w2).** See the leads below. `analyse_distal` now
   reports raw vs +LCC + `lcc_retained_fraction`, so this is auditable — write it up as a
   stated limitation, not hidden.
 - **TD/topology vs Dice**: report TD at a fixed operating threshold + a precision-side metric; never TD's max.
@@ -364,11 +464,16 @@ train.pbs                                        — ONE reusable HPC job script
   mess is inherent to the operating point, not calibration. **Confound ruled out:** pw3
   `last_model` (clDice 0.503, TD 0.395) ≈ pw3 `best` (0.494, 0.379) — the topology drop
   is genuinely pos_weight, not the Dice@0.5 selection. **pos_weight question CLOSED.**
-- **Checkpoint selection is biased toward proximal volume.** `best_model` is chosen
-  by **val Dice @ 0.99** (`engine.py`), which rewards the thick-airway operating
-  point — the opposite of the topology goal. Validate at ~0.5 (or select on
-  Dice@0.5+LCC / a TD proxy) so the saved epoch is the best *tree*, not the best
-  trachea. Also evaluate `last_model` — attempt 2 was still climbing at ep75/80.
+- **Checkpoint selection WAS biased toward proximal volume — FIXED (2026-06-15).** `best_model`
+  used to be chosen by **val Dice @ 0.99** (`engine.py`), rewarding the thick-airway operating
+  point — the opposite of the topology goal. Now the engine saves three checkpoints:
+  `best_dice_model.pt` (Dice@0.99), `best_topology_model.pt` (**hard-mask clDice @0.5, LCC-free** —
+  the centreline selector), and `last_model.pt`; `best_model.pt` is kept as a compat alias =
+  `best_dice_model.pt`. Selector is **hard clDice, not soft_cbdice** (matches the evaluated mask
+  metric, avoids EDT cost, consistent across clDice/cbDice runs). LCC stays out of selection
+  (user preference — don't deepen LCC reliance). Full write-up in "✅ DONE — topology-aware
+  checkpoint selection" above ([[project-checkpoint-selection]]). Use `best_topology_model.pt`
+  for topology experiments; still also check `last_model` (attempt 2 was climbing at ep75/80).
 - **Patch borders: gaussian blending is already on** (`sliding_window.py`,
   `mode="gaussian"`), so the seams are not naive constant-blend. Remaining causes:
   (a) **low inference overlap** — headline predictions must use 0.5–0.75, not the
@@ -418,8 +523,8 @@ train.pbs                                        — ONE reusable HPC job script
    clDice 0.494 vs pw10's 0.615 (TD 0.38 vs 0.59); de-saturation trades distal recall
    for precision. **Keep pos_weight=10, pw1 cancelled.** See the pos_weight lesson.
    Confound ruled out: pw3 `last` (clDice 0.503) ≈ `best` (0.494) → genuinely pos_weight.
-   **pos_weight question CLOSED.** (Topology-aware checkpoint selection in the engine is
-   still offered, not done — would tighten any *future* ablation.)
+   **pos_weight question CLOSED.** (Topology-aware checkpoint selection in the engine is now **DONE
+   (2026-06-15)** — LCC-free centreline selection; see "✅ DONE" above + [[project-checkpoint-selection]].)
 
 **Tier 2 — push the topology contribution:**
 4. **clDice ablation — weight=2 DONE, wins.** `cldice_weight=2` (`supervised-atm-l20-cldice-w2`,
@@ -429,9 +534,11 @@ train.pbs                                        — ONE reusable HPC job script
    confirm vs weight=1.5 and the `last` checkpoint; otherwise weight=2 is the pick. Note it
    did **not** reduce LCC reliance (raw Dice@0.5 ~0.13 = pw10) — see the LCC-reliance lesson.
 5. **Patch borders / context:** inference overlap 0.5→0.75 for headline numbers; try
-   `foreground_probability≈0.5`; **128³ patches — SUBMITTED**
-   (`configs/training/supervised_atm_topoloss_large_patch.yaml`, clDice w=2) to test whether context
-   sharpens the raw (less-blobby) prediction and cuts LCC reliance.
+   `foreground_probability≈0.5`. **128³ patches — DONE, NEGATIVE as-run** (clDice 0.68→0.33, TLD
+   0.61→0.22, distal recall 0.81→0.49; proximal mask cleaner). Context made the model conservative,
+   did NOT sharpen the raw prediction. **Before parking patch size:** re-check the **`last`** checkpoint
+   (`--checkpoint last`; `best` is val-Dice@0.99-biased, worse at 128³) and consider more epochs /
+   `foreground_probability↑` / `pos_weight↑` (per-patch class balance shifts at 128³). See writeup §7.6.
 5b. **Geometric fidelity — cbDice IMPLEMENTED & STAGED.** Width-aware radius loss
    (`soft_cbdice_loss`, wired + warm-up-ramped, smoke-tested: finite, non-zero grad) — the loss-level
    fix for blobbiness that pos_weight/clDice-weight provably cannot do. **Now the active loss in
@@ -469,8 +576,11 @@ blobbiness) and/or **TLD** (tree completeness):
   clDice 0 — swap vs clDice-w2); `qsub train.pbs`. NB: cbDice's EDT runs on CPU/scipy → slower per step.
 - **Boundary / distance-transform losses** — *WALL*. Boundary loss (Kervadec, MIDL 2019); airway-specific
   breakage-sensitive DTPDT (Zhang, 2022). A wall-accuracy term to pair with cbDice.
-- **Context** — *WALL+TLD*. 128³ (live) → higher inference overlap → less down-sampling / cross-hair
-  filters (DeepVesselNet, Tetteh 2020). The structural lever our own data says sharpens the raw prediction.
+- **Context** — *WALL+TLD*; **128³ TRIED → NEGATIVE as-run** (topology collapsed, model went conservative;
+  did NOT sharpen the raw prediction — see run inventory + §7.6). Remaining angles if revisited: higher
+  inference overlap, less down-sampling / cross-hair filters (DeepVesselNet, Tetteh 2020), and **retuned
+  sampling/epochs** for 128³ (the as-run config wasn't retuned). No longer the safe bet it looked —
+  the loss-level cbDice is now #1.
 - **GUL / calibre-weighted loss** — *WALL/TLD*. WingsNet General Union Loss (Zheng, TMI 2021):
   distance-weighted within-class balance — a calibre-aware alternative to blunt pos_weight=10.
 - **Learned reconnection (vs blunt LCC)** — *TLD*. Bridge broken distal branches instead of *deleting*

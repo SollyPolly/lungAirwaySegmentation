@@ -30,7 +30,7 @@ from lung_airway_segmentation.inference.postprocess import keep_component_contai
 from lung_airway_segmentation.inference.sliding_window import predict_logits_for_volume
 from lung_airway_segmentation.io.atm22_layout import resolve_case_paths
 from lung_airway_segmentation.io.nifti import load_canonical_image
-from lung_airway_segmentation.training.builders import build_model
+from lung_airway_segmentation.training.builders import build_model, resolve_checkpoint_path
 from lung_airway_segmentation.training.config import resolve_device, resolve_project_path
 
 
@@ -41,7 +41,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--threshold", type=float, default=0.90, help="Binarisation threshold (LCC operating point ~0.90).")
     parser.add_argument("--connectivity", type=int, choices=(6, 18, 26), default=6, help="LCC connectivity (6 = face).")
     parser.add_argument("--overlap", type=float, default=0.5, help="Sliding-window overlap (0.5 gives cleaner masks than 0.25).")
-    parser.add_argument("--checkpoint", choices=("best", "last"), default="best")
+    parser.add_argument("--checkpoint", choices=("best", "dice", "topology", "last"), default="best",
+                        help="best = Dice-selected (alias of dice); topology = hard-clDice@0.5 selection; last = final epoch.")
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--prediction-set", type=str, default="predictions", help="Subfolder name under the run dir.")
     return parser.parse_args()
@@ -75,7 +76,7 @@ def main() -> None:
         raise SystemExit("No cases: pass --cases or ensure run_metadata has a test split.")
 
     device = resolve_device(args.device)
-    ckpt_path = run_dir / ("best_model.pt" if args.checkpoint == "best" else "last_model.pt")
+    ckpt_path = resolve_checkpoint_path(run_dir, args.checkpoint)
     checkpoint = torch.load(ckpt_path, map_location=device)
     model = build_model(device, cfg["model"])
     model.load_state_dict(checkpoint["model_state"])

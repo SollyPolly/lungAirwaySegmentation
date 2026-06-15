@@ -17,6 +17,9 @@ outputs/
 legacy/
 learning/
 docs/
-tests/
 plot_scripts/
 presentation_scripts/
+tests/
+
+writeup.md
+PROJECT_STATE.md

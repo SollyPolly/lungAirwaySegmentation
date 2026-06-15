@@ -128,6 +128,90 @@ def cldice_score_from_masks(predictions, targets) -> float:
     )
 
 
+def hard_centerline_metrics_from_masks(
+    predictions,
+    targets,
+    max_ratio: float | None = None,
+) -> dict[str, float | int | bool | None]:
+    """clDice, topology precision, and tree-length detected in one skeletonisation pass.
+
+    A lean, selection-oriented combination of ``cldice_score_from_masks``,
+    ``topology_precision_from_masks`` and ``tree_length_detected_from_masks`` that
+    skeletonises the prediction once (instead of twice across the separate calls)
+    and skips the expensive ATM'22 branch parsing of
+    ``airway_topology_metrics_from_masks``. Intended for per-epoch validation
+    selection (hard mask, no LCC).
+
+    ``max_ratio`` defaults to ``None`` (NO gate) — this metric is computed on the
+    RAW prediction, and a healthy topology model deliberately produces a large,
+    fragmented raw mask at 0.5 (commonly 8-35x GT volume before LCC), so a
+    raw-volume gate would reject exactly the models worth selecting. (analyse_distal's
+    6x gate is applied AFTER LCC, where the disconnected false-positive bulk is
+    already removed — it does NOT transfer to raw selection.) ``max_ratio`` is kept
+    only as an optional *catastrophic* guard (set it well above mature raw volumes,
+    e.g. 50x) to skip skeletonising a pathological blob; when it fires, clDice and
+    topology precision are returned as ``None`` (``gated=True``) — meaning INVALID /
+    excluded, NOT a genuine 0.0. TLD (target skeleton only) and the diagnostics are
+    always reported.
+    """
+    prediction_mask, target_mask = _validate_matching_masks(predictions, targets)
+    prediction_mask, target_mask = _crop_to_foreground_union(prediction_mask, target_mask)
+    prediction_voxels = int(prediction_mask.sum())
+    target_voxels = int(target_mask.sum())
+
+    # Connectivity diagnostic (6-connectivity, matching the LCC post-processing):
+    # number of predicted components. clDice does NOT measure connectivity, so this
+    # is tracked separately as a diagnostic — never used for selection. Cheap
+    # (labelling, not skeletonisation), so computed even when skeletonisation gates.
+    _, component_count = ndimage.label(
+        prediction_mask, structure=ndimage.generate_binary_structure(3, 1)
+    )
+
+    # TLD (reference-skeleton recall) needs only the target LCC skeleton.
+    target_component = _largest_connected_component(target_mask)
+    target_slices = _foreground_slices(target_component)
+    target_lcc_skeleton = _skeletonize(target_component[target_slices])
+    tree_length_detected = _fraction(
+        int(np.logical_and(target_lcc_skeleton, prediction_mask[target_slices]).sum()),
+        int(target_lcc_skeleton.sum()),
+    )
+
+    if (
+        max_ratio is not None
+        and target_voxels
+        and prediction_voxels > max_ratio * target_voxels
+    ):
+        return {
+            "cldice": None,  # invalid / excluded, NOT a genuine 0.0
+            "topology_precision": None,
+            "tree_length_detected": float(tree_length_detected),
+            "component_count": int(component_count),
+            "gated": True,
+        }
+
+    prediction_skeleton = _skeletonize(prediction_mask)
+    target_skeleton = _skeletonize(target_mask)
+    topology_precision = _fraction(
+        int(np.logical_and(prediction_skeleton, target_mask).sum()),
+        int(prediction_skeleton.sum()),
+    )
+    topology_sensitivity = _fraction(
+        int(np.logical_and(target_skeleton, prediction_mask).sum()),
+        int(target_skeleton.sum()),
+    )
+    denominator = topology_precision + topology_sensitivity
+    cldice = 1.0 if denominator == 0 else float(
+        2.0 * topology_precision * topology_sensitivity / denominator
+    )
+    return {
+        "cldice": float(cldice),
+        "topology_precision": float(topology_precision),
+        "tree_length_detected": float(tree_length_detected),
+        "component_count": int(component_count),
+        "gated": False,
+    }
+
+
 def tree_length_detected_from_masks(predictions, targets) -> float:
     """Compute ATM'22-style tree-length detected as reference-skeleton recall."""
     prediction_mask, target_mask = _validate_matching_masks(predictions, targets)

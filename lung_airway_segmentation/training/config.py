@@ -368,6 +368,15 @@ def validate_training_config(training_config: dict) -> None:
         raise ValueError("validation.inference_overlap must be in [0.0, 1.0).")
     if not 0.0 <= float(validation.get("threshold", 0.5)) <= 1.0:
         raise ValueError("validation.threshold must be in [0.0, 1.0].")
+    if not 0.0 <= float(validation.get("topology_threshold", 0.5)) <= 1.0:
+        raise ValueError("validation.topology_threshold must be in [0.0, 1.0].")
+    topology_max_ratio = validation.get("topology_max_ratio")
+    if topology_max_ratio is not None and float(topology_max_ratio) <= 1.0:
+        raise ValueError(
+            "validation.topology_max_ratio is an optional catastrophic guard and "
+            "must be > 1.0 (set it well above mature raw prediction volumes, e.g. "
+            "50); omit it for no gate (the default)."
+        )
 
     optimizer_config = training_config["optimizer"]
     if optimizer_config["name"].lower() != "adamw":

@@ -28,6 +28,56 @@ from lung_airway_segmentation.reproducibility import make_seeded_generator, seed
 from lung_airway_segmentation.training.config import resolve_project_path
 
 
+# --checkpoint choices for the analysis/prediction scripts → on-disk filenames.
+# 'best' is the Dice-selected checkpoint, kept as a compatibility alias for
+# best_dice_model.pt. 'topology' is the hard-clDice@0.5 selection (see
+# training/loops.py + engine.py); both 'dice'/'topology' are produced by runs
+# from 2026-06-15 onward.
+CHECKPOINT_FILENAMES = {
+    "best": "best_model.pt",
+    "dice": "best_dice_model.pt",
+    "topology": "best_topology_model.pt",
+    "last": "last_model.pt",
+}
+
+
+def is_strict_improvement(value, best_value) -> bool:
+    """Strict-improvement test for checkpoint selection.
+
+    Returns ``True`` only when ``value`` is a real number strictly greater than
+    ``best_value``. ``None`` (an absent/invalid metric — e.g. clDice during the
+    topology warm-up or a fully volume-gated epoch) never counts as an improvement,
+    so best_dice_model and best_topology_model are each updated only on their own
+    valid signal and can land on different epochs.
+    """
+    return value is not None and value > best_value
+
+
+def resolve_checkpoint_path(run_dir, choice: str):
+    """Map a ``--checkpoint`` choice to its file under ``run_dir``.
+
+    Runs that predate three-checkpoint saving only have ``best_model.pt`` /
+    ``last_model.pt``; for those, ``dice``/``topology`` fall back to
+    ``best_model.pt`` with a printed warning (topology falls back to the
+    Dice-selected weights, so the warning is load-bearing — the result is NOT a
+    topology-selected checkpoint).
+    """
+    from pathlib import Path
+
+    run_dir = Path(run_dir)
+    path = run_dir / CHECKPOINT_FILENAMES[choice]
+    if not path.exists() and choice in ("dice", "topology"):
+        legacy = run_dir / "best_model.pt"
+        if legacy.exists():
+            print(
+                f"[checkpoint] {path.name} not found in {run_dir.name} (run predates "
+                f"three-checkpoint saving); falling back to best_model.pt"
+                + (" — Dice-selected, NOT topology-selected." if choice == "topology" else ".")
+            )
+            return legacy
+    return path
+
+
 def build_model(device, model_config: dict):
     """Build the configured model and move it to the target device."""
     model_name = str(model_config["model_name"]).lower()

@@ -35,6 +35,8 @@ RUN_INDEX_COLUMNS = [
     "freeze_encoder",
     "best_epoch",
     "best_val_dice",
+    "best_topology_epoch",
+    "best_val_cldice",
     "evaluation_name",
     "evaluation_dir",
     "eval_case_ids",
@@ -172,6 +174,9 @@ def build_run_index_row(
 
     history_rows = history.get("history", []) if history is not None else []
     best = history.get("best", {}) if history is not None else {}
+    # best_topology block exists only for runs from 2026-06-15 onward (three-
+    # checkpoint topology-aware selection); empty for older runs.
+    best_topology = history.get("best_topology", {}) if history is not None else {}
     predictions_saved = detect_predictions_saved(run_dir)
     patch_size = sampling_config.get("patch_size")
     first_case_metrics = per_case_metrics[0] if per_case_metrics else {}
@@ -212,6 +217,8 @@ def build_run_index_row(
         "freeze_encoder": pretrained_config.get("freeze_encoder", ""),
         "best_epoch": best.get("epoch", ""),
         "best_val_dice": best.get("val_dice", ""),
+        "best_topology_epoch": best_topology.get("epoch", ""),
+        "best_val_cldice": best_topology.get("val_cldice", ""),
         "evaluation_name": evaluation_name,
         "evaluation_dir": str(evaluation_dir.relative_to(run_dir)) if evaluation_dir is not None else "",
         "eval_case_ids": ",".join(str(case["case_id"]) for case in per_case_metrics if "case_id" in case),

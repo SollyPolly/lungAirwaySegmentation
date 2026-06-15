@@ -6,6 +6,8 @@ from lung_airway_segmentation.metrics.topology import (
     airway_topology_metrics_from_masks,
     branch_detection_metrics_from_masks,
     cldice_score_from_masks,
+    hard_centerline_metrics_from_masks,
+    topology_precision_from_masks,
     tree_length_detected_from_masks,
 )
 
@@ -60,3 +62,48 @@ def test_tree_length_detected_measures_reference_skeleton_coverage():
     prediction[4, 4, 1:6] = 1
 
     assert np.isclose(tree_length_detected_from_masks(prediction, target), 0.5)
+
+
+def test_hard_centerline_metrics_match_the_individual_functions():
+    target = _three_branch_target()
+    prediction = target.copy()
+    prediction[2:13, 2, 2] = 1  # a disconnected false branch
+
+    combined = hard_centerline_metrics_from_masks(prediction, target)
+
+    assert np.isclose(combined["cldice"], cldice_score_from_masks(prediction, target))
+    assert np.isclose(
+        combined["topology_precision"], topology_precision_from_masks(prediction, target)
+    )
+    assert np.isclose(
+        combined["tree_length_detected"],
+        tree_length_detected_from_masks(prediction, target),
+    )
+    assert combined["gated"] is False
+    # Two components: the (overlapping) tree plus the detached false branch.
+    assert combined["component_count"] == 2
+
+
+def test_hard_centerline_metrics_default_has_no_volume_gate():
+    """A large fragmented raw mask (the healthy topology-model case) is NOT gated."""
+    target = _three_branch_target()
+    prediction = np.ones_like(target)  # 10x+ GT volume
+
+    result = hard_centerline_metrics_from_masks(prediction, target)  # max_ratio=None
+
+    assert result["gated"] is False
+    assert result["cldice"] is not None  # skeletonised and scored, not rejected
+
+
+def test_hard_centerline_metrics_catastrophic_guard_marks_invalid_not_zero():
+    target = _three_branch_target()
+    prediction = np.ones_like(target)  # massive over-segmentation (whole volume)
+
+    gated = hard_centerline_metrics_from_masks(prediction, target, max_ratio=6.0)
+
+    # Skeletonisation skipped: clDice/precision are INVALID (None), NOT a genuine
+    # 0.0; TLD (target-only skeleton) is still reported.
+    assert gated["gated"] is True
+    assert gated["cldice"] is None
+    assert gated["topology_precision"] is None
+    assert np.isclose(gated["tree_length_detected"], 1.0)

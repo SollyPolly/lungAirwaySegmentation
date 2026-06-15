@@ -72,26 +72,38 @@ class CombinedSegmentationLoss(nn.Module):
         # engine like clDice. See losses/topology.py::persistent_homology_loss.
         self.topo_weight = float(topo_weight)
 
-    def forward(self, logits, targets):
-        """Compute the weighted segmentation loss for logits and target masks."""
+    def compute_components(self, logits, targets, force_cldice=False, force_cbdice=False):
+        """Return ``(total_loss, components)`` computing each term at most once.
+
+        By default a soft term is only evaluated when its weight is > 0 (the
+        training path — skips clDice/cbDice during warm-up). Validation passes
+        ``force_cldice`` / ``force_cbdice`` to evaluate them for *logging* even at
+        weight 0, while still folding them into ``total_loss`` only at their
+        current weight. ``components`` holds the unweighted terms (BCE, Dice, and
+        the soft clDice/cbDice diagnostics) as scalar tensors. Centralising the
+        term computation here lets the validation loop log the diagnostics without
+        a second forward pass (the expensive cbDice scipy EDT runs once, not twice).
+        """
         targets = targets.float()
 
         bce = self.bce_loss(logits, targets)
         dice = self.dice_loss(logits, targets)
-
         total_loss = self.bce_weight * bce + self.dice_weight * dice
+        components = {"bce": bce, "dice": dice}
 
-        # sigmoid is shared by the clDice and (experimental) topology terms.
+        # sigmoid is shared by the clDice, cbDice, and (experimental) topology terms.
         probabilities = None
-        if self.cldice_weight > 0.0:
+        if force_cldice or self.cldice_weight > 0.0:
             probabilities = torch.sigmoid(logits)
             cldice = soft_cldice_loss(probabilities, targets, self.cldice_iterations)
+            components["soft_cldice"] = cldice
             total_loss = total_loss + self.cldice_weight * cldice
 
-        if self.cbdice_weight > 0.0:
+        if force_cbdice or self.cbdice_weight > 0.0:
             if probabilities is None:
                 probabilities = torch.sigmoid(logits)
             cbdice = soft_cbdice_loss(probabilities, targets, self.cbdice_iterations)
+            components["soft_cbdice"] = cbdice
             total_loss = total_loss + self.cbdice_weight * cbdice
 
         if self.topo_weight > 0.0:  # EXPERIMENTAL — off by default (topo_weight=0.0)
@@ -100,4 +112,9 @@ class CombinedSegmentationLoss(nn.Module):
             topo = persistent_homology_loss(probabilities, targets)
             total_loss = total_loss + self.topo_weight * topo
 
+        return total_loss, components
+
+    def forward(self, logits, targets):
+        """Compute the weighted segmentation loss for logits and target masks."""
+        total_loss, _ = self.compute_components(logits, targets)
         return total_loss

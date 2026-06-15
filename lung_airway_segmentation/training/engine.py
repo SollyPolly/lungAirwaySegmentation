@@ -3,6 +3,7 @@
 import argparse
 import json
 import re
+import time
 from datetime import datetime
 
 import torch
@@ -15,6 +16,7 @@ from lung_airway_segmentation.training.builders import (
     build_training_components,
     build_unlabelled_dataloader,
     get_optimizer_learning_rates,
+    is_strict_improvement,
     resolve_case_splits,
 )
 from lung_airway_segmentation.training.config import (
@@ -172,6 +174,8 @@ def run_supervised_training(args: argparse.Namespace) -> None:
     )
     best_val_dice = -1.0
     best_epoch = 0
+    best_val_cldice = -1.0
+    best_topology_epoch = 0
     history = []
 
     training_regime = resolved_training_config["training_regime"]
@@ -195,6 +199,19 @@ def run_supervised_training(args: argparse.Namespace) -> None:
     max_topo_weight = float(loss_config.get("topo_weight", 0.0))
     topo_warmup_epochs = int(loss_config.get("topo_warmup_epochs", 0))
     topo_rampup_epochs = int(loss_config.get("topo_rampup_epochs", 0))
+
+    # Topology validation metrics (best_topology_model selection) skeletonise the
+    # RAW prediction, which is most expensive on the messy masks of early/warm-up
+    # epochs that can never win topology selection anyway. So compute them only
+    # once the topology-loss warm-up has elapsed (0 for a pure-Dice baseline → from
+    # the first validation). The selection threshold and the optional catastrophic
+    # volume guard (default None = no gate) are read once here.
+    topology_metrics_warmup_epochs = max(cldice_warmup_epochs, cbdice_warmup_epochs)
+    topology_threshold = float(validation_config.get("topology_threshold", 0.5))
+    _topology_max_ratio = validation_config.get("topology_max_ratio")
+    topology_max_ratio = (
+        float(_topology_max_ratio) if _topology_max_ratio is not None else None
+    )
 
     run_description = args.run_description
     if run_description is None:
@@ -248,6 +265,7 @@ def run_supervised_training(args: argparse.Namespace) -> None:
     initialize_run_artifacts(run_dir, run_metadata, resolved_config_artifact)
 
     for epoch in range(int(resolved_training_config["epochs"])):
+        epoch_start_time = time.perf_counter()
         if max_cldice_weight > 0.0:
             epochs_after_warmup = max((epoch + 1) - cldice_warmup_epochs, 0)
             if epochs_after_warmup <= 0:
@@ -307,6 +325,7 @@ def run_supervised_training(args: argparse.Namespace) -> None:
             or epoch + 1 == int(resolved_training_config["epochs"])
         )
         if should_validate:
+            validation_start_time = time.perf_counter()
             val_metrics = validate_one_epoch(
                 model=model,
                 dataloader=val_loader,
@@ -317,10 +336,36 @@ def run_supervised_training(args: argparse.Namespace) -> None:
                 overlap=float(validation_config["inference_overlap"]),
                 use_amp=use_amp,
                 threshold=float(validation_config.get("threshold", 0.5)),
+                compute_topology=(epoch + 1) > topology_metrics_warmup_epochs,
+                topology_threshold=topology_threshold,
+                topology_max_ratio=topology_max_ratio,
+                compute_soft_cbdice=max_cbdice_weight > 0.0,
             )
+            # Wall-clock of the whole validation pass (incl. the new raw
+            # skeletonisation) — written to history.json each validation so the
+            # cost is observable live on the shared FS (PBS spools train.out only
+            # at job end). Watch it on the first post-warm-up validation.
+            epoch_summary["val_seconds"] = time.perf_counter() - validation_start_time
             epoch_summary["val_loss"] = val_metrics["loss"]
             epoch_summary["val_dice"] = val_metrics["dice"]
             epoch_summary["val_per_case_dice"] = val_metrics.get("per_case_dice", {})
+            # Topology-aware selection diagnostics (hard mask @ topology_threshold,
+            # no LCC). *_loss keys are losses (lower better); cldice is a score.
+            for key in (
+                "cldice",
+                "topology_precision",
+                "tree_length_detected",
+                "foreground_volume_ratio",
+                "predicted_component_count",
+                "gated_case_count",
+                "bce_loss",
+                "dice_loss",
+                "soft_cldice_loss",
+                "soft_cbdice_loss",
+            ):
+                if key in val_metrics:
+                    epoch_summary[f"val_{key}"] = val_metrics[key]
+            epoch_summary["val_per_case_cldice"] = val_metrics.get("per_case_cldice", {})
 
             per_case_str = "  ".join(
                 f"{cid}:{d:.3f}"
@@ -332,6 +377,13 @@ def run_supervised_training(args: argparse.Namespace) -> None:
                 f" - train_dice: {train_metrics['dice']:.4f}"
                 f" - val_loss: {val_metrics['loss']:.4f}"
                 f" - val_dice: {val_metrics['dice']:.4f}"
+                + (
+                    f" - val_cldice@{topology_threshold:g}: {val_metrics['cldice']:.4f}"
+                    f" - val_fg_ratio@{topology_threshold:g}: {val_metrics['foreground_volume_ratio']:.3f}"
+                    if "cldice" in val_metrics
+                    else ""
+                )
+                + f" - val_seconds: {epoch_summary['val_seconds']:.1f}"
                 + (f"\n  per-case: {per_case_str}" if per_case_str else "")
             )
         else:
@@ -360,24 +412,58 @@ def run_supervised_training(args: argparse.Namespace) -> None:
             scheduler=scheduler,
         )
 
-        if val_metrics is not None and val_metrics["dice"] > best_val_dice:
+        # best_dice_model.pt — highest val Dice at the configured threshold
+        # (proximal-volume biased; the historical selection). best_model.pt is
+        # kept as a compatibility alias for existing analysis scripts. Selected
+        # INDEPENDENTLY of best_topology_model below — the two can land on
+        # different epochs (the whole point: Dice rewards proximal volume, raw
+        # clDice rewards the centreline tree).
+        if val_metrics is not None and is_strict_improvement(
+            val_metrics["dice"], best_val_dice
+        ):
             best_val_dice = val_metrics["dice"]
             best_epoch = epoch + 1
+            for checkpoint_name in ("best_dice_model.pt", "best_model.pt"):
+                save_checkpoint(
+                    model=model,
+                    optimizer=optimizer,
+                    epoch=epoch + 1,
+                    metrics=epoch_summary,
+                    output_path=run_dir / checkpoint_name,
+                    scheduler=scheduler,
+                )
+
+        # best_topology_model.pt — highest RAW hard-mask clDice at topology_threshold
+        # (no LCC, no volume gate), the centreline selector. 'cldice' is absent until
+        # after the topology-loss warm-up (and if every case was catastrophically
+        # gated), so this epoch is simply skipped for topology selection then.
+        if val_metrics is not None and is_strict_improvement(
+            val_metrics.get("cldice"), best_val_cldice
+        ):
+            best_val_cldice = val_metrics["cldice"]
+            best_topology_epoch = epoch + 1
             save_checkpoint(
                 model=model,
                 optimizer=optimizer,
                 epoch=epoch + 1,
                 metrics=epoch_summary,
-                output_path=run_dir / "best_model.pt",
+                output_path=run_dir / "best_topology_model.pt",
                 scheduler=scheduler,
             )
 
+        epoch_summary["epoch_seconds"] = time.perf_counter() - epoch_start_time
         history.append(epoch_summary)
         write_json(
             {
                 "best": {
                     "epoch": best_epoch,
                     "val_dice": best_val_dice,
+                },
+                "best_topology": {
+                    "epoch": best_topology_epoch,
+                    "val_cldice": best_val_cldice,
+                    "threshold": topology_threshold,
+                    "lcc": False,
                 },
                 "history": history,
             },
@@ -390,6 +476,8 @@ def run_supervised_training(args: argparse.Namespace) -> None:
     print(f"Held-out test cases: {len(test_ids)}")
     print(f"Best val dice: {best_val_dice:.4f}")
     print(f"Best epoch: {best_epoch}")
+    print(f"Best val clDice@0.5 (topology): {best_val_cldice:.4f}")
+    print(f"Best topology epoch: {best_topology_epoch}")
 
 
 def run_semisupervised_training(args: argparse.Namespace) -> None:
@@ -628,6 +716,7 @@ def run_semisupervised_training(args: argparse.Namespace) -> None:
                 overlap=float(validation_config["inference_overlap"]),
                 use_amp=use_amp,
                 threshold=float(validation_config.get("threshold", 0.5)),
+                compute_topology=False,
             )
             epoch_summary["val_loss"] = val_metrics["loss"]
             epoch_summary["val_dice"] = val_metrics["dice"]

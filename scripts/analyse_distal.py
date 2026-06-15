@@ -59,7 +59,7 @@ from lung_airway_segmentation.metrics.topology import (
     topology_precision_from_masks,
 )
 from lung_airway_segmentation.preprocessing.geometry import normalize_margin
-from lung_airway_segmentation.training.builders import build_model
+from lung_airway_segmentation.training.builders import build_model, resolve_checkpoint_path
 from lung_airway_segmentation.training.config import (
     load_yaml_config,
     resolve_device,
@@ -104,7 +104,8 @@ def parse_args() -> argparse.Namespace:
                         help="voxel-precision mode only: min voxel-precision+LCC the chosen threshold must meet.")
     parser.add_argument("--cases", type=str, default=None, help="Comma-separated case IDs to override the *report* split.")
     parser.add_argument("--max-cases", type=int, default=None, help="Cap cases per split (default: all).")
-    parser.add_argument("--checkpoint", choices=("best", "last"), default="best")
+    parser.add_argument("--checkpoint", choices=("best", "dice", "topology", "last"), default="best",
+                        help="best = Dice-selected (alias of dice); topology = hard-clDice@0.5 selection; last = final epoch.")
     parser.add_argument("--threshold", type=float, default=None, help="Fix the operating threshold (skips selection).")
     parser.add_argument("--overlap", type=float, default=0.5, help="Sliding-window overlap (0.5 default; 0.25 faster for dev).")
     parser.add_argument("--sw-batch", type=int, default=8, help="Sliding-window batch size (raise on big GPUs to speed inference).")
@@ -454,7 +455,7 @@ def main() -> None:
     candidates = [float(x) for x in args.cldice_candidates.split(",") if x.strip()] or CLDICE_CANDIDATES_DEFAULT
 
     device = resolve_device(args.device)
-    ckpt = run_dir / ("best_model.pt" if args.checkpoint == "best" else "last_model.pt")
+    ckpt = resolve_checkpoint_path(run_dir, args.checkpoint)
     model = build_model(device, cfg["model"])
     model.load_state_dict(torch.load(ckpt, map_location=device)["model_state"])
     model.eval()
