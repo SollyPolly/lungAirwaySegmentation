@@ -4,7 +4,7 @@
 #PBS -l select=1:ncpus=8:mem=64gb:ngpus=1:gpu_type=L40S
 #PBS -l walltime=12:00:00
 #PBS -j oe
-# Single reusable log — overwritten each run (per-run metrics live in runs/<exp>/).
+# Single reusable log — overwritten each run (per-run metrics live in runs/<study>/).
 #PBS -o /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation/train.out
 
 cd /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation || exit 1
@@ -19,15 +19,15 @@ nvidia-smi
 # =====================================================================
 # ONE reusable job script. Edit the active command below per run, qsub it,
 # and train.out is rewritten. Requires data/ATM22/{imagesTr,labelsTr} on HPC.
-# The active YAML config carries experiment_name / description / loss weights, so the
-# command can stay bare; override per run with --experiment-name / --run-description / etc.
+# The active YAML config carries study_name / run_label / experiment_name / description /
+# loss weights, so the command can stay bare; override per run with the matching CLI flags.
 # Commented blocks are ready-to-swap alternatives.
 # =====================================================================
 
 # The active loss run is fully defined IN supervised_atm_topoloss.yaml (loss weights +
-# experiment_name + description) — currently cbDice w=2 (clDice off). So this block carries
-# NO overrides. To run a different loss, edit that config's `loss:` block + experiment_name
-# (the alternatives below show the weights); resolved_config.json snapshots each run.
+# study_name + run_label + experiment_name + description) — currently cbDice w=2 (clDice off).
+# So this block carries NO overrides. To run a different loss, edit that config's `loss:` block
+# and semantic naming fields; resolved_config.json snapshots each run.
 
 # --- (ACTIVE) cbDice w2 (96^3) — fully configured in supervised_atm_topoloss.yaml ---
 python -u -m scripts.train_baseline \
@@ -66,7 +66,7 @@ python -u -m scripts.train_baseline \
 #   --data-config configs/data/atm22.yaml --atm22-config configs/data/atm22.yaml \
 #   --model-config configs/model/baseline_unet.yaml \
 #   --training-config configs/training/mean_teacher_atm_warmstart.yaml \
-#   --init-checkpoint runs/supervised-atm-l20/2026-06-11__04-10-34__baseline_unet/best_model.pt \
+#   --init-checkpoint runs/atm-l20-supervised/2026-06-11__04-10-34__baseline-p96__baseline_unet/best_model.pt \
 #   --experiment-name mean-teacher-atm-warmstart-l20 \
 #   --run-description "Mean Teacher ATM warm-started from supervised-atm-l20." \
 #   --num-workers 4 --device cuda

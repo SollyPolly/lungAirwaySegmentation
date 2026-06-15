@@ -1,6 +1,8 @@
 # Main supervised patch-based baseline.
 
 experiment_name: baseline_unet
+study_name: aeropath-supervised
+run_label: baseline-p96
 description: "Corrected supervised patch baseline with BCE positive-class weight 10."
 training_regime: patch
 seed: 15

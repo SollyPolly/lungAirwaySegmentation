@@ -173,9 +173,13 @@ def build_prediction_metadata(
     checkpoint: dict,
 ) -> dict:
     """Assemble the saved prediction metadata record."""
+    training_config = resolved_config["training"]
     return {
         "case_id": case.case_id,
         "run_dir": str(run_dir),
+        "study_name": training_config.get("study_name"),
+        "run_label": training_config.get("run_label"),
+        "experiment_name": training_config.get("experiment_name"),
         "checkpoint_path": str(checkpoint_path),
         "checkpoint_epoch": int(checkpoint["epoch"]),
         "output_dir": str(output_dir),
@@ -186,12 +190,12 @@ def build_prediction_metadata(
         "crop_box": [list(bounds) for bounds in case.crop_box],
         "cropped_affine": case.affine.tolist(),
         "original_affine": case.metadata["original_affine"].tolist(),
-        "roi_size": resolved_config["training"]["validation"]["roi_size"],
-        "sw_batch_size": resolved_config["training"]["validation"]["sw_batch_size"],
+        "roi_size": training_config["validation"]["roi_size"],
+        "sw_batch_size": training_config["validation"]["sw_batch_size"],
         "inference_overlap": float(args.inference_overlap)
         if args.inference_overlap is not None
-        else resolved_config["training"]["validation"]["inference_overlap"],
-        "amp_enabled": bool(resolved_config["training"].get("amp", {}).get("enabled", False)),
+        else training_config["validation"]["inference_overlap"],
+        "amp_enabled": bool(training_config.get("amp", {}).get("enabled", False)),
         "largest_component_saved": bool(args.largest_component),
         "crop_margin": list(case.metadata["crop_margin"]),
     }

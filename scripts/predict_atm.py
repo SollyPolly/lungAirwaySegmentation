@@ -14,7 +14,7 @@ SAME path the viewer uses — so the saved masks line up with the CT it displays
 (it re-loads CT/GT from the original data and checks shapes match).
 
 Usage:
-    python -m scripts.predict_atm --run-dir runs/supervised-atm-l20-cldice/<run> \
+    python -m scripts.predict_atm --run-dir runs/atm-l20-supervised/<run> \
         --cases 002,012 --threshold 0.90
 """
 
@@ -83,7 +83,16 @@ def main() -> None:
     model.eval()
     checkpoint_epoch = checkpoint.get("epoch")
 
-    print(f"model: {metadata.get('experiment_name')}  | cases: {cases}")
+    run_identity = " / ".join(
+        str(value)
+        for value in (
+            metadata.get("study_name"),
+            metadata.get("run_label"),
+            metadata.get("experiment_name"),
+        )
+        if value
+    )
+    print(f"model: {run_identity or run_dir.name}  | cases: {cases}")
     print(f"threshold {args.threshold}  | LCC-{args.connectivity}  | overlap {args.overlap}\n")
 
     for cid in cases:
@@ -119,6 +128,9 @@ def main() -> None:
         save_nifti(pred_lcc, affine, case_dir / "airway_pred_lcc_full.nii.gz")
         (case_dir / "prediction_metadata.json").write_text(json.dumps({
             "case_id": str(cid),
+            "study_name": metadata.get("study_name"),
+            "run_label": metadata.get("run_label"),
+            "experiment_name": metadata.get("experiment_name"),
             "checkpoint_epoch": checkpoint_epoch,
             "threshold": args.threshold,
             "lcc_connectivity": args.connectivity,

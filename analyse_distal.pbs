@@ -5,6 +5,8 @@
 #PBS -j oe
 #PBS -o /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation/analyse_distal.out
 
+set -eo pipefail
+
 cd /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation || exit 1
 
 module load miniforge/3
@@ -30,31 +32,31 @@ nvidia-smi
 
 # --- SMOKE FIRST: 2 cases, validate the pipeline before any full run ---
 # python -u -m scripts.analyse_distal \
-#   --run-dir runs/supervised-atm-l20-cldice/2026-06-11__22-04-05__baseline_unet \
+#   --run-dir runs/atm-l20-supervised/2026-06-11__22-04-05__cldice-w1-p96__baseline_unet \
 #   --max-cases 2 --out distal_analysis__smoke.json --device cuda
 
 # --- (ACTIVE) clDice op-point eval, val (the pw10 clDice run, for the reference) ---
 python -u -m scripts.analyse_distal \
-  --run-dir runs/supervised-atm-l20-cldice/2026-06-11__22-04-05__baseline_unet \
+  --run-dir runs/atm-l20-supervised/2026-06-11__22-04-05__cldice-w1-p96__baseline_unet \
   --out distal_analysis__cldice.json \
   --device cuda
 
 # --- pos_weight=3 clDice model (swap the run-dir in once training finishes) ---
 # python -u -m scripts.analyse_distal \
-#   --run-dir runs/supervised-atm-l20-cldice-pw3/<TIMESTAMP>__baseline_unet \
+#   --run-dir runs/atm-l20-supervised/<TIMESTAMP>__cldice-w1-pw3-p96__baseline_unet \
 #   --out distal_analysis__cldice.json --device cuda
 
 # --- Supervised-ATM baseline (clDice op-point, for the paired comparison) ---
 # python -u -m scripts.analyse_distal \
-#   --run-dir runs/supervised-atm-l20/2026-06-11__04-10-34__baseline_unet \
+#   --run-dir runs/atm-l20-supervised/2026-06-11__04-10-34__baseline-p96__baseline_unet \
 #   --out distal_analysis__cldice.json --device cuda
 
 # --- FINAL ONLY: sealed test table (frozen models; selects on val, computes BD) ---
 # python -u -m scripts.analyse_distal \
-#   --run-dir runs/supervised-atm-l20-cldice/2026-06-11__22-04-05__baseline_unet \
+#   --run-dir runs/atm-l20-supervised/2026-06-11__22-04-05__cldice-w1-p96__baseline_unet \
 #   --report-split test --out distal_analysis__test.json --device cuda
 
 # --- Fast cheap look (voxel-precision floor, no skeletonisation) ---
 # python -u -m scripts.analyse_distal \
-#   --run-dir runs/supervised-atm-l20-cldice/2026-06-11__22-04-05__baseline_unet \
+#   --run-dir runs/atm-l20-supervised/2026-06-11__22-04-05__cldice-w1-p96__baseline_unet \
 #   --select-by voxel-precision --out distal_analysis__voxel.json --device cuda

@@ -11,6 +11,8 @@
 # warm_start_epochs: 0, optimizer.lr: 0.0001, epochs: 40.
 
 experiment_name: mean-teacher-atm-l20
+study_name: atm-l20-mean-teacher
+run_label: scratch-p96
 description: "Mean Teacher on ATM'22: 20 labelled + 90 unlabelled (single-domain). AeroPath = OOD test."
 seed: 15
 epochs: 60

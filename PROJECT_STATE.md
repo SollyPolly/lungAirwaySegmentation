@@ -1,7 +1,21 @@
 # Lung Airway Segmentation — Project State
 
 **Dissertation project, Imperial College London. Deadline: September 7, 2026.**
-_Last updated: 2026-06-14._
+_Last updated: 2026-06-15._
+
+---
+
+## DONE (2026-06-15) — semantic run naming and provenance
+
+Future configured runs use `runs/<study_name>/<timestamp>__<run_label>__<model>/`.
+`study_name` is the stable comparison group; `run_label` states the variant that changed; the
+timestamp remains the unique run identifier. Both fields are optional and stored in resolved config,
+run metadata, prediction metadata, distal-analysis output, and `run_index.csv`. The saved-prediction
+viewer shows them in its run summary. Configs or imported runs without these fields can still use
+the legacy `runs/<experiment_name>/<timestamp>__<model>/` layout. On 2026-06-15, all 19 existing
+local runs were migrated into the semantic layout and their stored paths/metadata were updated.
+Predictions, evaluations, and analyses remain inside and relative to their run directory, so no
+downstream restructure was required.
 
 ---
 
@@ -11,7 +25,7 @@ _Last updated: 2026-06-14._
 `supervised-atm-l20-cbdice-w2`). The loss-level fat-wall fix. When done, compare vs clDice-w2: want
 raw Dice / voxel-precision **up** with TLD/clDice **held** (`analyse_distal` swap-in as usual).
 
-**128³ CONTEXT ABLATION — DONE, NEGATIVE (2026-06-14).** `runs/supervised-atm-l20-cldice-w2-large-patch/2026-06-14__19-28-25__baseline_unet/distal_analysis__patch128_close_sweep.json`
+**128³ CONTEXT ABLATION — DONE, NEGATIVE (2026-06-14).** `runs/atm-l20-supervised/2026-06-14__19-28-25__cldice-w2-p128__baseline_unet/distal_analysis__patch128_close_sweep.json`
 (best ckpt, clDice-opt 0.52). Larger patches did **not** sharpen the distal prediction — the model went
 **conservative**. Vs 96³ w2: **clDice 0.683→0.334, TLD 0.608→0.224, distal r=1 recall 0.81→0.49**; meanwhile
 proximal mask quality *rose* (Dice+LCC 0.52→0.62, voxel-prec 0.37→0.57). So 128³ **traded the distal tree
@@ -25,10 +39,10 @@ not retuned (80 ep, fg_prob 0.7, pos_weight 10 → worse per-patch class balance
 
 **Earlier today — the 4 `analyse_distal` trachea-seeded re-runs are DONE** (baseline, pw10, pw3, w2) — one clean
 JSON per model, each carrying `lcc_retained_fraction` (= new code ran):
-- baseline: `runs/supervised-atm-l20/2026-06-11__04-10-34__baseline_unet/distal_analysis__baseline_tracheaLLC.json`
-- pw10:     `runs/supervised-atm-l20-cldice/2026-06-11__22-04-05__baseline_unet/distal_analysis__cldice__pw10_tracheaLLC.json`
-- pw3:      `runs/supervised-atm-l20-cldice-pw3/2026-06-13__02-03-28__baseline_unet/distal_analysis__cldice__pw3_tracheaLLC.json`
-- w2:       `runs/supervised-atm-l20-cldice-w2/2026-06-13__23-53-52__baseline_unet/distal_analysis__cldice__cldice_w2_tracheaLLC.json`
+- baseline: `runs/atm-l20-supervised/2026-06-11__04-10-34__baseline-p96__baseline_unet/distal_analysis__baseline_tracheaLLC.json`
+- pw10:     `runs/atm-l20-supervised/2026-06-11__22-04-05__cldice-w1-p96__baseline_unet/distal_analysis__cldice__pw10_tracheaLLC.json`
+- pw3:      `runs/atm-l20-supervised/2026-06-13__02-03-28__cldice-w1-pw3-p96__baseline_unet/distal_analysis__cldice__pw3_tracheaLLC.json`
+- w2:       `runs/atm-l20-supervised/2026-06-13__23-53-52__cldice-w2-p96__baseline_unet/distal_analysis__cldice__cldice_w2_tracheaLLC.json`
 
 (The old largest-by-size LCC JSONs were deleted as pure duplicates; only `..._pw3_last.json` —
 the unique `last`-checkpoint confound check — was kept.)
@@ -277,7 +291,8 @@ later reclaim voxel precision without losing the tree — future scope.)
 
 ## Run inventory (key runs + verdicts)
 
-Per-run detail lives in each run's `runs/<exp>/<ts>/notes.md` (local; `runs/` is gitignored).
+Per-run detail lives in each run's `runs/<study>/<timestamp>__<variant>__<model>/notes.md`
+(`runs/` is gitignored; legacy layouts remain supported for imported runs).
 
 | Run | What | Result / verdict |
 |-----|------|------------------|
@@ -311,7 +326,7 @@ configs/
   model/       baseline_unet.yaml, (ct_fm_segresnet)
   training/    baseline.yaml                 — supervised AeroPath (fractional split)
                supervised_atm.yaml           — supervised ATM (the SSL baseline)
-               supervised_atm_topoloss.yaml    — THE loss config: edit the `loss:` block in place to pick the active loss (currently **cbDice w=2, clDice off**; warm-up 15, ramp 10, iters 10, 80 ep). experiment_name + description + loss weights live here so the PBS active block is override-free; small tweaks (`--pos-weight` / `--val-threshold`) can still be CLI. resolved_config.json snapshots each run.
+               supervised_atm_topoloss.yaml    — THE loss config: edit the `loss:` block and semantic `run_label` in place to pick the active loss (currently **cbDice w=2, clDice off**; warm-up 15, ramp 10, iters 10, 80 ep). study_name + run_label + experiment_name + description + loss weights live here so the PBS active block is override-free; small tweaks (`--pos-weight` / `--val-threshold`) can still be CLI. resolved_config.json snapshots each run.
                supervised_atm_topoloss_large_patch.yaml — as above at 128³ (patch_size/roi_size are config-only, no CLI flag)
                mean_teacher_atm.yaml          — MT single-domain (from scratch) [negative result; the semisupervised default]
                mean_teacher_atm_warmstart.yaml— MT single-domain (warm-started) [negative result]

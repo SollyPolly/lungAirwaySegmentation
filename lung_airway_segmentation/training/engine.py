@@ -93,14 +93,25 @@ def slugify_run_component(value: str) -> str:
     return value or "run"
 
 
-def build_run_dir(experiment_name, model_name, created_at=None):
-    """Create a readable run directory grouped by experiment and labeled by model."""
+def build_run_dir(
+    experiment_name,
+    model_name,
+    created_at=None,
+    *,
+    study_name=None,
+    run_label=None,
+):
+    """Create a readable run directory, using semantic grouping when configured."""
     created_at = created_at or datetime.now()
     timestamp = created_at.strftime("%Y-%m-%d__%H-%M-%S")
-    experiment_slug = slugify_run_component(str(experiment_name))
+    group_slug = slugify_run_component(str(study_name or experiment_name))
     model_slug = slugify_run_component(str(model_name))
-    run_name = f"{timestamp}__{model_slug}"
-    return RUNS_ROOT / experiment_slug / run_name
+    run_label_slug = slugify_run_component(str(run_label)) if run_label else None
+    run_name_parts = [timestamp]
+    if run_label_slug:
+        run_name_parts.append(run_label_slug)
+    run_name_parts.append(model_slug)
+    return RUNS_ROOT / group_slug / "__".join(run_name_parts)
 
 
 def initialize_run_artifacts(run_dir, run_metadata, resolved_config):
@@ -171,6 +182,8 @@ def run_supervised_training(args: argparse.Namespace) -> None:
         resolved_training_config["experiment_name"],
         model_config["model_name"],
         created_at=run_started_at,
+        study_name=resolved_training_config.get("study_name"),
+        run_label=resolved_training_config.get("run_label"),
     )
     best_val_dice = -1.0
     best_epoch = 0
@@ -229,6 +242,8 @@ def run_supervised_training(args: argparse.Namespace) -> None:
     }
 
     run_metadata = {
+        "study_name": resolved_training_config.get("study_name"),
+        "run_label": resolved_training_config.get("run_label"),
         "experiment_name": resolved_training_config["experiment_name"],
         "description": run_description,
         "created_at": run_started_at.isoformat(timespec="seconds"),
@@ -573,6 +588,8 @@ def run_semisupervised_training(args: argparse.Namespace) -> None:
         resolved_training_config["experiment_name"],
         f"mean_teacher_{model_config['model_name']}",
         created_at=run_started_at,
+        study_name=resolved_training_config.get("study_name"),
+        run_label=resolved_training_config.get("run_label"),
     )
     best_val_dice = -1.0
     best_epoch = 0
@@ -604,6 +621,8 @@ def run_semisupervised_training(args: argparse.Namespace) -> None:
         "training": resolved_training_config,
     }
     run_metadata = {
+        "study_name": resolved_training_config.get("study_name"),
+        "run_label": resolved_training_config.get("run_label"),
         "experiment_name": resolved_training_config["experiment_name"],
         "description": run_description,
         "created_at": run_started_at.isoformat(timespec="seconds"),

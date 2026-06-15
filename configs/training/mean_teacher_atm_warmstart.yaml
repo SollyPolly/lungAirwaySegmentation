@@ -6,10 +6,12 @@
 #
 # Run with (the --init-checkpoint path is set in train_meanteacher_warmstart.pbs):
 #   --data-config configs/data/atm22.yaml --atm22-config configs/data/atm22.yaml
-#   --init-checkpoint runs/supervised-atm-l20/<run>/best_model.pt
+#   --init-checkpoint runs/atm-l20-supervised/<run>/best_model.pt
 # AeroPath is reserved as an OOD test.
 
 experiment_name: mean-teacher-atm-warmstart-l20
+study_name: atm-l20-mean-teacher
+run_label: warmstart-p96
 description: "Mean Teacher on ATM'22 warm-started from supervised-atm-l20 (0.609). 20 labelled + 90 unlabelled, single-domain. AeroPath = OOD test."
 seed: 15
 epochs: 40

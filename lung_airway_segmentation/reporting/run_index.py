@@ -15,6 +15,8 @@ RUN_INDEX_COLUMNS = [
     "run_dir",
     "run_name",
     "created_at",
+    "study_name",
+    "run_label",
     "experiment_name",
     "description",
     "model_name",
@@ -192,6 +194,8 @@ def build_run_index_row(
         "run_dir": str(relative_run_dir),
         "run_name": run_metadata.get("run_name", run_dir.name),
         "created_at": run_metadata.get("created_at", ""),
+        "study_name": run_metadata.get("study_name") or training_config.get("study_name", ""),
+        "run_label": run_metadata.get("run_label") or training_config.get("run_label", ""),
         "experiment_name": run_metadata.get("experiment_name", run_dir.parent.name),
         "description": run_metadata.get("description", ""),
         "model_name": run_metadata.get(

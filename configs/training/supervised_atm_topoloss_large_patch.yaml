@@ -3,6 +3,8 @@
 # and validation sliding-window batch size change.
 
 experiment_name: supervised-atm-l20-cldice-w2-patch128
+study_name: atm-l20-supervised
+run_label: cldice-w2-p128
 description: "ATM'22 clDice-weight-2 model with 128^3 patches to test whether additional context reduces raw blobbiness and LCC reliance."
 seed: 15
 deterministic: true

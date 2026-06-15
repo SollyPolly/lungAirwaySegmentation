@@ -24,19 +24,19 @@ computes BD).
 
 Usage:
     # development (default): clDice-optimal op-point on val, reported on val
-    python -m scripts.analyse_distal --run-dir runs/<exp>/<run>
+    python -m scripts.analyse_distal --run-dir runs/<study>/<run>
 
     # widen the clDice candidate range (e.g. a heavily de-saturated model)
-    python -m scripts.analyse_distal --run-dir runs/<exp>/<run> --cldice-candidates 0.3,0.4,0.5,0.6,0.7
+    python -m scripts.analyse_distal --run-dir runs/<study>/<run> --cldice-candidates 0.3,0.4,0.5,0.6,0.7
 
     # FINAL sealed test table (frozen models only)
-    python -m scripts.analyse_distal --run-dir runs/<exp>/<run> --report-split test
+    python -m scripts.analyse_distal --run-dir runs/<study>/<run> --report-split test
 
     # fast cheap look (voxel-precision floor, no skeletonisation)
-    python -m scripts.analyse_distal --run-dir runs/<exp>/<run> --select-by voxel-precision
+    python -m scripts.analyse_distal --run-dir runs/<study>/<run> --select-by voxel-precision
 
     # fixed threshold, no selection
-    python -m scripts.analyse_distal --run-dir runs/<exp>/<run> --threshold 0.5 --select-split none
+    python -m scripts.analyse_distal --run-dir runs/<study>/<run> --threshold 0.5 --select-split none
 
 Use `--out distal_analysis__<tag>.json` to avoid clobbering across runs.
 """
@@ -464,7 +464,16 @@ def main() -> None:
         return ids if args.max_cases is None else ids[: args.max_cases]
 
     infer_kw = dict(device=device, roi_size=roi_size, overlap=args.overlap, sw_batch=args.sw_batch)
-    print(f"model: {metadata.get('experiment_name')}  | checkpoint {args.checkpoint}  | overlap {args.overlap}  | sw_batch {args.sw_batch}")
+    run_identity = " / ".join(
+        str(value)
+        for value in (
+            metadata.get("study_name"),
+            metadata.get("run_label"),
+            metadata.get("experiment_name"),
+        )
+        if value
+    )
+    print(f"model: {run_identity or run_dir.name}  | checkpoint {args.checkpoint}  | overlap {args.overlap}  | sw_batch {args.sw_batch}")
 
     if args.cases:
         report_cases, report_label = [c.strip() for c in args.cases.split(",") if c.strip()], "custom"
@@ -573,6 +582,8 @@ def main() -> None:
     out_path = Path(args.out) if Path(args.out).is_absolute() else run_dir / args.out
     out_path.write_text(json.dumps({
         "run": metadata.get("experiment_name"),
+        "study_name": metadata.get("study_name"),
+        "run_label": metadata.get("run_label"),
         "dataset": dataset_name,
         "overlap": args.overlap,
         "checkpoint": args.checkpoint,

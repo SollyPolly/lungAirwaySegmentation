@@ -105,6 +105,18 @@ def build_argument_parser(config_args: argparse.Namespace) -> argparse.ArgumentP
         help="Optional override for the experiment name stored in run metadata.",
     )
     parser.add_argument(
+        "--study-name",
+        type=str,
+        default=None,
+        help="Optional override for the stable study directory grouping.",
+    )
+    parser.add_argument(
+        "--run-label",
+        type=str,
+        default=None,
+        help="Optional override for the semantic run variant included in the directory name.",
+    )
+    parser.add_argument(
         "--run-description",
         type=str,
         default=None,
@@ -213,6 +225,10 @@ def build_resolved_training_config(
 
     if args.experiment_name is not None:
         resolved["experiment_name"] = args.experiment_name
+    if getattr(args, "study_name", None) is not None:
+        resolved["study_name"] = args.study_name
+    if getattr(args, "run_label", None) is not None:
+        resolved["run_label"] = args.run_label
     if args.num_epochs is not None:
         resolved["epochs"] = args.num_epochs
     if args.batch_size is not None:
@@ -310,6 +326,13 @@ def validate_model_config(model_config: dict) -> None:
 
 def validate_training_config(training_config: dict) -> None:
     """Validate the resolved training config before running experiments."""
+    for field_name in ("study_name", "run_label"):
+        if field_name in training_config and (
+            not isinstance(training_config[field_name], str)
+            or not training_config[field_name].strip()
+        ):
+            raise ValueError(f"{field_name} must be a non-empty string when provided.")
+
     training_regime = training_config["training_regime"]
     if training_regime not in {"patch", "full_volume"}:
         raise ValueError(f"Unsupported training_regime: {training_regime}")

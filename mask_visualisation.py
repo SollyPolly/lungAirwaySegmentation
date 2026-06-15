@@ -870,7 +870,10 @@ def _(
         }
 
     def preferred_prediction_run_name(run_names):
-        preferred_suffix = Path("baseline_unet_patches") / "20260417_232126"
+        preferred_suffix = (
+            Path("aeropath-supervised")
+            / "2026-04-17__23-21-26__baseline-p96-th05__baseline_unet"
+        )
         preferred_parts = preferred_suffix.parts
         for run_name in run_names:
             run_parts = Path(run_name).parts
@@ -961,6 +964,12 @@ def _(
         return {
             "run_dir": run_dir,
             "run_name": run_name,
+            "study_name": run_metadata.get("study_name")
+            or resolved_config.get("training", {}).get("study_name"),
+            "run_label": run_metadata.get("run_label")
+            or resolved_config.get("training", {}).get("run_label"),
+            "experiment_name": run_metadata.get("experiment_name")
+            or resolved_config.get("training", {}).get("experiment_name"),
             "dataset_name": dataset_name,
             "prediction_set_name": prediction_set_name,
             "prediction_mask_filename": prediction_mask_filename,
@@ -1626,6 +1635,9 @@ def _(
         )
 
         prediction_notes = [
+            f"- **Study**: `{prediction_bundle['study_name']}`" if prediction_bundle["study_name"] else "- **Study**: legacy run",
+            f"- **Variant**: `{prediction_bundle['run_label']}`" if prediction_bundle["run_label"] else "- **Variant**: legacy run",
+            f"- **Experiment**: `{prediction_bundle['experiment_name']}`" if prediction_bundle["experiment_name"] else "- **Experiment**: unavailable",
             f"- **Run**: {prediction_bundle['run_name']}",
             f"- **Dataset**: `{prediction_bundle['dataset_name']}`",
             f"- **Prediction set**: `{prediction_bundle['prediction_set_name']}`",

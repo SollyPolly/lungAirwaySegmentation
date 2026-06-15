@@ -11,6 +11,8 @@
 # fully-supervised upper bound.
 
 experiment_name: supervised-atm-l20
+study_name: atm-l20-supervised
+run_label: baseline-p96
 description: "Supervised ATM'22 baseline, 20 labelled cases. In-domain lower bound for the SSL ablation; AeroPath = OOD test."
 seed: 15
 epochs: 50
