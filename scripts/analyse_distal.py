@@ -304,13 +304,17 @@ def print_sweep(sweep, title):
               f"{r['prec_lcc']:>8.3f}  {r['lcc_retained_fraction']:>8.3f}")
 
 
-def print_candidates(candidate_means):
+def print_candidates(candidate_means, n_total=None):
     print("\n--- clDice candidate scan (+LCC) ---")
-    print(f"{'thresh':>7}  {'clDice':>8}  {'TPrec':>6}  {'TD':>6}  {'Dice':>6}")
+    print(f"{'thresh':>7}  {'clDice':>8}  {'TPrec':>6}  {'TD':>6}  {'Dice':>6}  {'n':>5}")
     for r in candidate_means:
         cl = f"{r['cldice_lcc']:.3f}" if r["cldice_lcc"] is not None else "gated"
         tp = f"{r['tprec_lcc']:.3f}" if r["tprec_lcc"] is not None else "—"
-        print(f"{r['threshold']:>7.2f}  {cl:>8}  {tp:>6}  {r['td_lcc']:>6.3f}  {r['dice_lcc']:>6.3f}")
+        # n = cases contributing to this candidate's clDice mean; < n_total means some
+        # were gated, so this candidate's mean is not comparable to fully-covered ones.
+        n = r.get("n_valid", "")
+        n_str = f"{n}/{n_total}" if n_total is not None else str(n)
+        print(f"{r['threshold']:>7.2f}  {cl:>8}  {tp:>6}  {r['td_lcc']:>6.3f}  {r['dice_lcc']:>6.3f}  {n_str:>5}")
 
 
 def run_split(model, dataset_name, data_config, hu_window, cases, *, device, roi_size, overlap, sw_batch,
@@ -506,10 +510,17 @@ def main() -> None:
         print_sweep(val_sweep, f"{args.select_split} sweep (mean over {len(sel_cases)} cases)")
         if args.select_by == "cldice":
             candidate_means = mean_candidates(sel_candidates, candidates)
-            print_candidates(candidate_means)
+            print_candidates(candidate_means, n_total=len(sel_cases))
             chosen_threshold, selection_reason, at_edge = select_by_cldice(candidate_means)
             if chosen_threshold is None:
                 raise SystemExit("clDice selection failed: " + selection_reason)
+            chosen_row = next((r for r in candidate_means if r["threshold"] == chosen_threshold), None)
+            n_valid = chosen_row.get("n_valid", len(sel_cases)) if chosen_row else len(sel_cases)
+            if n_valid < len(sel_cases):
+                print(f"\n[warn] selected threshold {chosen_threshold:.2f} was scored on only "
+                      f"{n_valid}/{len(sel_cases)} cases ({len(sel_cases) - n_valid} gated as "
+                      f"over-segmented); its clDice mean is not directly comparable to candidates "
+                      f"with full coverage. Inspect the 'n' column above before trusting this pick.")
             if at_edge:
                 print(f"\n[warn] clDice peak is at the edge of the evaluated candidates — the optimum "
                       f"may be beyond it. Re-run with a wider --cldice-candidates. (Candidates gated "
@@ -534,8 +545,13 @@ def main() -> None:
         report_sweeps, bin_probs = sel_sweeps, sel_bins
         table_rows = table_from_candidates(sel_cases, sel_candidates, chosen_threshold)
         for r in table_rows:
+            # clDice/TPrec are None for cases gated as over-segmented at this threshold;
+            # dice/td/prec are always computed. Print gated cells safely (a bare .3f on
+            # None raises TypeError and would lose the whole run before JSON save).
+            cl = f"{r['cldice_lcc']:.3f}" if r["cldice_lcc"] is not None else "gated"
+            tp = f"{r['tprec_lcc']:.3f}" if r["tprec_lcc"] is not None else "—"
             print(f"case {r['case_id']}: +LCC@{chosen_threshold:.2f}  Dice {r['dice_lcc']:.3f}  "
-                  f"TD {r['td_lcc']:.3f}  clDice {r['cldice_lcc']:.3f}  TPrec {r['tprec_lcc']:.3f}  Prec {r['prec_lcc']:.3f}")
+                  f"TD {r['td_lcc']:.3f}  clDice {cl}  TPrec {tp}  Prec {r['prec_lcc']:.3f}")
     elif reuse_voxel:
         print(f"\nreporting on {report_label} ({len(report_cases)} cases) at {chosen_threshold:.2f}, +LCC "
               "— reusing val inference (dev mode; clDice/BD omitted):")
