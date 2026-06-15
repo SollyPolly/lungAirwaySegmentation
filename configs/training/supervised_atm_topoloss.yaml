@@ -1,16 +1,16 @@
-# Supervised ATM'22 + topology/geometry loss stack. ACTIVE loss: cbDice w=2 (radius-aware
-# centerline-boundary Dice); clDice OFF. Switch the active loss by editing the `loss:` weights
-# below (one config, edited in place — keeps the PBS free of loss-weight overrides).
+# Supervised ATM'22 + topology/geometry loss stack. ACTIVE loss: HYBRID clDice w=2 + cbDice w=3
+# (radius-blind centerline recall + radius-aware wall fidelity, both on). Switch the active loss by
+# editing the `loss:` weights below (one config, edited in place — keeps the PBS free of overrides).
 # Identical to supervised_atm.yaml (same split/seed, so it is a paired comparison)
 # except for the added topology/geometry loss terms. Run with:
 #   --data-config configs/data/atm22.yaml
 # Compare against supervised-atm-l20 (0.609) on Dice AND distal recall / TD
 # (scripts/analyse_distal.py).
 
-experiment_name: supervised-atm-l20-cbdice-w2
+experiment_name: supervised-atm-l20-cldice-w2-cbdice-w3
 study_name: atm-l20-supervised
-run_label: cbdice-w2-p96
-description: "Supervised ATM'22 (20 labelled) + cbDice w=2 (radius-aware centerline-boundary Dice, Shi et al. MICCAI 2024), swapping out clDice. Tests whether radius-aware supervision cuts fat-wall over-segmentation vs clDice-w2 at equal topology weight."
+run_label: cldice-w2-cbdice-w3-p96
+description: "Supervised ATM'22 (20 labelled) + HYBRID clDice w=2 (radius-blind centerline recall) + cbDice w=3 (radius-aware centerline-boundary Dice, Shi et al. MICCAI 2024). Tests whether combining tree-recovering clDice with wall-tightening cbDice gives BOTH a complete distal tree AND thin walls — the gap each standalone run missed: cbDice-w2 (clean walls, but TD 0.42 vs clDice-w2's 0.61) and clDice-w2 (TD 0.61, but raw Dice 0.13 / heavy LCC reliance)."
 seed: 15
 # Reproducibility: seed Python/NumPy/torch + force deterministic cuDNN so the
 # paired baseline-vs-clDice comparison is not seed/autotuner noise. Costs some
@@ -59,21 +59,23 @@ loss:
   dice_weight: 1.0
   bce_weight: 1.0
   positive_class_weight: 10.0
-  # Topology/geometry loss — pick ONE active term by weight (set the other to 0).
-  # clDice (soft centerline Dice, radius-BLIND) — OFF here. Set cldice_weight>0 (cbdice 0)
-  # to run the clDice-w2 reference instead. cldice_iterations >= max airway radius (~10).
-  # Both terms NEED the warm-up: pure Dice+BCE for *_warmup_epochs, then ramp over
-  # *_rampup_epochs (the soft skeleton of an untrained model is noise).
-  cldice_weight: 0.0
+  # Topology/geometry loss — clDice and cbDice can run together (hybrid) or solo (set one to 0).
+  # clDice (soft centerline Dice, radius-BLIND) — ON at weight 2: recovers the distal tree
+  # (centerline recall). cldice_iterations >= max airway radius (~10). Both terms NEED the warm-up:
+  # pure Dice+BCE for *_warmup_epochs, then ramp over *_rampup_epochs (the soft skeleton of an
+  # untrained model is noise). clDice + cbDice share the same warm-up/ramp schedule below.
+  cldice_weight: 2.0
   cldice_iterations: 10
   cldice_warmup_epochs: 15
   cldice_rampup_epochs: 10
   # cbDice (centerline boundary Dice, Shi et al., MICCAI 2024; github.com/PengchengShi1220/cbDice)
   # — the RADIUS-AWARE variant of clDice: folds the distance transform (local radius) into the
   # centerline precision/sensitivity, adding the wall-thickness/calibre fidelity clDice lacks (the
-  # loss-level fix for fat distal tubes). ACTIVE at weight 2 (swaps out clDice). Warmed-up like
-  # clDice. NB: cbDice EDT runs on CPU (scipy) → slower per step than clDice.
-  cbdice_weight: 2.0
+  # loss-level fix for fat distal tubes). ON at weight 3 alongside clDice — slightly out-weights it
+  # because the wall over-segmentation is the harder residual. Warmed-up like clDice. NB: cbDice EDT
+  # runs on CPU (scipy) → slower per step; with clDice ALSO on, each batch now does both skeleton
+  # passes, so this hybrid is slower than the cbDice-w2-solo run (~7 h/8 h) — give the PBS walltime margin.
+  cbdice_weight: 3.0
   cbdice_iterations: 10
   cbdice_warmup_epochs: 15
   cbdice_rampup_epochs: 10
