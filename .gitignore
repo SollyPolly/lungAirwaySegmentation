@@ -8,6 +8,8 @@ __marimo__/
 *.out
 .codex_tmp/
 
+*.pbs
+
 /data/
 
 CT_FM_Feature_Extractor/
