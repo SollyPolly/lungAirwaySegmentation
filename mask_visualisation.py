@@ -1910,13 +1910,32 @@ def _(
                 annotation_text=f"op threshold {float(gt_confidence_threshold):.2f}",
                 annotation_position="top left",
             )
+        _gt_conf_run = (
+            prediction_bundle.get("run_label")
+            or prediction_bundle.get("experiment_name")
+            or prediction_bundle.get("run_name")
+        )
+        _gt_conf_provenance = (
+            f"run: {_gt_conf_run}"
+            f"  ·  set: {prediction_bundle.get('prediction_set_name') or '—'}"
+            f"  ·  case: {prediction_bundle.get('case_id')}"
+        )
         gt_confidence_curve_figure.update_layout(
-            title="Predicted confidence: true airway vs adjacent tissue, by distance to wall",
+            title=dict(
+                text=(
+                    "Predicted confidence: true airway vs adjacent tissue, by distance to wall"
+                    f"<br><span style='font-size:12px;color:#6c757d'>{_gt_conf_provenance}</span>"
+                ),
+                x=0.01,
+                xanchor="left",
+                y=0.97,
+                yanchor="top",
+            ),
             height=int(prediction_view_height_slider.value),
-            margin=dict(l=10, r=10, t=55, b=0),
+            margin=dict(l=10, r=10, t=84, b=0),
             yaxis=dict(title="P(airway)", range=[0, 1]),
             xaxis=dict(title="branch calibre (centreline radius, voxels)"),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1.0),
+            legend=dict(orientation="h", yanchor="bottom", y=1.04, xanchor="right", x=1.0),
             barmode="group",
             bargap=0.3,
             bargroupgap=0.08,

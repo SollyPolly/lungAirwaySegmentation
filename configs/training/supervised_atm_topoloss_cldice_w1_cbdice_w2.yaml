@@ -1,0 +1,59 @@
+# Supervised ATM'22 hybrid topology/geometry loss.
+# Wall-preserving hybrid: start closer to cbDice-w2 cleanliness and add moderate clDice tree pressure.
+
+experiment_name: supervised-atm-l20-cldice-w1-cbdice-w2
+study_name: atm-l20-supervised
+run_label: cldice-w1-cbdice-w2-p96
+description: "Supervised ATM'22 (20 labelled) + HYBRID clDice w=1 (moderate tree pressure) + cbDice w=2 (wall/calibre pressure). Tests whether cbDice-w2's cleaner shell/wall calibration can be preserved while recovering some TLD with a lighter clDice term."
+seed: 15
+deterministic: true
+epochs: 100
+training_regime: patch
+batch_size: 1
+num_workers: 4
+
+labelled_split:
+  test_count: 20
+  val_count: 20
+  labelled_count: 20
+
+sampling:
+  patch_size: [96, 96, 96]
+  patches_per_case: 4
+  foreground_probability: 0.7
+  cache_rate: 0.5
+
+validation:
+  validate_every: 5
+  roi_size: [96, 96, 96]
+  sw_batch_size: 4
+  inference_overlap: 0.5
+  threshold: 0.99
+
+optimizer:
+  name: adamw
+  lr: 0.0003
+  weight_decay: 0.00001
+
+scheduler:
+  name: cosine
+  warmup_epochs: 10
+
+amp:
+  enabled: true
+
+loss:
+  dice_weight: 1.0
+  bce_weight: 1.0
+  positive_class_weight: 10.0
+  cldice_weight: 1.0
+  cldice_iterations: 10
+  cldice_warmup_epochs: 15
+  cldice_rampup_epochs: 10
+  cbdice_weight: 2.0
+  cbdice_iterations: 10
+  cbdice_warmup_epochs: 15
+  cbdice_rampup_epochs: 10
+  topo_weight: 0.0
+  topo_warmup_epochs: 15
+  topo_rampup_epochs: 10
