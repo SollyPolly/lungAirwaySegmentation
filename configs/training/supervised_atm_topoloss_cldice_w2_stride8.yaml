@@ -1,0 +1,65 @@
+# Controlled stride-8 U-Net architecture ablation for the frozen clDice-w2 setup.
+# Pair this training config with:
+#   --model-config configs/model/baseline_unet_stride8.yaml
+#
+# Relative to the 96^3 clDice-w2 headline, the main architectural variable is
+# the U-Net downsampling depth. The stride-8 model also drops the deepest
+# 512-channel bottleneck stage; ATM split, patch size, optimiser, pos_weight,
+# and clDice loss settings stay matched.
+
+experiment_name: supervised-atm-l20-cldice-w2-stride8
+study_name: atm-l20-supervised
+run_label: cldice-w2-p96-stride8
+description: "Supervised ATM'22 (20 labelled) + clDice w=2 using a stride-8 U-Net that removes the deepest downsampling stage. Tests whether preserving higher-resolution bottleneck features improves thin distal topology versus the standard stride-16 U-Net."
+seed: 15
+deterministic: true
+epochs: 80
+training_regime: patch
+batch_size: 1
+num_workers: 4
+
+labelled_split:
+  test_count: 20
+  val_count: 20
+  labelled_count: 20
+
+sampling:
+  patch_size: [96, 96, 96]
+  patches_per_case: 4
+  foreground_probability: 0.7
+  cache_rate: 0.5
+
+validation:
+  validate_every: 5
+  roi_size: [96, 96, 96]
+  sw_batch_size: 4
+  inference_overlap: 0.5
+  threshold: 0.99
+
+optimizer:
+  name: adamw
+  lr: 0.0003
+  weight_decay: 0.00001
+
+scheduler:
+  name: cosine
+  warmup_epochs: 10
+
+amp:
+  enabled: true
+
+loss:
+  dice_weight: 1.0
+  bce_weight: 1.0
+  positive_class_weight: 10.0
+  cldice_weight: 2.0
+  cldice_iterations: 10
+  cldice_warmup_epochs: 15
+  cldice_rampup_epochs: 10
+  cbdice_weight: 0.0
+  cbdice_iterations: 10
+  cbdice_warmup_epochs: 15
+  cbdice_rampup_epochs: 10
+  topo_weight: 0.0
+  topo_warmup_epochs: 15
+  topo_rampup_epochs: 10

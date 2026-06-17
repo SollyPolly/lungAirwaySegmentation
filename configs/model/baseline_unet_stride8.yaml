@@ -1,0 +1,17 @@
+# Plain supervised baseline model with one fewer downsampling stage.
+#
+# Compared with baseline_unet.yaml, this removes the deepest stride-2 level:
+# 96^3 patches reach a 12^3 bottleneck instead of 6^3. This is a controlled
+# architecture ablation for preserving thin distal structure, not the default
+# model.
+
+model_name: baseline_unet
+spatial_dims: 3
+in_channels: 1
+out_channels: 1
+channels: [32, 64, 128, 256]
+strides: [2, 2, 2]
+num_res_units: 2
+dropout: 0.1
+norm: INSTANCE
+act: PRELU

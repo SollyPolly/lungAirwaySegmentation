@@ -22,3 +22,12 @@ an experiment from a saved config without editing Python code.
 The CLI is intentionally small and should only be used for explicit runtime
 overrides such as device selection, experiment naming, or short smoke-test
 changes.
+
+Example controlled architecture ablation:
+
+```powershell
+python scripts/train_baseline.py `
+  --data-config configs/data/atm22.yaml `
+  --model-config configs/model/baseline_unet_stride8.yaml `
+  --training-config configs/training/supervised_atm_topoloss_cldice_w2_stride8.yaml
+```
