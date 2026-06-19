@@ -1,0 +1,86 @@
+# Topology-filtered self-training on ATM'22 (single canonical config; vary via CLI).
+#
+# Stage 1 (once): generate + filter pseudo-labels for the 90 unlabelled cases
+#   python -m scripts.pseudo_label_atm --run-dir runs/atm-l20-supervised/<cl1+cb2> \
+#       --checkpoint topology --threshold 0.60
+# Stage 2: retrain the student on labelled (oversampled) + accepted pseudo cases
+#   python -m scripts.train_selftraining --data-config configs/data/atm22.yaml \
+#       --pseudo-label-dir runs/atm-l20-supervised/<cl1+cb2>/pseudo_labels \
+#       --init-checkpoint runs/atm-l20-supervised/<cl1+cb2>/best_topology_model.pt
+#
+# The loss is the cl1+cb2 recipe verbatim (clDice 1 + cbDice 2) so the student keeps
+# the labeller's wall calibration instead of drifting back to blobs. SSL is the data
+# lever for DISTAL TREE COMPLETENESS (TLD), not wall fidelity (a resolution floor).
+# NOTE: run with --data-config configs/data/atm22.yaml (the path-parser default is AeroPath).
+
+experiment_name: selftraining-atm-l20
+study_name: atm-l20-selftraining
+run_label: cldice-w1-cbdice-w2-pseudo060-p96
+description: "Topology-filtered self-training: cl1+cb2 pseudo-labels the 90 unlabelled ATM'22 cases (trachea-LCC, thr 0.60), then fine-tune (50 ep) on 20 labelled (oversampled) + accepted pseudo, warm-started from the labeller. Loss = cl1+cb2 recipe with topology losses ON from epoch 1 (no warm-up: the warm-started student already produces good skeletons; warming up would de-train its topology)."
+seed: 15
+deterministic: true
+epochs: 50
+training_regime: patch
+batch_size: 1
+num_workers: 4
+
+# Warm-start the student from the labeller's topology checkpoint (override via --init-checkpoint).
+init_checkpoint: runs/atm-l20-supervised/2026-06-17__01-52-31__cldice-w1-cbdice-w2-p96__baseline_unet/best_topology_model.pt
+
+# Self-training pool. pseudo_label_dir holds manifest.json (override via --pseudo-label-dir);
+# labelled_oversample duplicates each of the 20 trusted cases vs the larger pseudo pool.
+selftraining:
+  pseudo_label_dir: runs/atm-l20-supervised/2026-06-17__01-52-31__cldice-w1-cbdice-w2-p96__baseline_unet/pseudo_labels
+  labelled_oversample: 4
+
+labelled_split:
+  test_count: 20
+  val_count: 20
+  labelled_count: 20
+
+sampling:
+  patch_size: [96, 96, 96]
+  patches_per_case: 4
+  foreground_probability: 0.7
+  cache_rate: 0.5
+
+validation:
+  validate_every: 5
+  roi_size: [96, 96, 96]
+  sw_batch_size: 4
+  inference_overlap: 0.5
+  threshold: 0.99
+  # Skip the EDT-heavy soft-cbDice in full-volume validation (~87% of a cbDice run's
+  # walltime); hard-clDice topology checkpoint selection is unaffected.
+  compute_soft_cbdice: false
+
+optimizer:
+  name: adamw
+  lr: 0.0003
+  weight_decay: 0.00001
+
+scheduler:
+  name: cosine
+  warmup_epochs: 0          # warm-started: no LR warm-up needed
+
+amp:
+  enabled: true
+
+# Warm-started fine-tune: topology losses ON from epoch 1 (warm-up/ramp = 0). The
+# warm-up only exists to skip the noisy soft skeleton of an UNTRAINED model; the
+# student is already converged, so warming up would briefly de-train its topology.
+loss:
+  dice_weight: 1.0
+  bce_weight: 1.0
+  positive_class_weight: 10.0
+  cldice_weight: 1.0
+  cldice_iterations: 10
+  cldice_warmup_epochs: 0
+  cldice_rampup_epochs: 0
+  cbdice_weight: 2.0
+  cbdice_iterations: 10
+  cbdice_warmup_epochs: 0
+  cbdice_rampup_epochs: 0
+  topo_weight: 0.0
+  topo_warmup_epochs: 0
+  topo_rampup_epochs: 0

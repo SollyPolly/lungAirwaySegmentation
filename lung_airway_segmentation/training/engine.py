@@ -12,6 +12,7 @@ from lung_airway_segmentation.settings import RUNS_ROOT
 from lung_airway_segmentation.training.builders import (
     build_dataloaders,
     build_datasets,
+    build_selftraining_datasets,
     build_teacher,
     build_training_components,
     build_unlabelled_dataloader,
@@ -25,6 +26,7 @@ from lung_airway_segmentation.training.config import (
     resolve_device,
     resolve_project_path,
     validate_model_config,
+    validate_selftraining_training_config,
     validate_semisupervised_training_config,
     validate_training_config,
 )
@@ -86,6 +88,26 @@ def write_json(data, output_path):
         json.dump(data, file, indent=2)
 
 
+def load_accepted_pseudo_entries(pseudo_label_dir) -> tuple[list[dict], dict]:
+    """Read a pseudo-label manifest and return the accepted (case_id, mask_path) entries.
+
+    ``pseudo_label_dir`` is the directory written by ``scripts/pseudo_label_atm.py``
+    (contains ``manifest.json``). Returns ``(entries, manifest)`` where ``entries`` is
+    the list of accepted-case dicts and ``manifest`` is the full record for provenance.
+    """
+    manifest_path = resolve_project_path(pseudo_label_dir) / "manifest.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(
+            f"Pseudo-label manifest not found: {manifest_path}. "
+            "Run scripts/pseudo_label_atm.py first."
+        )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    entries = [case for case in manifest.get("cases", []) if case.get("accepted")]
+    if not entries:
+        raise ValueError(f"No accepted pseudo-labelled cases in {manifest_path}.")
+    return entries, manifest
+
+
 def slugify_run_component(value: str) -> str:
     """Convert one run-directory label to a safe readable slug."""
     value = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip())
@@ -143,7 +165,10 @@ def run_supervised_training(args: argparse.Namespace) -> None:
 
     resolved_training_config = build_resolved_training_config(training_config, args)
     validate_model_config(model_config)
-    validate_training_config(resolved_training_config)
+    if resolved_training_config.get("selftraining"):
+        validate_selftraining_training_config(resolved_training_config)
+    else:
+        validate_training_config(resolved_training_config)
 
     device = resolve_device(args.device)
     deterministic = bool(resolved_training_config.get("deterministic", True))
@@ -155,12 +180,41 @@ def run_supervised_training(args: argparse.Namespace) -> None:
     splits = resolve_case_splits(data_config, resolved_training_config)
     train_ids, val_ids, test_ids = splits["labelled_train"], splits["val"], splits["test"]
 
-    train_dataset, val_dataset = build_datasets(
-        train_ids,
-        val_ids,
-        data_config,
-        resolved_training_config,
-    )
+    # Self-training branch: mix the labelled cases with accepted pseudo-labelled
+    # cases (topology-filtered). Absent the `selftraining` block this is a no-op and
+    # the run is an ordinary supervised one — so existing configs are unchanged.
+    selftraining_config = resolved_training_config.get("selftraining")
+    selftraining_metadata = None
+    if selftraining_config:
+        pseudo_entries, pseudo_manifest = load_accepted_pseudo_entries(
+            selftraining_config["pseudo_label_dir"]
+        )
+        labelled_oversample = int(selftraining_config.get("labelled_oversample", 1))
+        train_dataset, val_dataset = build_selftraining_datasets(
+            train_ids,
+            val_ids,
+            pseudo_entries,
+            data_config,
+            resolved_training_config,
+            labelled_oversample=labelled_oversample,
+        )
+        selftraining_metadata = {
+            "pseudo_label_dir": str(resolve_project_path(selftraining_config["pseudo_label_dir"])),
+            "labelled_oversample": labelled_oversample,
+            "labeller_run": pseudo_manifest.get("labeller_run"),
+            "labeller_checkpoint": pseudo_manifest.get("checkpoint"),
+            "pseudo_threshold": pseudo_manifest.get("threshold"),
+            "n_pseudo_accepted": len(pseudo_entries),
+            "n_pseudo_total": pseudo_manifest.get("n_total"),
+            "pseudo_case_ids": [str(entry["case_id"]) for entry in pseudo_entries],
+        }
+    else:
+        train_dataset, val_dataset = build_datasets(
+            train_ids,
+            val_ids,
+            data_config,
+            resolved_training_config,
+        )
     train_loader, val_loader = build_dataloaders(
         train_dataset,
         val_dataset,
@@ -174,6 +228,28 @@ def run_supervised_training(args: argparse.Namespace) -> None:
         model_config,
         resolved_training_config,
     )
+
+    # Optional warm-start (self-training): load a converged supervised checkpoint
+    # into the model so the student begins from the labeller rather than scratch.
+    # The optimizer keeps in-place references to the model parameters, so loading
+    # after build_training_components is safe and optimizer state stays fresh.
+    init_checkpoint = resolved_training_config.get("init_checkpoint")
+    init_checkpoint_info = None
+    if init_checkpoint:
+        init_checkpoint_path = resolve_project_path(init_checkpoint)
+        if not init_checkpoint_path.is_file():
+            raise FileNotFoundError(f"init_checkpoint does not exist: {init_checkpoint_path}")
+        checkpoint_payload = torch.load(init_checkpoint_path, map_location=device)
+        model.load_state_dict(checkpoint_payload["model_state"])
+        init_checkpoint_info = {
+            "path": str(init_checkpoint_path),
+            "epoch": checkpoint_payload.get("epoch"),
+        }
+        print(
+            f"Warm-started model from {init_checkpoint_path} "
+            f"(checkpoint epoch {checkpoint_payload.get('epoch')})"
+        )
+
     use_amp = bool(resolved_training_config.get("amp", {}).get("enabled", False)) and device.type == "cuda"
     scaler = torch.amp.GradScaler(device.type, enabled=use_amp)
 
@@ -276,6 +352,8 @@ def run_supervised_training(args: argparse.Namespace) -> None:
             "val_case_ids": val_ids,
             "test_case_ids": test_ids,
         },
+        "init_checkpoint": init_checkpoint_info,
+        "selftraining": selftraining_metadata,
     }
     initialize_run_artifacts(run_dir, run_metadata, resolved_config_artifact)
 
@@ -354,7 +432,13 @@ def run_supervised_training(args: argparse.Namespace) -> None:
                 compute_topology=(epoch + 1) > topology_metrics_warmup_epochs,
                 topology_threshold=topology_threshold,
                 topology_max_ratio=topology_max_ratio,
-                compute_soft_cbdice=max_cbdice_weight > 0.0,
+                # Soft cbDice on full val volumes is EDT-heavy (~87% of a cbDice run's
+                # walltime). Default: compute it iff cbDice is active; set
+                # validation.compute_soft_cbdice: false to skip it (hard-clDice topology
+                # selection is unaffected) and cut a cbDice run ~11h -> ~2h.
+                compute_soft_cbdice=bool(
+                    validation_config.get("compute_soft_cbdice", max_cbdice_weight > 0.0)
+                ),
             )
             # Wall-clock of the whole validation pass (incl. the new raw
             # skeletonisation) — written to history.json each validation so the
@@ -493,6 +577,20 @@ def run_supervised_training(args: argparse.Namespace) -> None:
     print(f"Best epoch: {best_epoch}")
     print(f"Best val clDice@0.5 (topology): {best_val_cldice:.4f}")
     print(f"Best topology epoch: {best_topology_epoch}")
+
+
+def run_selftraining_training(args: argparse.Namespace) -> None:
+    """Run topology-filtered self-training.
+
+    Self-training is the supervised patch loop over a combined dataset of the
+    labelled cases (oversampled) plus accepted pseudo-labelled unlabelled cases,
+    optionally warm-started from the labeller. All of that is driven by the
+    resolved config's ``selftraining`` block + ``init_checkpoint`` (populated from
+    the training YAML and the CLI in build_resolved_training_config), so the
+    supervised runner already does the work — including the three-checkpoint
+    topology-aware selection and the clDice/cbDice warm-up ramps.
+    """
+    run_supervised_training(args)
 
 
 def run_semisupervised_training(args: argparse.Namespace) -> None:

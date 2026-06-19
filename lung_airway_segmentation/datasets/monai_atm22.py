@@ -135,6 +135,44 @@ def build_monai_atm22_dataset(
     )
 
 
+def build_monai_atm22_selftraining_dataset(
+        records,
+        *,
+        patch_size: tuple[int, int, int],
+        patches_per_case: int,
+        foreground_probability: float,
+        cache_rate: float = 0.0,
+        hu_window: tuple[float, float] = DEFAULT_HU_WINDOW,
+) -> Dataset:
+    """Build a labelled-style train dataset from explicit CT + mask records.
+
+    Used for topology-filtered self-training: ``records`` mixes real labelled
+    cases (``airway_mask`` = the ground-truth file, optionally duplicated to
+    up-weight them) with accepted pseudo-labelled cases (``airway_mask`` = a
+    generated pseudo-mask file). Pseudo-masks are treated exactly like real masks
+    (hard labels), so the supervised ``build_atm22_labelled_transforms`` pipeline
+    is reused unchanged.
+    """
+    if not 0.0 <= cache_rate <= 1.0:
+        raise ValueError("cache_rate must be between 0.0 and 1.0.")
+    if not records:
+        raise ValueError("build_monai_atm22_selftraining_dataset received no records.")
+
+    dataset_class = CacheDataset if cache_rate > 0.0 else Dataset
+    cache_kwargs = {"cache_rate": cache_rate} if cache_rate > 0.0 else {}
+
+    return dataset_class(
+        data=list(records),
+        transform=build_atm22_labelled_transforms(
+            patch_size=patch_size,
+            patches_per_case=patches_per_case,
+            foreground_probability=foreground_probability,
+            hu_window=hu_window,
+        ),
+        **cache_kwargs,
+    )
+
+
 def build_atm22_labelled_transforms(
         *,
         patch_size: tuple[int, int, int],

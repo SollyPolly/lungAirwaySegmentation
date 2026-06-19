@@ -15,6 +15,7 @@ DEFAULT_ATM22_CONFIG = CONFIG_ROOT / "data" / "atm22.yaml"
 DEFAULT_MODEL_CONFIG = CONFIG_ROOT / "model" / "baseline_unet.yaml"
 DEFAULT_TRAINING_CONFIG = CONFIG_ROOT / "training" / "baseline.yaml"
 DEFAULT_SEMISUPERVISED_TRAINING_CONFIG = CONFIG_ROOT / "training" / "mean_teacher_atm.yaml"
+DEFAULT_SELFTRAINING_TRAINING_CONFIG = CONFIG_ROOT / "training" / "selftraining_atm.yaml"
 
 
 def build_config_path_parser() -> argparse.ArgumentParser:
@@ -51,6 +52,13 @@ def build_semisupervised_config_path_parser() -> argparse.ArgumentParser:
         default=DEFAULT_ATM22_CONFIG,
         help="Path to the unlabeled ATM'22 dataset YAML config.",
     )
+    return parser
+
+
+def build_selftraining_config_path_parser() -> argparse.ArgumentParser:
+    """Build the lightweight parser used to locate self-training configs."""
+    parser = build_config_path_parser()
+    parser.set_defaults(training_config=DEFAULT_SELFTRAINING_TRAINING_CONFIG)
     return parser
 
 
@@ -216,6 +224,36 @@ def build_semisupervised_argument_parser(
     return parser
 
 
+def build_selftraining_argument_parser(
+    config_args: argparse.Namespace,
+) -> argparse.ArgumentParser:
+    """Build the self-training CLI while preserving baseline runtime overrides."""
+    parser = build_argument_parser(config_args)
+    parser.description = "Train the topology-filtered self-training model from YAML configs."
+    parser.add_argument(
+        "--pseudo-label-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Directory of generated pseudo-labels (contains manifest.json), written "
+            "by scripts/pseudo_label_atm.py. Overrides selftraining.pseudo_label_dir."
+        ),
+    )
+    parser.add_argument(
+        "--labelled-oversample",
+        type=int,
+        default=None,
+        help="How many times to duplicate each real labelled case vs the pseudo pool. Overrides selftraining.labelled_oversample.",
+    )
+    parser.add_argument(
+        "--init-checkpoint",
+        type=Path,
+        default=None,
+        help="Optional checkpoint to warm-start the student (e.g. the labeller's best_topology_model.pt). Overrides init_checkpoint.",
+    )
+    return parser
+
+
 def build_resolved_training_config(
     base_training_config: dict,
     args: argparse.Namespace,
@@ -251,6 +289,10 @@ def build_resolved_training_config(
         resolved["batch_size_unlabelled"] = args.batch_size_unlabelled
     if getattr(args, "init_checkpoint", None) is not None:
         resolved["init_checkpoint"] = str(args.init_checkpoint)
+    if getattr(args, "pseudo_label_dir", None) is not None:
+        resolved.setdefault("selftraining", {})["pseudo_label_dir"] = str(args.pseudo_label_dir)
+    if getattr(args, "labelled_oversample", None) is not None:
+        resolved.setdefault("selftraining", {})["labelled_oversample"] = int(args.labelled_oversample)
 
     return resolved
 
@@ -483,6 +525,30 @@ def validate_semisupervised_training_config(training_config: dict) -> None:
 
     if float(training_config["loss"]["consistency_weight"]) < 0.0:
         raise ValueError("loss.consistency_weight must be non-negative.")
+
+
+def validate_selftraining_training_config(training_config: dict) -> None:
+    """Validate topology-filtered self-training settings on top of the baseline ones."""
+    validate_training_config(training_config)
+
+    if training_config["training_regime"] != "patch":
+        raise ValueError("Self-training currently requires training_regime = 'patch'.")
+
+    selftraining = training_config.get("selftraining")
+    if not isinstance(selftraining, dict) or not selftraining.get("pseudo_label_dir"):
+        raise ValueError(
+            "Self-training requires a 'selftraining.pseudo_label_dir' (set it in the "
+            "training config or pass --pseudo-label-dir)."
+        )
+    if int(selftraining.get("labelled_oversample", 1)) < 1:
+        raise ValueError("selftraining.labelled_oversample must be >= 1.")
+
+    manifest_path = resolve_project_path(selftraining["pseudo_label_dir"]) / "manifest.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(
+            f"Pseudo-label manifest not found: {manifest_path}. "
+            "Run scripts/pseudo_label_atm.py before self-training."
+        )
 
 
 def resolve_device(device_name: str) -> torch.device:

@@ -1,0 +1,86 @@
+# Mean Teacher REVISIT — does a higher-precision teacher + corrected EMA rescue MT?
+#
+# The two prior MT runs settled into a ~0.50 val basin below the 0.609 supervised
+# optimum (confirmation bias: confidence-masked MSE reinforces a leaky teacher's own
+# false positives). Two things plausibly drove that and are fixed here:
+#   1. ema_decay 0.99 -> 0.999. At 0.99 the teacher tracks the student too fast
+#      (~100-step window) to be a stable target, accelerating confirmation bias.
+#   2. The teacher was a leaky supervised baseline. Warm-start from cl1+cb2 instead
+#      (TPrec ~0.90) so the teacher's confident voxels are mostly true -> the
+#      confirmation-bias fuel (confident false positives) is starved.
+#
+# Config-only (no code changes): the engine MT path already supports warm-start, EMA,
+# and the consistency rampup. Loss stays BCE+Dice (the MT loop has no clDice warm-up
+# ramp); a topology student is a follow-up only if this is promising.
+#
+# Run:
+#   python -m scripts.train_semisupervised \
+#     --data-config configs/data/atm22.yaml --atm22-config configs/data/atm22.yaml \
+#     --training-config configs/training/mean_teacher_atm_cl1cb2_revisit.yaml \
+#     --init-checkpoint runs/atm-l20-supervised/<cl1+cb2>/best_topology_model.pt
+#
+# Outcome is a result either way: rescued => MT was under-tuned + needed a clean
+# teacher; still degrades => confirmation bias is structural, reinforcing the
+# self-training pivot. To probe the consistency strength, edit loss.consistency_weight
+# (try 0.1 and 1.0) -- isolate that from the EMA/teacher-quality change above.
+
+experiment_name: mean-teacher-atm-l20
+study_name: atm-l20-mean-teacher
+run_label: cl1cb2-warmstart-ema999-revisit
+description: "Mean Teacher revisit: warm-start from cl1+cb2 (high-precision teacher), ema_decay 0.999, no warm-up. Tests whether MT's negative result was under-tuning + a leaky teacher rather than a structural failure."
+seed: 15
+epochs: 40
+training_regime: patch
+batch_size: 1
+batch_size_unlabelled: 1
+num_workers: 4
+
+# Warm-start both student and teacher from the cl1+cb2 topology checkpoint.
+# Override on the CLI with --init-checkpoint; teacher = EMA copy from epoch 1.
+init_checkpoint: runs/atm-l20-supervised/2026-06-17__01-52-31__cldice-w1-cbdice-w2-p96__baseline_unet/best_topology_model.pt
+
+labelled_split:
+  test_count: 20
+  val_count: 20
+  labelled_count: 20
+
+teacher:
+  ema_decay: 0.999          # was 0.99 — the likely culprit
+  warm_start_epochs: 0      # teacher is already good (warm-started)
+  consistency_rampup_epochs: 5
+  foreground_confidence_threshold: 0.80
+  background_confidence_threshold: 0.20
+
+sampling:
+  patch_size: [96, 96, 96]
+  patches_per_case: 4
+  foreground_probability: 0.7
+  cache_rate: 0.5
+
+unlabelled_sampling:
+  cache_rate: 0.0
+
+validation:
+  validate_every: 5
+  roi_size: [96, 96, 96]
+  sw_batch_size: 4
+  inference_overlap: 0.5
+  threshold: 0.99
+
+optimizer:
+  name: adamw
+  lr: 0.0001                # small LR for warm-start fine-tuning
+  weight_decay: 0.00001
+
+scheduler:
+  name: cosine
+  warmup_epochs: 0
+
+amp:
+  enabled: true
+
+loss:
+  dice_weight: 1.0
+  bce_weight: 1.0
+  positive_class_weight: 10.0
+  consistency_weight: 1.0

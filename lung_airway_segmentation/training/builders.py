@@ -4,12 +4,16 @@ import copy
 
 import torch
 import torch.nn as nn
-from monai.data import DataLoader, list_data_collate
+from monai.data import CacheDataset, DataLoader, Dataset, list_data_collate
 
 from lung_airway_segmentation.datasets.monai_atm22 import (
+    build_atm22_labelled_records,
+    build_atm22_labelled_val_transforms,
     build_monai_atm22_dataset,
     build_monai_atm22_labelled_datasets,
+    build_monai_atm22_selftraining_dataset,
 )
+from lung_airway_segmentation.io.atm22_layout import resolve_case_paths
 from lung_airway_segmentation.datasets.monai_aeropath import (
     build_monai_aeropath_datasets,
     build_monai_aeropath_full_volume_datasets,
@@ -220,6 +224,91 @@ def build_datasets(
         crop_margin_voxels=crop_margin_voxels,
         hu_window=hu_window,
     )
+
+
+def build_selftraining_records(
+    labelled_ids,
+    pseudo_entries,
+    *,
+    batch_root,
+    labelled_oversample: int = 1,
+):
+    """Assemble combined CT+mask records for topology-filtered self-training.
+
+    Real labelled cases (ground-truth masks) are duplicated ``labelled_oversample``
+    times so the 20 trusted cases stay influential against the larger pseudo pool;
+    each accepted pseudo case contributes one record whose ``airway_mask`` points at
+    its generated pseudo-mask file (``pseudo_entries`` = manifest ``cases`` with
+    ``accepted`` true, each carrying ``case_id`` and ``mask_path``). The CT for a
+    pseudo case is the same native ATM'22 file the real pipeline reads.
+    """
+    if labelled_oversample < 1:
+        raise ValueError("labelled_oversample must be >= 1.")
+
+    labelled_records = build_atm22_labelled_records(labelled_ids, batch_root=batch_root)
+    records = list(labelled_records) * int(labelled_oversample)
+
+    for entry in pseudo_entries:
+        case_id = str(entry["case_id"])
+        mask_path = entry["mask_path"]
+        if not mask_path:
+            raise ValueError(f"Accepted pseudo case {case_id} has no mask_path in the manifest.")
+        paths = resolve_case_paths(case_id, batch_root=batch_root)
+        records.append({
+            "case_id": case_id,
+            "image": str(paths["ct"]),
+            "airway_mask": str(mask_path),
+        })
+
+    return records
+
+
+def build_selftraining_datasets(
+    labelled_ids,
+    val_ids,
+    pseudo_entries,
+    data_config: dict,
+    training_config: dict,
+    *,
+    labelled_oversample: int = 1,
+):
+    """Build the combined self-training train dataset and the real-labelled val dataset."""
+    if str(data_config["dataset_name"]).lower() != "atm22":
+        raise ValueError("Self-training currently supports only the ATM'22 dataset.")
+    if training_config["training_regime"] != "patch":
+        raise ValueError("Self-training currently supports only training_regime = 'patch'.")
+
+    batch_root = resolve_project_path(data_config["batch_root"])
+    sampling = training_config["sampling"]
+    hu_window = tuple(float(value) for value in data_config["preprocessing"]["hu_window"])
+    cache_rate = float(sampling["cache_rate"])
+
+    train_records = build_selftraining_records(
+        labelled_ids,
+        pseudo_entries,
+        batch_root=batch_root,
+        labelled_oversample=int(labelled_oversample),
+    )
+    train_dataset = build_monai_atm22_selftraining_dataset(
+        train_records,
+        patch_size=tuple(int(value) for value in sampling["patch_size"]),
+        patches_per_case=int(sampling["patches_per_case"]),
+        foreground_probability=float(sampling["foreground_probability"]),
+        cache_rate=cache_rate,
+        hu_window=hu_window,
+    )
+
+    # Validation stays on the real labelled val set (full-volume transforms).
+    val_records = build_atm22_labelled_records(val_ids, batch_root=batch_root)
+    dataset_class = CacheDataset if cache_rate > 0.0 else Dataset
+    cache_kwargs = {"cache_rate": cache_rate} if cache_rate > 0.0 else {}
+    val_dataset = dataset_class(
+        data=val_records,
+        transform=build_atm22_labelled_val_transforms(hu_window=hu_window),
+        **cache_kwargs,
+    )
+
+    return train_dataset, val_dataset
 
 
 def build_dataloaders(

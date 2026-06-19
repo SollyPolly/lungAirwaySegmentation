@@ -282,15 +282,29 @@ def select_by_voxel_precision(sweep, precision_floor):
     return float(best["threshold"]), reason
 
 
-def select_by_cldice(candidate_means):
-    """Threshold with max mean clDice among non-gated candidates; flag edge peaks."""
+def select_by_cldice(candidate_means, n_total=None):
+    """Threshold with max mean clDice among comparable candidates; flag edge peaks.
+
+    If at least one candidate has full case coverage, ignore partial-coverage
+    candidates. Their clDice means exclude gated cases, so they are not directly
+    comparable to fully covered thresholds.
+    """
     valid = [r for r in candidate_means if r["cldice_lcc"] is not None]
     if not valid:
         return None, "all clDice candidates gated as over-segmented — lower the candidate range or raise --cldice-max-ratio", False
-    best = max(valid, key=lambda r: r["cldice_lcc"])
-    valid_thresholds = [r["threshold"] for r in valid]
+    selectable = valid
+    coverage_note = ""
+    if n_total is not None:
+        complete = [r for r in valid if r.get("n_valid", n_total) == n_total]
+        if complete:
+            selectable = complete
+            coverage_note = " with full case coverage"
+        else:
+            coverage_note = "; no candidate had full case coverage"
+    best = max(selectable, key=lambda r: r["cldice_lcc"])
+    valid_thresholds = [r["threshold"] for r in selectable]
     at_edge = len(valid_thresholds) > 1 and best["threshold"] in (min(valid_thresholds), max(valid_thresholds))
-    reason = f"max clDice over candidates {[r['threshold'] for r in candidate_means]}"
+    reason = f"max clDice{coverage_note} over candidates {[r['threshold'] for r in candidate_means]}"
     return float(best["threshold"]), reason, at_edge
 
 
@@ -511,7 +525,7 @@ def main() -> None:
         if args.select_by == "cldice":
             candidate_means = mean_candidates(sel_candidates, candidates)
             print_candidates(candidate_means, n_total=len(sel_cases))
-            chosen_threshold, selection_reason, at_edge = select_by_cldice(candidate_means)
+            chosen_threshold, selection_reason, at_edge = select_by_cldice(candidate_means, n_total=len(sel_cases))
             if chosen_threshold is None:
                 raise SystemExit("clDice selection failed: " + selection_reason)
             chosen_row = next((r for r in candidate_means if r["threshold"] == chosen_threshold), None)
