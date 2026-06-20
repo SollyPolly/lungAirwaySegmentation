@@ -42,7 +42,11 @@ sampling:
   patch_size: [96, 96, 96]
   patches_per_case: 4
   foreground_probability: 0.7
-  cache_rate: 0.5
+  # Self-training mixes 20 labelled x4 oversample + 90 pseudo = 170 records; at
+  # cache_rate 0.5 that caches ~85 full CT volumes (+ duplicated labelled cases
+  # cached redundantly) -> OOM-killed at 96 GB (exit 137). Disabled: load from
+  # disk each epoch (num_workers hides the I/O). Raise to ~0.1 only if disk-bound.
+  cache_rate: 0.0
 
 validation:
   validate_every: 5
