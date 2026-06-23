@@ -18,8 +18,20 @@ import torch.nn.functional as F
 
 
 def soft_erode(image: torch.Tensor) -> torch.Tensor:
-    """3D soft erosion: min-pool implemented as a negated max-pool."""
-    return -F.max_pool3d(-image, kernel_size=3, stride=1, padding=1)
+    """Reference 3D clDice erosion using three directional min-pools.
+
+    A full ``3x3x3`` min-pool over-erodes diagonal neighbours and leaves a thick
+    morphological remnant instead of the intended centreline. The reference clDice
+    implementation erodes independently along each spatial axis and takes the
+    minimum of those responses.
+    """
+    if image.ndim != 5:
+        raise ValueError(f"soft_erode expects a 5D (B,C,D,H,W) tensor, got {tuple(image.shape)}.")
+
+    depth = -F.max_pool3d(-image, kernel_size=(3, 1, 1), stride=1, padding=(1, 0, 0))
+    height = -F.max_pool3d(-image, kernel_size=(1, 3, 1), stride=1, padding=(0, 1, 0))
+    width = -F.max_pool3d(-image, kernel_size=(1, 1, 3), stride=1, padding=(0, 0, 1))
+    return torch.minimum(torch.minimum(depth, height), width)
 
 
 def soft_dilate(image: torch.Tensor) -> torch.Tensor:
@@ -129,22 +141,77 @@ class SoftClDiceLoss(nn.Module):
 # ===========================================================================
 
 
-def _edt_per_sample(binary_mask: torch.Tensor) -> torch.Tensor:
-    """Per-sample 3D Euclidean distance transform (distance to boundary = radius).
+def _normalise_voxel_spacing(
+    voxel_spacing,
+    *,
+    batch_size: int,
+    spatial_dims: int,
+):
+    """Return positive per-sample spacing with shape ``(B, spatial_dims)``.
+
+    ``MetaTensor.pixdim`` is a tensor for one sample and a list of tensors after
+    MONAI collation, so both forms are accepted alongside ordinary tuples/arrays.
+    ``None`` intentionally means unit spacing for plain tensors and legacy callers.
+    """
+    import numpy as np
+
+    if voxel_spacing is None:
+        return np.ones((batch_size, spatial_dims), dtype=np.float64)
+
+    if isinstance(voxel_spacing, (list, tuple)) and voxel_spacing and any(
+        torch.is_tensor(value) for value in voxel_spacing
+    ):
+        spacing = np.stack(
+            [torch.as_tensor(value).detach().cpu().numpy() for value in voxel_spacing]
+        )
+    elif torch.is_tensor(voxel_spacing):
+        spacing = voxel_spacing.detach().cpu().numpy()
+    else:
+        spacing = np.asarray(voxel_spacing)
+
+    spacing = np.asarray(spacing, dtype=np.float64)
+    if spacing.ndim == 1:
+        if spacing.shape[0] != spatial_dims:
+            raise ValueError(
+                f"voxel_spacing must contain {spatial_dims} values, got shape {spacing.shape}."
+            )
+        spacing = np.repeat(spacing[None, :], batch_size, axis=0)
+    elif spacing.shape != (batch_size, spatial_dims):
+        raise ValueError(
+            "voxel_spacing must have shape "
+            f"({spatial_dims},) or ({batch_size}, {spatial_dims}), got {spacing.shape}."
+        )
+
+    if not np.isfinite(spacing).all() or (spacing <= 0).any():
+        raise ValueError("voxel_spacing values must be finite and positive.")
+    return spacing
+
+
+def _edt_per_sample(binary_mask: torch.Tensor, voxel_spacing=None) -> torch.Tensor:
+    """Per-sample physical Euclidean distance transform.
 
     ``binary_mask`` is (B, D, H, W) in {0, 1}; returns the same shape/device. Used as
-    a fixed (non-differentiable) radius weight, so it runs on CPU via scipy — swap in
-    MONAI/cucim ``distance_transform_edt`` for a GPU speed-up if it becomes a bottleneck.
+    a fixed (non-differentiable) radius weight, so it runs on CPU via scipy. Spacing
+    may be one ``(D,H,W)`` tuple or one tuple per batch item; distances are then in
+    physical units. Plain tensors default explicitly to unit spacing.
     """
     import numpy as np
     from scipy import ndimage
 
     array = binary_mask.detach().cpu().numpy().astype(bool)
+    spacing = _normalise_voxel_spacing(
+        voxel_spacing,
+        batch_size=array.shape[0],
+        spatial_dims=array.ndim - 1,
+    )
     out = np.zeros(array.shape, dtype=np.float32)
     for index in range(array.shape[0]):
         if array[index].any():
-            out[index] = ndimage.distance_transform_edt(array[index])
-    return torch.from_numpy(out).to(binary_mask.device)
+            out[index] = ndimage.distance_transform_edt(
+                array[index],
+                sampling=tuple(float(value) for value in spacing[index]),
+            )
+    return torch.from_numpy(out).to(device=binary_mask.device, dtype=binary_mask.dtype)
 
 
 def _cbdice_combine_tensors(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
@@ -162,7 +229,12 @@ def _cbdice_combine_tensors(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor) -
     return combined
 
 
-def _cbdice_get_weights(mask_soft: torch.Tensor, skel_soft: torch.Tensor, dim: int):
+def _cbdice_get_weights(
+    mask_soft: torch.Tensor,
+    skel_soft: torch.Tensor,
+    dim: int,
+    voxel_spacing=None,
+):
     """Radius-normalised (distance, skeleton-radius, thin-branch-importance) maps.
 
     Mirrors the repo ``get_weights``. ``mask_soft``/``skel_soft`` are soft for the
@@ -174,7 +246,7 @@ def _cbdice_get_weights(mask_soft: torch.Tensor, skel_soft: torch.Tensor, dim: i
     skel_hard = (skel_soft > 0.5).float()
 
     with torch.no_grad():
-        distances = _edt_per_sample(mask_hard) * mask_hard
+        distances = _edt_per_sample(mask_hard, voxel_spacing=voxel_spacing) * mask_hard
         skel_radius = distances * skel_hard
 
         dist_map_norm = torch.zeros_like(distances)
@@ -200,12 +272,15 @@ def soft_cbdice_loss(
     targets: torch.Tensor,
     iterations: int = 10,
     smooth: float = 1.0,
+    voxel_spacing=None,
 ) -> torch.Tensor:
     """Return ``1 - soft cbDice`` (centerline boundary Dice), averaged over the batch.
 
     ``probabilities`` and ``targets`` are (B, 1, D, H, W) in [0, 1]
     (probabilities = sigmoid(logits); targets = binary mask). Radius-aware centerline
-    Dice — see the reference/idea note above (Shi et al., MICCAI 2024).
+    Dice — see the reference/idea note above (Shi et al., MICCAI 2024). When
+    ``voxel_spacing`` is omitted and ``targets`` is a MONAI ``MetaTensor``, spacing
+    is read from ``targets.pixdim``; plain tensors use unit spacing.
     """
     if probabilities.shape != targets.shape:
         raise ValueError(
@@ -216,6 +291,9 @@ def soft_cbdice_loss(
         raise ValueError(
             f"soft_cbdice_loss expects 5D (B,1,D,H,W) tensors, got {tuple(probabilities.shape)}."
         )
+
+    if voxel_spacing is None:
+        voxel_spacing = getattr(targets, "pixdim", None)
 
     dim = 3
     pred_prob = probabilities[:, 0]  # (B, D, H, W); carries the gradient
@@ -230,8 +308,12 @@ def soft_cbdice_loss(
 
     skel_pred_prob = skel_pred_hard * pred_prob  # gradient via pred_prob
 
-    q_vl, q_slvl, q_sl = _cbdice_get_weights(true_mask, skel_true, dim)
-    q_vp, q_spvp, q_sp = _cbdice_get_weights(pred_prob, skel_pred_prob, dim)
+    q_vl, q_slvl, q_sl = _cbdice_get_weights(
+        true_mask, skel_true, dim, voxel_spacing=voxel_spacing
+    )
+    q_vp, q_spvp, q_sp = _cbdice_get_weights(
+        pred_prob, skel_pred_prob, dim, voxel_spacing=voxel_spacing
+    )
 
     w_tprec = (torch.sum(q_sp * q_vl) + smooth) / (
         torch.sum(_cbdice_combine_tensors(q_spvp, q_slvl, q_sp)) + smooth
@@ -252,8 +334,19 @@ class SoftCbDiceLoss(nn.Module):
         self.iterations = int(iterations)
         self.smooth = float(smooth)
 
-    def forward(self, probabilities: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        return soft_cbdice_loss(probabilities, targets.float(), self.iterations, self.smooth)
+    def forward(
+        self,
+        probabilities: torch.Tensor,
+        targets: torch.Tensor,
+        voxel_spacing=None,
+    ) -> torch.Tensor:
+        return soft_cbdice_loss(
+            probabilities,
+            targets.float(),
+            self.iterations,
+            self.smooth,
+            voxel_spacing=voxel_spacing,
+        )
 
 
 # ===========================================================================

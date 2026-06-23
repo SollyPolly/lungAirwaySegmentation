@@ -72,7 +72,14 @@ class CombinedSegmentationLoss(nn.Module):
         # engine like clDice. See losses/topology.py::persistent_homology_loss.
         self.topo_weight = float(topo_weight)
 
-    def compute_components(self, logits, targets, force_cldice=False, force_cbdice=False):
+    def compute_components(
+        self,
+        logits,
+        targets,
+        force_cldice=False,
+        force_cbdice=False,
+        voxel_spacing=None,
+    ):
         """Return ``(total_loss, components)`` computing each term at most once.
 
         By default a soft term is only evaluated when its weight is > 0 (the
@@ -102,7 +109,12 @@ class CombinedSegmentationLoss(nn.Module):
         if force_cbdice or self.cbdice_weight > 0.0:
             if probabilities is None:
                 probabilities = torch.sigmoid(logits)
-            cbdice = soft_cbdice_loss(probabilities, targets, self.cbdice_iterations)
+            cbdice = soft_cbdice_loss(
+                probabilities,
+                targets,
+                self.cbdice_iterations,
+                voxel_spacing=voxel_spacing,
+            )
             components["soft_cbdice"] = cbdice
             total_loss = total_loss + self.cbdice_weight * cbdice
 
@@ -114,7 +126,11 @@ class CombinedSegmentationLoss(nn.Module):
 
         return total_loss, components
 
-    def forward(self, logits, targets):
+    def forward(self, logits, targets, voxel_spacing=None):
         """Compute the weighted segmentation loss for logits and target masks."""
-        total_loss, _ = self.compute_components(logits, targets)
+        total_loss, _ = self.compute_components(
+            logits,
+            targets,
+            voxel_spacing=voxel_spacing,
+        )
         return total_loss
