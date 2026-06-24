@@ -246,22 +246,57 @@ def _cbdice_get_weights(
     skel_hard = (skel_soft > 0.5).float()
 
     with torch.no_grad():
-        distances = _edt_per_sample(mask_hard, voxel_spacing=voxel_spacing) * mask_hard
+        spacing = _normalise_voxel_spacing(
+            voxel_spacing,
+            batch_size=mask_hard.shape[0],
+            spatial_dims=mask_hard.ndim - 1,
+        )
+        distances = _edt_per_sample(mask_hard, voxel_spacing=spacing) * mask_hard
         skel_radius = distances * skel_hard
 
         dist_map_norm = torch.zeros_like(distances)
         skel_radius_norm = torch.zeros_like(distances)
         importance = torch.zeros_like(distances)
+        eps = torch.finfo(distances.dtype).eps
         for index in range(distances.shape[0]):
             radius_i = skel_radius[index]
-            radius_max = torch.clamp(radius_i.max(), min=1.0)
-            radius_min = torch.clamp(radius_i.min(), min=1.0)
+            positive_radius = radius_i[radius_i > 0]
+            # The repo floors radius normalisation at the literal `1` (= one voxel,
+            # because its EDT is in voxel units). With a physical EDT the faithful
+            # floor is one voxel's smallest physical extent, min(spacing): the
+            # minimum non-zero EDT distance is exactly min(spacing) (the nearest
+            # background voxel one step along the finest axis), so every skeleton
+            # radius is >= radius_floor. eps only guards a pathological zero spacing.
+            radius_floor = torch.as_tensor(
+                spacing[index].min(),
+                device=distances.device,
+                dtype=distances.dtype,
+            )
+            radius_floor = torch.clamp(radius_floor, min=eps)
+            if positive_radius.numel() == 0:
+                positive_distance = distances[index][distances[index] > 0]
+                if positive_distance.numel() == 0:
+                    continue
+                radius_max = torch.clamp(positive_distance.max(), min=radius_floor)
+            else:
+                radius_max = torch.clamp(positive_radius.max(), min=radius_floor)
+            # Reference: skel_radius_min = max(skel_radius.min(), 1). skel_radius is
+            # zero off the skeleton, so skel_radius.min() == 0 over the volume and the
+            # term collapses to the constant one-voxel floor — here radius_floor (and
+            # radius_max >= radius_floor, so the minimum just returns the floor). With
+            # radius_min == radius_floor <= every skeleton radius, the importance below
+            # is bounded in (0, 1]; the first geomfix's literal `1.0` mm floor instead
+            # exceeded sub-mm radii, pushing importance > 1 and the loss negative.
+            radius_min = torch.minimum(radius_floor, radius_max)
+
             dist_map_norm[index] = torch.clamp(distances[index], max=radius_max) / radius_max
             skel_radius_norm[index] = radius_i / radius_max
             # subtraction-based inverse (linear): thin branches (small radius) get the
-            # largest weight; squared in 3D. Non-skeleton voxels are zeroed next.
+            # largest weight; squared in 3D. The public repo floors this at 1 voxel;
+            # for physical EDTs the same-units floor is one voxel's smallest spacing.
+            # Non-skeleton voxels are zeroed next.
             linear = (radius_max - radius_i + radius_min) / radius_max
-            importance[index] = linear if dim == 2 else linear ** 2
+            importance[index] = torch.clamp(linear if dim == 2 else linear ** 2, 0.0, 1.0)
         importance = importance * skel_hard
 
     return dist_map_norm * mask_soft, skel_radius_norm * mask_soft, importance * skel_soft
