@@ -1,0 +1,84 @@
+# Fully supervised ATM'22 — ALL 110 non-val/non-test labels, cl1+cb2 recipe.
+#
+# The DATA lever: does more labelled data grow the distal tree (TLD), or only
+# consolidate? (SSL round 1 showed self-training on the existing pool consolidates
+# but does not grow — see writeup §7.10.) This is the clean answer: genuinely new
+# labels, same recipe as the frozen 20-label cl1+cb2 leader, from scratch.
+#
+# SPLIT HYGIENE (critical): seed 15 + create_semisupervised_split carves test/val
+# out FIRST and deterministically, so labelled_count 20 -> 110 keeps the EXACT SAME
+# sealed 20 val + 20 test as the frozen models, and the 110 labelled set is a strict
+# SUPERSET of the old 20. With 150 ATM cases: test 20 + val 20 + labelled 110 -> the
+# unlabelled pool is empty. Do NOT change seed.
+#
+# SCHEDULE = step-scaled, NOT epoch-copied. The 20-label run was 80 steps/epoch
+# (20 cases x 4 patches) x 100 ep = 8000 steps; warmups 15/10 ep = 1200/800 steps.
+# Here 110 cases x 4 = 440 steps/epoch, so epochs/warmups are cut ~5.5x to land at
+# comparable step counts: 30 ep = 13200 steps (~1.65x, more data tolerates more
+# steps); cldice/cbdice warmup 3 ep (~1320 steps ~ 1200), rampup 2 ep (~880 ~ 800);
+# scheduler warmup 2 ep. Full topology pressure from epoch 5 (~83% of training).
+# epochs is the main knob to bump (40-50) if val curves are still climbing.
+
+experiment_name: supervised-atm-l110-cldice-w1-cbdice-w2
+study_name: atm-l110-supervised
+run_label: cldice-w1-cbdice-w2-p96-l110
+description: "Fully supervised ATM'22 on ALL 110 non-val/non-test labels (cl1+cb2 recipe: clDice w=1 + cbDice w=2), from scratch, corrected geometry losses. The data lever: tests whether more labelled data grows the distal tree (TLD) vs the 20-label cl1+cb2 leader, on the SAME sealed val/test (seed 15). Schedule step-scaled from the 100-epoch/20-label run."
+seed: 15
+deterministic: true
+epochs: 30
+training_regime: patch
+batch_size: 1
+num_workers: 4
+
+labelled_split:
+  test_count: 20
+  val_count: 20
+  labelled_count: 110   # all remaining ATM cases -> unlabelled pool empty; val/test unchanged
+
+sampling:
+  patch_size: [96, 96, 96]
+  patches_per_case: 4
+  foreground_probability: 0.7
+  # 110 labelled cases at cache_rate 0.5 would cache ~55 full CT volumes -> OOM risk
+  # at 64 GB (SSL OOM'd at ~85). 0.1 (~11 vols, ~5 GB) is the safe middle ground;
+  # num_workers hides the disk I/O for the uncached majority. Drop to 0.0 if it OOMs.
+  cache_rate: 0.1
+
+validation:
+  validate_every: 3       # 10 validations over 30 ep (each is the expensive full-volume pass)
+  roi_size: [96, 96, 96]
+  sw_batch_size: 4
+  inference_overlap: 0.5
+  threshold: 0.99
+  # Skip the EDT-heavy soft-cbDice in full-volume validation (~87% of a cbDice run's
+  # walltime); hard-clDice topology checkpoint selection (best_topology_model) is
+  # unaffected. The corrected cbDice was already verified non-negative in geomfix3.
+  compute_soft_cbdice: false
+
+optimizer:
+  name: adamw
+  lr: 0.0003
+  weight_decay: 0.00001
+
+scheduler:
+  name: cosine
+  warmup_epochs: 2        # step-scaled from the 20-label run's 10
+
+amp:
+  enabled: true
+
+loss:
+  dice_weight: 1.0
+  bce_weight: 1.0
+  positive_class_weight: 10.0
+  cldice_weight: 1.0
+  cldice_iterations: 10
+  cldice_warmup_epochs: 3   # step-scaled from 15
+  cldice_rampup_epochs: 2   # step-scaled from 10
+  cbdice_weight: 2.0
+  cbdice_iterations: 10
+  cbdice_warmup_epochs: 3
+  cbdice_rampup_epochs: 2
+  topo_weight: 0.0
+  topo_warmup_epochs: 3
+  topo_rampup_epochs: 2
