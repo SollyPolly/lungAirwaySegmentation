@@ -195,6 +195,7 @@ def build_datasets(
             foreground_probability=float(sampling["foreground_probability"]),
             cache_rate=float(sampling["cache_rate"]),
             hu_window=hu_window,
+            distal_sampling=sampling.get("distal_sampling"),
         )
 
     if dataset_name != "aeropath":

@@ -43,6 +43,12 @@ sampling:
   # at 64 GB (SSL OOM'd at ~85). 0.1 (~11 vols, ~5 GB) is the safe middle ground;
   # num_workers hides the disk I/O for the uncached majority. Drop to 0.0 if it OOMs.
   cache_rate: 0.1
+  # Airway hard-mining: bias crop centres toward thin distal-branch centrelines.
+  # Default OFF (canonical recipe unchanged) — enable per-run with --distal-sampling.
+  distal_sampling:
+    enabled: false
+    distal_radius_voxels: 2.0
+    ratios: [0.2, 0.2, 0.6]   # [background, proximal-airway, distal-skeleton] — aggressive
 
 validation:
   validate_every: 3       # 10 validations over 30 ep (each is the expensive full-volume pass)

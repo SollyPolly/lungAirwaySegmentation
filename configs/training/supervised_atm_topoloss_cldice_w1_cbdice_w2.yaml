@@ -22,6 +22,12 @@ sampling:
   patches_per_case: 4
   foreground_probability: 0.7
   cache_rate: 0.5
+  # Airway hard-mining: bias crop centres toward thin distal-branch centrelines.
+  # Default OFF (canonical recipe unchanged) — enable per-run with --distal-sampling.
+  distal_sampling:
+    enabled: false
+    distal_radius_voxels: 2.0
+    ratios: [0.2, 0.2, 0.6]   # [background, proximal-airway, distal-skeleton] — aggressive
 
 validation:
   validate_every: 5

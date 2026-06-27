@@ -190,6 +190,25 @@ def build_argument_parser(config_args: argparse.Namespace) -> argparse.ArgumentP
         default=None,
         help="Optional override for loss.topo_weight (EXPERIMENTAL persistent-homology term; 0 = off, needs torch-topological).",
     )
+    parser.add_argument(
+        "--distal-sampling",
+        dest="distal_sampling",
+        action="store_true",
+        default=None,
+        help="Enable distal-skeleton biased patch sampling (sets sampling.distal_sampling.enabled=true).",
+    )
+    parser.add_argument(
+        "--no-distal-sampling",
+        dest="distal_sampling",
+        action="store_false",
+        help="Disable distal-skeleton biased patch sampling (sets sampling.distal_sampling.enabled=false).",
+    )
+    parser.add_argument(
+        "--distal-radius",
+        type=float,
+        default=None,
+        help="Optional override for sampling.distal_sampling.distal_radius_voxels (EDT voxels; <= this = distal).",
+    )
     return parser
 
 
@@ -283,6 +302,10 @@ def build_resolved_training_config(
         resolved["loss"]["cbdice_weight"] = args.cbdice_weight
     if args.topo_weight is not None:
         resolved["loss"]["topo_weight"] = args.topo_weight
+    if getattr(args, "distal_sampling", None) is not None:
+        resolved["sampling"].setdefault("distal_sampling", {})["enabled"] = bool(args.distal_sampling)
+    if getattr(args, "distal_radius", None) is not None:
+        resolved["sampling"].setdefault("distal_sampling", {})["distal_radius_voxels"] = float(args.distal_radius)
     if args.val_threshold is not None:
         resolved["validation"]["threshold"] = args.val_threshold
     if getattr(args, "batch_size_unlabelled", None) is not None:
@@ -421,6 +444,21 @@ def validate_training_config(training_config: dict) -> None:
         raise ValueError("sampling.foreground_probability must be in [0.0, 1.0].")
     if not 0.0 <= float(sampling["cache_rate"]) <= 1.0:
         raise ValueError("sampling.cache_rate must be in [0.0, 1.0].")
+
+    distal_sampling = sampling.get("distal_sampling")
+    if distal_sampling is not None:
+        if not isinstance(distal_sampling, dict):
+            raise ValueError("sampling.distal_sampling must be a mapping.")
+        if not isinstance(distal_sampling.get("enabled", False), bool):
+            raise ValueError("sampling.distal_sampling.enabled must be a boolean.")
+        if float(distal_sampling.get("distal_radius_voxels", 2.0)) <= 0.0:
+            raise ValueError("sampling.distal_sampling.distal_radius_voxels must be positive.")
+        ratios = distal_sampling.get("ratios", [0.3, 0.3, 0.4])
+        if len(ratios) != 3 or any(float(r) < 0.0 for r in ratios) or sum(float(r) for r in ratios) <= 0.0:
+            raise ValueError(
+                "sampling.distal_sampling.ratios must be three non-negative numbers summing to > 0 "
+                "([background, proximal-airway, distal-skeleton])."
+            )
 
     validation = training_config["validation"]
     if int(validation["validate_every"]) <= 0:
