@@ -1,0 +1,89 @@
+# Supervised ATM'22 (20 labelled) — cl1+cb2 recipe + CALIBRE/DEPTH-AWARE BCE WEIGHTING (Tier 1).
+#
+# The lever (PROJECT_STATE 2026-06-29 plan, writeup §10): clDice's sensitivity term is
+# skeleton-length-proportional, so missing the deepest twigs barely moves it -> topology-
+# loss weight tuning (cb2/cb3, 110-label) leaves TD ~0.61 flat. Instead of tuning clDice/
+# cbDice weights, reshape the DENSE BCE term: replace the blunt global pos_weight with a
+# per-voxel weight HIGH at the periphery (1.0 on background + thick proximal airway, ramping
+# to calibre_weight_max on the thinnest distal voxels, EDT radius <= 1). This is the within-
+# class distance-based reweighting of WingsNet's General Union Loss (Zheng 2021) and ATM'22
+# timi's centreline-distance weight. KEEPS clDice + cbDice unchanged.
+#
+# This is the CLEAN 20-label ablation vs the frozen cl1+cb2 leader: ONLY loss.calibre_*
+# changes (everything else identical to supervised_atm_topoloss_cldice_w1_cbdice_w2.yaml),
+# so a delta is attributable to calibre weighting alone. Same sealed 20 val + 20 test
+# (seed 15). Escalate to the 110-label set only if this is positive.
+#
+# DECISION RULE (pre-committed): does RAW TD rise (genuine reach, pre-LCC) AND distal r=1
+# recall rise while topology precision holds >= 0.85? A null result is itself citable
+# (distal ceiling is data-bound, not loss-bound). Analyse via scripts.analyse_distal on VAL.
+
+experiment_name: supervised-atm-l20-cldice-w1-cbdice-w2-calibre
+study_name: atm-l20-supervised
+run_label: cldice-w1-cbdice-w2-p96-calibre
+description: "Supervised ATM'22 (20 labelled) cl1+cb2 recipe + calibre/depth-aware BCE weighting (calibre_weight_max=5, radius_ref=3): per-voxel BCE weight ramps from 1.0 on background/proximal to 5x on the thinnest distal airway, on top of clDice w=1 + cbDice w=2. Tests whether over-weighting the periphery in the dense term breaks the TD plateau clDice (length-proportional) cannot. Clean 20-label ablation vs the frozen cl1+cb2 leader; same sealed val/test (seed 15)."
+seed: 15
+deterministic: true
+epochs: 100
+training_regime: patch
+batch_size: 1
+num_workers: 4
+
+labelled_split:
+  test_count: 20
+  val_count: 20
+  labelled_count: 20
+
+sampling:
+  patch_size: [96, 96, 96]
+  patches_per_case: 4
+  foreground_probability: 0.7
+  cache_rate: 0.5
+  # Calibre weighting is a LOSS lever, independent of patch sampling — keep sampling
+  # canonical (distal patch sampling OFF) so this run isolates the calibre term.
+  distal_sampling:
+    enabled: false
+    distal_radius_voxels: 2.0
+    ratios: [0.2, 0.2, 0.6]
+
+validation:
+  validate_every: 5
+  roi_size: [96, 96, 96]
+  sw_batch_size: 4
+  inference_overlap: 0.5
+  threshold: 0.99
+  # Calibre weighting applies on the TRAINING path only; validation BCE stays plain
+  # (no per-case EDT added). soft cbDice kept off in full-volume validation as in l110.
+  compute_soft_cbdice: false
+
+optimizer:
+  name: adamw
+  lr: 0.0003
+  weight_decay: 0.00001
+
+scheduler:
+  name: cosine
+  warmup_epochs: 10
+
+amp:
+  enabled: true
+
+loss:
+  dice_weight: 1.0
+  bce_weight: 1.0
+  positive_class_weight: 10.0   # kept (load-bearing for distal recall); calibre weight stacks on top of it distally
+  cldice_weight: 1.0
+  cldice_iterations: 10
+  cldice_warmup_epochs: 15
+  cldice_rampup_epochs: 10
+  cbdice_weight: 2.0
+  cbdice_iterations: 10
+  cbdice_warmup_epochs: 15
+  cbdice_rampup_epochs: 10
+  topo_weight: 0.0
+  topo_warmup_epochs: 15
+  topo_rampup_epochs: 10
+  # Calibre/depth-aware BCE weighting (Tier 1). 1.0 = off; 5.0 = thinnest distal voxels
+  # get 5x BCE weight, ramping linearly from 1.0 at EDT radius >= 3 to 5x at radius <= 1.
+  calibre_weight_max: 5.0
+  calibre_radius_voxels: 3.0

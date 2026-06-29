@@ -191,6 +191,18 @@ def build_argument_parser(config_args: argparse.Namespace) -> argparse.ArgumentP
         help="Optional override for loss.topo_weight (EXPERIMENTAL persistent-homology term; 0 = off, needs torch-topological).",
     )
     parser.add_argument(
+        "--calibre-weight-max",
+        type=float,
+        default=None,
+        help="Optional override for loss.calibre_weight_max (calibre/depth-aware BCE weighting; max per-voxel weight on the thinnest distal airway, 1.0 = off).",
+    )
+    parser.add_argument(
+        "--calibre-radius-voxels",
+        type=float,
+        default=None,
+        help="Optional override for loss.calibre_radius_voxels (GT EDT radius at/above which the calibre BCE weight is 1.0; below it ramps to calibre_weight_max at radius<=1).",
+    )
+    parser.add_argument(
         "--distal-sampling",
         dest="distal_sampling",
         action="store_true",
@@ -302,6 +314,10 @@ def build_resolved_training_config(
         resolved["loss"]["cbdice_weight"] = args.cbdice_weight
     if args.topo_weight is not None:
         resolved["loss"]["topo_weight"] = args.topo_weight
+    if args.calibre_weight_max is not None:
+        resolved["loss"]["calibre_weight_max"] = args.calibre_weight_max
+    if args.calibre_radius_voxels is not None:
+        resolved["loss"]["calibre_radius_voxels"] = args.calibre_radius_voxels
     if getattr(args, "distal_sampling", None) is not None:
         resolved["sampling"].setdefault("distal_sampling", {})["enabled"] = bool(args.distal_sampling)
     if getattr(args, "distal_radius", None) is not None:
@@ -531,6 +547,10 @@ def validate_training_config(training_config: dict) -> None:
         raise ValueError("loss.topo_warmup_epochs must be non-negative.")
     if int(loss_config.get("topo_rampup_epochs", 0)) < 0:
         raise ValueError("loss.topo_rampup_epochs must be non-negative.")
+    if float(loss_config.get("calibre_weight_max", 1.0)) < 1.0:
+        raise ValueError("loss.calibre_weight_max must be >= 1.0 (1.0 = off).")
+    if float(loss_config.get("calibre_radius_voxels", 3.0)) <= 1.0:
+        raise ValueError("loss.calibre_radius_voxels must be > 1.0.")
 
 
 def validate_semisupervised_training_config(training_config: dict) -> None:

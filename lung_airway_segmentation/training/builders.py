@@ -397,6 +397,8 @@ def build_training_components(device, model_config: dict, training_config: dict)
         cbdice_weight=float(loss_config.get("cbdice_weight", 0.0)),
         cbdice_iterations=int(loss_config.get("cbdice_iterations", 10)),
         topo_weight=float(loss_config.get("topo_weight", 0.0)),
+        calibre_weight_max=float(loss_config.get("calibre_weight_max", 1.0)),
+        calibre_radius_voxels=float(loss_config.get("calibre_radius_voxels", 3.0)),
     ).to(device)
 
     optimizer_config = training_config["optimizer"]
