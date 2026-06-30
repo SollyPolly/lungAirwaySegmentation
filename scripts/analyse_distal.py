@@ -49,7 +49,10 @@ import numpy as np
 import torch
 from scipy import ndimage
 
-from lung_airway_segmentation.inference.postprocess import keep_component_containing_trachea
+from lung_airway_segmentation.inference.postprocess import (
+    keep_component_containing_trachea,
+    reconnect_components_to_trachea,
+)
 from lung_airway_segmentation.inference.sliding_window import predict_logits_for_volume
 from lung_airway_segmentation.metrics.topology import (
     _foreground_slices,
@@ -113,6 +116,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-config", type=Path, default=None, help="Override dataset to load cases from. Default: the run's data config.")
     parser.add_argument("--out", type=str, default="distal_analysis.json",
                         help="Output JSON filename (under run-dir unless absolute). Use distinct names per run to avoid clobbering.")
+    parser.add_argument("--reconnect-max-gap", type=float, default=0.0,
+                        help="If >0, the +LCC step bridges components within this many voxels of the trachea tree "
+                             "before pruning (reconnection/breakage-connection), recovering disconnected distal twigs. "
+                             "0 (default) = plain trachea-LCC, behaviour-preserving. Use a distinct --out for the A/B.")
+    parser.add_argument("--reconnect-max-passes", type=int, default=3,
+                        help="Reconnection passes (chains of broken twigs reconnect over successive passes). Only used when --reconnect-max-gap>0.")
     return parser.parse_args()
 
 
@@ -169,6 +178,27 @@ def gt_centerline(gt):
     return slices, skeleton, int(skeleton.sum())
 
 
+def _default_lcc(pred, affine=None):
+    """Trachea-anchored largest-connected-component (the standard +LCC step)."""
+    return keep_component_containing_trachea(pred, affine=affine) > 0
+
+
+def make_lcc_fn(reconnect_max_gap=0.0, reconnect_max_passes=3):
+    """Return the +LCC postprocessor. gap<=0 -> plain trachea-LCC; gap>0 -> reconnect first.
+
+    Reconnection bridges components within ``reconnect_max_gap`` voxels of the trachea tree
+    before keeping it, so detected-but-disconnected distal twigs survive instead of being
+    pruned (deeptree_damo breakage-connection lever). Default off = behaviour-preserving.
+    """
+    if reconnect_max_gap and reconnect_max_gap > 0:
+        def _reconnect_lcc(pred, affine=None):
+            return reconnect_components_to_trachea(
+                pred, max_gap_voxels=reconnect_max_gap, max_passes=reconnect_max_passes, affine=affine
+            ) > 0
+        return _reconnect_lcc
+    return _default_lcc
+
+
 def cheap_metrics(predicted, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum):
     """Dice, TD (skeleton recall), and VOXEL precision — no prediction skeletonisation."""
     pred_sum = int(predicted.sum())
@@ -182,13 +212,13 @@ def cheap_metrics(predicted, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum
     return float(dice), float(td), float(precision)
 
 
-def sweep_case(prob, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum, affine=None):
+def sweep_case(prob, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum, affine=None, lcc_fn=_default_lcc):
     """Per-threshold Dice/TD (raw + LCC) and voxel-precision+LCC over SWEEP_THRESHOLDS — all cheap."""
     rows = {}
     for t in SWEEP_THRESHOLDS:
         pred = prob >= t
         dice_raw, td_raw, prec_raw = cheap_metrics(pred, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum)
-        pred_lcc = keep_component_containing_trachea(pred, affine=affine) > 0
+        pred_lcc = lcc_fn(pred, affine)
         dice_lcc, td_lcc, prec_lcc = cheap_metrics(pred_lcc, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum)
         rows[t] = {
             "dice": dice_raw, "dice_lcc": dice_lcc,
@@ -199,7 +229,7 @@ def sweep_case(prob, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum, affine
     return rows
 
 
-def topology_at(prob, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum, thresholds, max_ratio=6.0, affine=None):
+def topology_at(prob, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum, thresholds, max_ratio=6.0, affine=None, lcc_fn=_default_lcc):
     """clDice + topology precision (one skeletonisation each) at the given thresholds.
 
     A candidate whose LCC'd prediction exceeds ``max_ratio`` x the GT voxel count is
@@ -211,7 +241,7 @@ def topology_at(prob, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum, thres
     for t in thresholds:
         pred = prob >= t
         dice_raw, td_raw, prec_raw = cheap_metrics(pred, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum)
-        pred_lcc = keep_component_containing_trachea(pred, affine=affine) > 0
+        pred_lcc = lcc_fn(pred, affine)
         dice_lcc, td_lcc, prec_lcc = cheap_metrics(pred_lcc, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum)
         if gt_sum and int(pred_lcc.sum()) > max_ratio * gt_sum:
             tprec_lcc = cldice_lcc = None  # gated: too large to skeletonise, not the peak
@@ -332,7 +362,8 @@ def print_candidates(candidate_means, n_total=None):
 
 
 def run_split(model, dataset_name, data_config, hu_window, cases, *, device, roi_size, overlap, sw_batch,
-              chosen_threshold=None, compute_bd=False, collect_bins=False, cldice_candidates=None, cldice_max_ratio=6.0):
+              chosen_threshold=None, compute_bd=False, collect_bins=False, cldice_candidates=None, cldice_max_ratio=6.0,
+              lcc_fn=_default_lcc):
     """Inference over a list of cases.
 
     Always returns the cheap per-case sweep. If ``cldice_candidates`` is given, also
@@ -349,15 +380,15 @@ def run_split(model, dataset_name, data_config, hu_window, cases, *, device, roi
         td_slices, gt_skeleton, gt_skeleton_sum = gt_centerline(gt)
         prob = infer_probability(model, ct, device=device, roi_size=roi_size, overlap=overlap, sw_batch=sw_batch)
 
-        case_sweeps.append(sweep_case(prob, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum, affine))
+        case_sweeps.append(sweep_case(prob, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum, affine, lcc_fn=lcc_fn))
 
         if cldice_candidates:
-            candidate_rows.append(topology_at(prob, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum, cldice_candidates, cldice_max_ratio, affine))
+            candidate_rows.append(topology_at(prob, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum, cldice_candidates, cldice_max_ratio, affine, lcc_fn=lcc_fn))
 
         if chosen_threshold is not None:
             pred = prob >= chosen_threshold
             dice_raw, td_raw, prec_raw = cheap_metrics(pred, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum)
-            pred_lcc = keep_component_containing_trachea(pred, affine=affine) > 0
+            pred_lcc = lcc_fn(pred, affine)
             dice_lcc, td_lcc, prec_lcc = cheap_metrics(pred_lcc, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum)
             lcc_retained_fraction = float(pred_lcc.sum() / max(int(pred.sum()), 1))
             if compute_bd:
@@ -481,7 +512,11 @@ def main() -> None:
     def cap(ids):
         return ids if args.max_cases is None else ids[: args.max_cases]
 
-    infer_kw = dict(device=device, roi_size=roi_size, overlap=args.overlap, sw_batch=args.sw_batch)
+    lcc_fn = make_lcc_fn(args.reconnect_max_gap, args.reconnect_max_passes)
+    infer_kw = dict(device=device, roi_size=roi_size, overlap=args.overlap, sw_batch=args.sw_batch, lcc_fn=lcc_fn)
+    if args.reconnect_max_gap and args.reconnect_max_gap > 0:
+        print(f"[postproc] RECONNECTION on: bridging components within {args.reconnect_max_gap:g} voxels of the "
+              f"trachea tree before LCC (max_passes={args.reconnect_max_passes}).")
     run_identity = " / ".join(
         str(value)
         for value in (
@@ -624,6 +659,11 @@ def main() -> None:
             "selected_on": selected_on,
             "precision_floor": args.precision_floor,
             "cldice_candidates": candidates if select_mode == "cldice" else None,
+        },
+        "postprocessing": {
+            "lcc": "reconnect+trachea" if (args.reconnect_max_gap and args.reconnect_max_gap > 0) else "trachea",
+            "reconnect_max_gap_voxels": float(args.reconnect_max_gap),
+            "reconnect_max_passes": int(args.reconnect_max_passes),
         },
         "report_split": report_label,
         "report_cases": report_cases,

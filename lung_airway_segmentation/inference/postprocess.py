@@ -37,6 +37,101 @@ def keep_largest_connected_component(
     return (labeled == largest).astype(binary_mask.dtype)
 
 
+def _voxel_line(start: tuple[int, int, int], end: tuple[int, int, int]) -> tuple[np.ndarray, ...]:
+    """Voxel coordinates of a thin (26-connected) straight line from ``start`` to ``end``.
+
+    Returns a fancy-index tuple of integer arrays. The number of samples is the
+    Chebyshev (max-norm) distance + 1, so the line has no gaps under 26-connectivity.
+    """
+    p0 = np.asarray(start, dtype=np.float64)
+    p1 = np.asarray(end, dtype=np.float64)
+    steps = int(np.max(np.abs(p1 - p0)))
+    coords = np.rint(np.linspace(p0, p1, steps + 1)).astype(np.intp)
+    return tuple(coords.T)
+
+
+def _reachable_from(mask: np.ndarray, seed: np.ndarray, structure: np.ndarray) -> np.ndarray:
+    """Union of the connected components of ``mask`` that overlap ``seed``."""
+    labeled, num = ndimage.label(mask, structure=structure)
+    if num == 0:
+        return np.zeros_like(mask, dtype=bool)
+    seed_labels = np.unique(labeled[seed & (labeled > 0)])
+    return np.isin(labeled, seed_labels)
+
+
+def reconnect_components_to_trachea(
+    binary_mask: np.ndarray,
+    connectivity: int = 6,
+    *,
+    max_gap_voxels: float = 2.0,
+    max_passes: int = 3,
+    anchor_mask: np.ndarray | None = None,
+    **trachea_kwargs,
+) -> np.ndarray:
+    """Bridge near-touching components back to the trachea tree, then keep that tree.
+
+    ``keep_component_containing_trachea`` *deletes* every component that is not connected
+    to the trachea — including true distal branches the model detected but that partial
+    volume / a one-voxel dropout split off the tree (our raw-TD > TLD gap). This instead
+    draws a thin voxel bridge from any component whose nearest gap to the trachea-connected
+    set is ``<= max_gap_voxels``, iterating up to ``max_passes`` so chains of broken twigs
+    reconnect, then returns the trachea-connected tree. Far-away false-positive blobs (gap
+    above the threshold) are still dropped. This is the deeptree_damo "breakage connection"
+    lever, applied as inference-time postprocessing (no retrain).
+
+    The trachea anchor is found exactly as ``keep_component_containing_trachea`` (pass the
+    same ``affine``/``superior_*`` kwargs through ``trachea_kwargs``); ``anchor_mask`` lets
+    a caller supply the anchor directly (used in tests). Gaps are in voxel units.
+    """
+    if binary_mask.ndim != 3:
+        raise ValueError(f"Expected a 3D binary mask, got shape {binary_mask.shape}.")
+    if connectivity not in {6, 18, 26}:
+        raise ValueError("connectivity must be one of 6, 18, or 26.")
+    if max_gap_voxels < 0:
+        raise ValueError("max_gap_voxels must be >= 0.")
+
+    foreground = binary_mask > 0
+    if not foreground.any():
+        return np.zeros_like(binary_mask)
+
+    connectivity_rank = {6: 1, 18: 2, 26: 3}[connectivity]
+    structure = ndimage.generate_binary_structure(rank=3, connectivity=connectivity_rank)
+
+    if anchor_mask is None:
+        anchor = keep_component_containing_trachea(
+            foreground.astype(np.uint8, copy=False), connectivity=connectivity, **trachea_kwargs
+        ) > 0
+    else:
+        anchor = (anchor_mask > 0) & foreground
+    if not anchor.any():
+        return np.zeros_like(binary_mask)
+
+    bridged = foreground.copy()
+    connected = _reachable_from(bridged, anchor, structure)
+    for _ in range(max_passes):
+        remaining = bridged & ~connected
+        if not remaining.any():
+            break
+        # Distance (and nearest-voxel index) from every voxel to the connected tree.
+        distance, indices = ndimage.distance_transform_edt(~connected, return_indices=True)
+        labeled, num = ndimage.label(remaining, structure=structure)
+        added = False
+        for label_id in range(1, num + 1):
+            component = labeled == label_id
+            component_distance = np.where(component, distance, np.inf)
+            nearest = np.unravel_index(int(np.argmin(component_distance)), component.shape)
+            gap = float(distance[nearest])
+            if 0.0 < gap <= max_gap_voxels:
+                target = (int(indices[0][nearest]), int(indices[1][nearest]), int(indices[2][nearest]))
+                bridged[_voxel_line(nearest, target)] = True
+                added = True
+        if not added:
+            break
+        connected = _reachable_from(bridged, anchor, structure)
+
+    return connected.astype(binary_mask.dtype)
+
+
 def _superior_axis_and_sign(affine: np.ndarray) -> tuple[int, int]:
     """Array axis (and sign) that maps to world-superior (+S).
 
