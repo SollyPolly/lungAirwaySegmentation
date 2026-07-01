@@ -101,6 +101,9 @@ def parse_args() -> argparse.Namespace:
                         help="Split to report the table on (default val — develop here). Pass 'test' for the sealed final table.")
     parser.add_argument("--cldice-candidates", type=str, default="0.4,0.5,0.6",
                         help="Comma-separated thresholds clDice is maximised over (cldice mode). Widen if the peak is at the edge.")
+    parser.add_argument("--sweep-thresholds", type=str, default=None,
+                        help="Comma-separated thresholds for the Dice/TD/precision sweep. "
+                             "Default is the full built-in grid; narrow this for expensive reconnect sweeps.")
     parser.add_argument("--cldice-max-ratio", type=float, default=6.0,
                         help="cldice mode: skip skeletonising a candidate whose LCC'd prediction exceeds this multiple of the GT voxel count (massive over-segmentation — never the clDice peak, and the slow ones to skeletonise).")
     parser.add_argument("--precision-floor", type=float, default=0.80,
@@ -123,6 +126,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--reconnect-max-passes", type=int, default=3,
                         help="Reconnection passes (chains of broken twigs reconnect over successive passes). Only used when --reconnect-max-gap>0.")
     return parser.parse_args()
+
+
+def parse_threshold_list(raw: str | None, default: list[float]) -> list[float]:
+    """Parse a comma-separated threshold list while preserving order."""
+    if raw is None:
+        return list(default)
+    values = [float(x) for x in raw.split(",") if x.strip()]
+    if not values:
+        return list(default)
+    for value in values:
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(f"thresholds must be in [0, 1], got {value}")
+    return values
 
 
 def load_case(dataset_name, data_config, case_id, hu_window):
@@ -212,10 +228,20 @@ def cheap_metrics(predicted, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum
     return float(dice), float(td), float(precision)
 
 
-def sweep_case(prob, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum, affine=None, lcc_fn=_default_lcc):
+def sweep_case(
+    prob,
+    gt,
+    gt_sum,
+    td_slices,
+    gt_skeleton,
+    gt_skeleton_sum,
+    affine=None,
+    lcc_fn=_default_lcc,
+    sweep_thresholds=SWEEP_THRESHOLDS,
+):
     """Per-threshold Dice/TD (raw + LCC) and voxel-precision+LCC over SWEEP_THRESHOLDS — all cheap."""
     rows = {}
-    for t in SWEEP_THRESHOLDS:
+    for t in sweep_thresholds:
         pred = prob >= t
         dice_raw, td_raw, prec_raw = cheap_metrics(pred, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum)
         pred_lcc = lcc_fn(pred, affine)
@@ -258,9 +284,9 @@ def topology_at(prob, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum, thres
     return out
 
 
-def mean_sweep(case_rows):
+def mean_sweep(case_rows, sweep_thresholds=SWEEP_THRESHOLDS):
     out = []
-    for t in SWEEP_THRESHOLDS:
+    for t in sweep_thresholds:
         vals = [cr[t] for cr in case_rows]
         out.append({
             "threshold": t,
@@ -363,7 +389,7 @@ def print_candidates(candidate_means, n_total=None):
 
 def run_split(model, dataset_name, data_config, hu_window, cases, *, device, roi_size, overlap, sw_batch,
               chosen_threshold=None, compute_bd=False, collect_bins=False, cldice_candidates=None, cldice_max_ratio=6.0,
-              lcc_fn=_default_lcc):
+              lcc_fn=_default_lcc, sweep_thresholds=SWEEP_THRESHOLDS):
     """Inference over a list of cases.
 
     Always returns the cheap per-case sweep. If ``cldice_candidates`` is given, also
@@ -375,12 +401,25 @@ def run_split(model, dataset_name, data_config, hu_window, cases, *, device, roi
     bin_probs = {label: [] for label, _, _ in RADIUS_BINS}
 
     for cid in cases:
+        print(f"case {cid}: starting", flush=True)
         ct, gt, affine = load_case(dataset_name, data_config, cid, hu_window)
         gt_sum = int(gt.sum())
         td_slices, gt_skeleton, gt_skeleton_sum = gt_centerline(gt)
         prob = infer_probability(model, ct, device=device, roi_size=roi_size, overlap=overlap, sw_batch=sw_batch)
 
-        case_sweeps.append(sweep_case(prob, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum, affine, lcc_fn=lcc_fn))
+        case_sweeps.append(
+            sweep_case(
+                prob,
+                gt,
+                gt_sum,
+                td_slices,
+                gt_skeleton,
+                gt_skeleton_sum,
+                affine,
+                lcc_fn=lcc_fn,
+                sweep_thresholds=sweep_thresholds,
+            )
+        )
 
         if cldice_candidates:
             candidate_rows.append(topology_at(prob, gt, gt_sum, td_slices, gt_skeleton, gt_skeleton_sum, cldice_candidates, cldice_max_ratio, affine, lcc_fn=lcc_fn))
@@ -501,7 +540,8 @@ def main() -> None:
     dataset_name = str(data_config["dataset_name"]).lower()
     hu_window = tuple(float(v) for v in data_config["preprocessing"]["hu_window"])
     roi_size = tuple(int(v) for v in cfg["training"]["validation"]["roi_size"])
-    candidates = [float(x) for x in args.cldice_candidates.split(",") if x.strip()] or CLDICE_CANDIDATES_DEFAULT
+    candidates = parse_threshold_list(args.cldice_candidates, CLDICE_CANDIDATES_DEFAULT)
+    sweep_thresholds = parse_threshold_list(args.sweep_thresholds, SWEEP_THRESHOLDS)
 
     device = resolve_device(args.device)
     ckpt = resolve_checkpoint_path(run_dir, args.checkpoint)
@@ -513,10 +553,19 @@ def main() -> None:
         return ids if args.max_cases is None else ids[: args.max_cases]
 
     lcc_fn = make_lcc_fn(args.reconnect_max_gap, args.reconnect_max_passes)
-    infer_kw = dict(device=device, roi_size=roi_size, overlap=args.overlap, sw_batch=args.sw_batch, lcc_fn=lcc_fn)
+    infer_kw = dict(
+        device=device,
+        roi_size=roi_size,
+        overlap=args.overlap,
+        sw_batch=args.sw_batch,
+        lcc_fn=lcc_fn,
+        sweep_thresholds=sweep_thresholds,
+    )
     if args.reconnect_max_gap and args.reconnect_max_gap > 0:
         print(f"[postproc] RECONNECTION on: bridging components within {args.reconnect_max_gap:g} voxels of the "
               f"trachea tree before LCC (max_passes={args.reconnect_max_passes}).")
+    if sweep_thresholds != SWEEP_THRESHOLDS:
+        print(f"[sweep] using custom threshold grid: {sweep_thresholds}")
     run_identity = " / ".join(
         str(value)
         for value in (
@@ -555,7 +604,7 @@ def main() -> None:
             collect_bins=same_split, cldice_candidates=want_candidates,
             cldice_max_ratio=args.cldice_max_ratio, **infer_kw,
         )
-        val_sweep = mean_sweep(sel_sweeps)
+        val_sweep = mean_sweep(sel_sweeps, sweep_thresholds)
         print_sweep(val_sweep, f"{args.select_split} sweep (mean over {len(sel_cases)} cases)")
         if args.select_by == "cldice":
             candidate_means = mean_candidates(sel_candidates, candidates)
@@ -587,7 +636,7 @@ def main() -> None:
 
     # --- 2. report the table at the chosen threshold -----------------------------
     reuse_cldice = same_split and select_mode == "cldice" and chosen_threshold in candidates
-    reuse_voxel = same_split and select_mode == "voxel-precision" and chosen_threshold in SWEEP_THRESHOLDS
+    reuse_voxel = same_split and select_mode == "voxel-precision" and chosen_threshold in sweep_thresholds
     if reuse_cldice:
         print(f"\nreporting on {report_label} ({len(report_cases)} cases) at {chosen_threshold:.2f}, +LCC "
               "— reusing val inference (dev mode; BD omitted, run --report-split test for it):")
@@ -620,7 +669,7 @@ def main() -> None:
             model, dataset_name, data_config, hu_window, report_cases,
             chosen_threshold=chosen_threshold, compute_bd=compute_bd, collect_bins=True, **infer_kw,
         )
-    report_sweep = mean_sweep(report_sweeps)
+    report_sweep = mean_sweep(report_sweeps, sweep_thresholds)
     mean_row = table_mean(table_rows)
 
     def fmt(value):
@@ -659,6 +708,7 @@ def main() -> None:
             "selected_on": selected_on,
             "precision_floor": args.precision_floor,
             "cldice_candidates": candidates if select_mode == "cldice" else None,
+            "sweep_thresholds": sweep_thresholds,
         },
         "postprocessing": {
             "lcc": "reconnect+trachea" if (args.reconnect_max_gap and args.reconnect_max_gap > 0) else "trachea",
