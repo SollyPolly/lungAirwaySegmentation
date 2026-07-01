@@ -61,8 +61,8 @@ def train_one_epoch(
             raise ValueError(f"Expected target batch to be 4D or 5D, got shape {targets.shape}")
 
         # move to device and ensure float dtype, add channel dimension
-        images = images.to(device).float()
-        targets = targets.to(device).float()
+        images = images.to(device, non_blocking=True).float()
+        targets = targets.to(device, non_blocking=True).float()
 
         # clear old gradients
         optimizer.zero_grad(set_to_none=True)
@@ -163,8 +163,8 @@ def validate_one_epoch(
             elif targets.ndim != 5:
                 raise ValueError(f"Expected target batch to be 4D or 5D, got shape {targets.shape}")
 
-            images = images.to(device).float()
-            targets = targets.to(device).float()
+            images = images.to(device, non_blocking=True).float()
+            targets = targets.to(device, non_blocking=True).float()
 
             with torch.autocast(device_type=device.type, enabled=use_amp, dtype=torch.float16):
                 logits = sliding_window_inference(

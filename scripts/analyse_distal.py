@@ -115,6 +115,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--threshold", type=float, default=None, help="Fix the operating threshold (skips selection).")
     parser.add_argument("--overlap", type=float, default=0.5, help="Sliding-window overlap (0.5 default; 0.25 faster for dev).")
     parser.add_argument("--sw-batch", type=int, default=8, help="Sliding-window batch size (raise on big GPUs to speed inference).")
+    parser.add_argument("--amp", action="store_true",
+                        help="fp16 autocast for sliding-window inference (~2x faster on modern GPUs). Default OFF: "
+                             "probabilities stay bit-comparable to existing fp32 runs. Keep both arms of an A/B on the same setting.")
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--data-config", type=Path, default=None, help="Override dataset to load cases from. Default: the run's data config.")
     parser.add_argument("--out", type=str, default="distal_analysis.json",
@@ -178,10 +181,10 @@ def split_case_ids(metadata, split):
     return [str(c) for c in metadata.get("splits", {}).get(_SPLIT_KEYS[split], [])]
 
 
-def infer_probability(model, ct, *, device, roi_size, overlap, sw_batch):
+def infer_probability(model, ct, *, device, roi_size, overlap, sw_batch, use_amp=False):
     logits = predict_logits_for_volume(
         model, ct, device=device, roi_size=roi_size,
-        sw_batch_size=sw_batch, overlap=overlap, use_amp=False,
+        sw_batch_size=sw_batch, overlap=overlap, use_amp=use_amp,
     )
     return torch.sigmoid(logits).squeeze().cpu().numpy().astype(np.float32)
 
@@ -389,7 +392,7 @@ def print_candidates(candidate_means, n_total=None):
 
 def run_split(model, dataset_name, data_config, hu_window, cases, *, device, roi_size, overlap, sw_batch,
               chosen_threshold=None, compute_bd=False, collect_bins=False, cldice_candidates=None, cldice_max_ratio=6.0,
-              lcc_fn=_default_lcc, sweep_thresholds=SWEEP_THRESHOLDS):
+              lcc_fn=_default_lcc, sweep_thresholds=SWEEP_THRESHOLDS, use_amp=False):
     """Inference over a list of cases.
 
     Always returns the cheap per-case sweep. If ``cldice_candidates`` is given, also
@@ -405,7 +408,7 @@ def run_split(model, dataset_name, data_config, hu_window, cases, *, device, roi
         ct, gt, affine = load_case(dataset_name, data_config, cid, hu_window)
         gt_sum = int(gt.sum())
         td_slices, gt_skeleton, gt_skeleton_sum = gt_centerline(gt)
-        prob = infer_probability(model, ct, device=device, roi_size=roi_size, overlap=overlap, sw_batch=sw_batch)
+        prob = infer_probability(model, ct, device=device, roi_size=roi_size, overlap=overlap, sw_batch=sw_batch, use_amp=use_amp)
 
         case_sweeps.append(
             sweep_case(
@@ -560,6 +563,7 @@ def main() -> None:
         sw_batch=args.sw_batch,
         lcc_fn=lcc_fn,
         sweep_thresholds=sweep_thresholds,
+        use_amp=args.amp,
     )
     if args.reconnect_max_gap and args.reconnect_max_gap > 0:
         print(f"[postproc] RECONNECTION on: bridging components within {args.reconnect_max_gap:g} voxels of the "
@@ -575,7 +579,7 @@ def main() -> None:
         )
         if value
     )
-    print(f"model: {run_identity or run_dir.name}  | checkpoint {args.checkpoint}  | overlap {args.overlap}  | sw_batch {args.sw_batch}")
+    print(f"model: {run_identity or run_dir.name}  | checkpoint {args.checkpoint}  | overlap {args.overlap}  | sw_batch {args.sw_batch}  | amp {bool(args.amp)}")
 
     if args.cases:
         report_cases, report_label = [c.strip() for c in args.cases.split(",") if c.strip()], "custom"
@@ -709,6 +713,7 @@ def main() -> None:
             "precision_floor": args.precision_floor,
             "cldice_candidates": candidates if select_mode == "cldice" else None,
             "sweep_thresholds": sweep_thresholds,
+            "amp": bool(args.amp),
         },
         "postprocessing": {
             "lcc": "reconnect+trachea" if (args.reconnect_max_gap and args.reconnect_max_gap > 0) else "trachea",

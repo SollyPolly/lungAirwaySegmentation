@@ -41,6 +41,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--threshold", type=float, default=0.90, help="Binarisation threshold (LCC operating point ~0.90).")
     parser.add_argument("--connectivity", type=int, choices=(6, 18, 26), default=6, help="LCC connectivity (6 = face).")
     parser.add_argument("--overlap", type=float, default=0.5, help="Sliding-window overlap (0.5 gives cleaner masks than 0.25).")
+    parser.add_argument("--sw-batch", type=int, default=4, help="Sliding-window batch size (raise on big GPUs to speed inference).")
+    parser.add_argument("--amp", action="store_true",
+                        help="fp16 autocast for inference (~2x faster on modern GPUs). Default OFF for bit-comparable probabilities.")
     parser.add_argument("--checkpoint", choices=("best", "dice", "topology", "last"), default="best",
                         help="best = Dice-selected (alias of dice); topology = hard-clDice@0.5 selection; last = final epoch.")
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
@@ -93,7 +96,7 @@ def main() -> None:
         if value
     )
     print(f"model: {run_identity or run_dir.name}  | cases: {cases}")
-    print(f"threshold {args.threshold}  | LCC-{args.connectivity}  | overlap {args.overlap}\n")
+    print(f"threshold {args.threshold}  | LCC-{args.connectivity}  | overlap {args.overlap}  | sw_batch {args.sw_batch}  | amp {bool(args.amp)}\n")
 
     for cid in cases:
         paths = resolve_case_paths(cid, batch_root=atm_root)
@@ -109,7 +112,7 @@ def main() -> None:
         ct_norm = np.clip((ct - lo) / (hi - lo), 0.0, 1.0).astype(np.float32)
         logits = predict_logits_for_volume(
             model, torch.from_numpy(ct_norm), device=device, roi_size=roi_size,
-            sw_batch_size=4, overlap=args.overlap, use_amp=False,
+            sw_batch_size=args.sw_batch, overlap=args.overlap, use_amp=args.amp,
         )
         prob = torch.sigmoid(logits).squeeze().cpu().numpy().astype(np.float32)
         if prob.shape != ct.shape:

@@ -45,6 +45,9 @@ def parse_args() -> argparse.Namespace:
                         help="Binarisation threshold for the pseudo-label (default 0.60: cleaner/higher-precision labels).")
     parser.add_argument("--connectivity", type=int, choices=(6, 18, 26), default=6, help="Trachea-LCC connectivity.")
     parser.add_argument("--overlap", type=float, default=0.5, help="Sliding-window overlap.")
+    parser.add_argument("--sw-batch", type=int, default=4, help="Sliding-window batch size (raise on big GPUs to speed inference).")
+    parser.add_argument("--amp", action="store_true",
+                        help="fp16 autocast for inference (~2x faster on modern GPUs). Default OFF for bit-comparable probabilities.")
     parser.add_argument("--cases", type=str, default=None,
                         help="Comma-separated IDs to pseudo-label; default: the resolved unlabelled-train split.")
     # Case-level quality gate (no GT available). Permissive defaults; tune from the manifest.
@@ -93,7 +96,7 @@ def main() -> None:
 
     out_dir = run_dir / args.out
     print(f"labeller: {run_dir.name} [{args.checkpoint} ep{checkpoint.get('epoch')}]"
-          f"  | threshold {args.threshold}  LCC-{args.connectivity}  overlap {args.overlap}")
+          f"  | threshold {args.threshold}  LCC-{args.connectivity}  overlap {args.overlap}  sw_batch {args.sw_batch}  amp {bool(args.amp)}")
     print(f"pseudo-labelling {len(cases)} cases -> {out_dir}\n")
 
     entries = []
@@ -108,7 +111,7 @@ def main() -> None:
         ct_norm = np.clip((ct - lo) / (hi - lo), 0.0, 1.0).astype(np.float32)
         logits = predict_logits_for_volume(
             model, torch.from_numpy(ct_norm), device=device, roi_size=roi_size,
-            sw_batch_size=4, overlap=args.overlap, use_amp=False,
+            sw_batch_size=args.sw_batch, overlap=args.overlap, use_amp=args.amp,
         )
         prob = torch.sigmoid(logits).squeeze().cpu().numpy().astype(np.float32)
         if prob.shape != ct.shape:

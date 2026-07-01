@@ -24,7 +24,7 @@ def prepare_segmentation_batch(
     elif targets.ndim != 5:
         raise ValueError(f"Expected target batch to be 4D or 5D, got shape {targets.shape}")
 
-    return images.to(device).float(), targets.to(device).float()
+    return images.to(device, non_blocking=True).float(), targets.to(device, non_blocking=True).float()
 
 
 def prepare_unlabelled_views(
@@ -49,7 +49,7 @@ def prepare_unlabelled_views(
             f"Expected unlabeled teacher batch to be 4D or 5D, got shape {teacher_images.shape}"
         )
 
-    return student_images.to(device).float(), teacher_images.to(device).float()
+    return student_images.to(device, non_blocking=True).float(), teacher_images.to(device, non_blocking=True).float()
 
 
 def update_ema(student: nn.Module, teacher: nn.Module, alpha: float) -> None:

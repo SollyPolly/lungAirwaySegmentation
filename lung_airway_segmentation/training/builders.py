@@ -318,15 +318,31 @@ def build_dataloaders(
     batch_size: int,
     num_workers: int,
     seed: int | None = None,
+    *,
+    pin_memory: bool = True,
+    persistent_workers: bool = False,
+    prefetch_factor: int = 2,
 ):
     """Build train and validation dataloaders for baseline training.
 
     Passing ``seed`` makes the train loader's shuffle order and per-worker RNG
     reproducible across runs (the val loader is unshuffled but still gets the
     worker seeding so any random transforms it runs are deterministic).
+
+    ``pin_memory`` enables faster (page-locked) host->device copies — pairs with the
+    ``non_blocking=True`` transfers in the training loop. ``persistent_workers`` keeps
+    worker processes (and their RNG state) alive across epochs: it avoids per-epoch
+    respawn cost but CHANGES the augmentation random stream vs the respawn default, so
+    it is opt-in (default off) to keep paired comparisons against existing runs valid.
+    ``prefetch_factor`` is torch's default (2); exposed here so it can be tuned.
     """
     loader_generator = make_seeded_generator(seed) if seed is not None else None
     worker_init_fn = seed_worker if seed is not None else None
+    # persistent_workers/prefetch_factor are only valid when workers are spawned.
+    worker_kwargs = {}
+    if num_workers > 0:
+        worker_kwargs["persistent_workers"] = persistent_workers
+        worker_kwargs["prefetch_factor"] = prefetch_factor
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
@@ -335,6 +351,8 @@ def build_dataloaders(
         collate_fn=list_data_collate,
         generator=loader_generator,
         worker_init_fn=worker_init_fn,
+        pin_memory=pin_memory,
+        **worker_kwargs,
     )
     val_loader = DataLoader(
         val_dataset,
@@ -343,6 +361,8 @@ def build_dataloaders(
         num_workers=num_workers,
         collate_fn=list_data_collate,
         worker_init_fn=worker_init_fn,
+        pin_memory=pin_memory,
+        **worker_kwargs,
     )
     return train_loader, val_loader
 
@@ -455,12 +475,19 @@ def build_unlabelled_dataloader(
         hu_window=hu_window,
     )
 
+    num_workers = int(training_config["num_workers"])
+    worker_kwargs = {}
+    if num_workers > 0:
+        worker_kwargs["persistent_workers"] = bool(training_config.get("persistent_workers", False))
+        worker_kwargs["prefetch_factor"] = int(training_config.get("prefetch_factor", 2))
     return DataLoader(
         unlabelled_dataset,
         batch_size=int(training_config["batch_size_unlabelled"]),
-        num_workers=int(training_config["num_workers"]),
+        num_workers=num_workers,
         shuffle=True,
         collate_fn=list_data_collate,
         generator=make_seeded_generator(int(training_config["seed"])),
         worker_init_fn=seed_worker,
+        pin_memory=bool(training_config.get("pin_memory", True)),
+        **worker_kwargs,
     )

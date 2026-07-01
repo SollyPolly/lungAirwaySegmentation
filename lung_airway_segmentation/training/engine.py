@@ -221,6 +221,9 @@ def run_supervised_training(args: argparse.Namespace) -> None:
         batch_size=int(resolved_training_config["batch_size"]),
         num_workers=int(resolved_training_config["num_workers"]),
         seed=int(resolved_training_config["seed"]),
+        pin_memory=bool(resolved_training_config.get("pin_memory", True)),
+        persistent_workers=bool(resolved_training_config.get("persistent_workers", False)),
+        prefetch_factor=int(resolved_training_config.get("prefetch_factor", 2)),
     )
 
     model, loss_fn, optimizer, scheduler = build_training_components(
@@ -633,6 +636,9 @@ def run_semisupervised_training(args: argparse.Namespace) -> None:
         batch_size=int(resolved_training_config["batch_size"]),
         num_workers=int(resolved_training_config["num_workers"]),
         seed=int(resolved_training_config["seed"]),
+        pin_memory=bool(resolved_training_config.get("pin_memory", True)),
+        persistent_workers=bool(resolved_training_config.get("persistent_workers", False)),
+        prefetch_factor=int(resolved_training_config.get("prefetch_factor", 2)),
     )
     unlabelled_loader = build_unlabelled_dataloader(
         atm22_config,
