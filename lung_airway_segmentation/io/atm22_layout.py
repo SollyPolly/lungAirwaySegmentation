@@ -61,6 +61,24 @@ def resolve_case_paths(case_id: str, batch_root: Path) -> CasePaths:
     )
 
 
+def resolve_lung_mask_path(
+    case_id: str,
+    *,
+    batch_root: Path,
+    lung_root: Path | None = None,
+) -> Path:
+    """Path to the precomputed binary lung mask for a case.
+
+    Written by ``scripts/precompute_lung_masks.py`` (lungmask) and loaded at train time
+    to crop CT + airway to the lung bounding box (tighter than the CT-foreground crop).
+    Defaults to a ``lungTr/`` sibling of the images/labels dirs (must be writable;
+    override with ``lung_root``).
+    """
+    padded = str(case_id).zfill(3)
+    root = Path(lung_root) if lung_root is not None else Path(batch_root) / "lungTr"
+    return root / f"ATM_{padded}_lung.nii.gz"
+
+
 def resolve_distal_classes_path(
     case_id: str,
     *,
