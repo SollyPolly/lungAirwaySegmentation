@@ -600,8 +600,12 @@ def main() -> None:
         lung_crop=lung_crop,
     )
     if lung_crop and lung_crop.get("enabled"):
-        print(f"[preproc] LUNG CROP on (from run config): CT+GT cropped to the lung bbox "
-              f"+{int(lung_crop.get('margin_voxels', 0))} vox margin, matching training.")
+        strategy = str(lung_crop.get("strategy", "lung_with_trachea_extension"))
+        margin = int(lung_crop.get("margin_voxels", 0))
+        superior_margin = int(lung_crop.get("superior_margin_voxels", 0))
+        print(f"[preproc] LUNG CROP on (from run config): CT+GT cropped with strategy={strategy!r}, "
+              f"lung bbox +{margin} vox margin and +{superior_margin} vox superior/trachea extension, "
+              "matching training.")
     if args.reconnect_max_gap and args.reconnect_max_gap > 0:
         print(f"[postproc] RECONNECTION on: bridging components within {args.reconnect_max_gap:g} voxels of the "
               f"trachea tree before LCC (max_passes={args.reconnect_max_passes}).")
