@@ -10,9 +10,8 @@
 #
 # This is the CLEAN 20-label ablation vs the frozen cl1+cb2 leader: ONLY sampling.lung_crop
 # changes (everything else identical to supervised_atm_topoloss_cldice_w1_cbdice_w2.yaml). Same
-# sealed 20 val + 20 test (seed 15). Also re-run the Dice+BCE baseline lung-cropped (add
-# --lung-crop --lung-crop-margin to its command) so the clDice delta stays attributable on the
-# stronger pipeline.
+# sealed 20 val + 20 test (seed 15). Also re-run the Dice+BCE baseline with
+# supervised_atm_lungcrop.yaml so the clDice delta stays attributable on the stronger pipeline.
 #
 # PRE-REQ: scripts/precompute_lung_masks.py must have written data/ATM22/lungTr/ATM_XXX_lung.nii.gz
 # for every train+val case (a missing mask raises with the precompute command).
@@ -31,9 +30,9 @@
 # it uses the label to set the FOV — kept only as an upper-bound diagnostic, NOT for val/test.)
 
 experiment_name: supervised-atm-l20-cldice-w1-cbdice-w2-lungcrop
-study_name: atm-l20-supervised
+study_name: atm-l20-supervised-lungcrop
 run_label: cldice-w1-cbdice-w2-p96-lungcrop
-description: "Supervised ATM'22 (20 labelled) cl1+cb2 recipe + lung-bbox crop (lungmask, margin=12): crop CT + airway to the lung bounding box instead of the whole-body CT foreground, concentrating capacity on the airway region. Loss identical to the frozen cl1+cb2 leader, so a delta is attributable to the lung crop alone. Clean 20-label pipeline ablation; same sealed val/test (seed 15)."
+description: "Supervised ATM'22 (20 labelled) cl1+cb2 recipe + lung-bbox crop (lungmask, margin=8, superior=120): crop CT + airway to the lung bounding box with superior trachea extension instead of the whole-body CT foreground, concentrating capacity on the airway region. Loss identical to the frozen cl1+cb2 leader, so a delta is attributable to the lung crop alone. Clean 20-label pipeline ablation; same sealed val/test (seed 15)."
 seed: 15
 deterministic: true
 epochs: 100

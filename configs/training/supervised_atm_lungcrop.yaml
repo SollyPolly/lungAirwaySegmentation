@@ -1,0 +1,59 @@
+# Supervised ATM'22 Dice+BCE baseline + lung-bbox crop.
+#
+# Paired baseline for supervised_atm_cldice_w1_cbdice_w2_lungcrop.yaml. This keeps
+# the same 20/20/20 split and baseline loss as supervised_atm.yaml, but enables the
+# inference-valid lung crop with superior trachea extension. Both lung-cropped runs
+# write under runs/atm-l20-supervised-lungcrop/ for a clean same-pipeline A/B.
+#
+# PRE-REQ: scripts/precompute_lung_masks.py must have written
+# data/ATM22/lungTr/ATM_XXX_lung.nii.gz for every train+val case.
+
+experiment_name: supervised-atm-l20-lungcrop
+study_name: atm-l20-supervised-lungcrop
+run_label: baseline-p96-lungcrop
+description: "Supervised ATM'22 Dice+BCE baseline, 20 labelled cases, with lung-bbox crop (lungmask, margin=8, superior=120). Paired same-pipeline baseline for the cl1+cb2 lung-crop run."
+seed: 15
+epochs: 50
+training_regime: patch
+batch_size: 1
+num_workers: 4
+
+labelled_split:
+  test_count: 20
+  val_count: 20
+  labelled_count: 20
+
+sampling:
+  patch_size: [96, 96, 96]
+  patches_per_case: 4
+  foreground_probability: 0.7
+  cache_rate: 0.5
+  lung_crop:
+    enabled: true
+    strategy: lung_with_trachea_extension
+    margin_voxels: 8
+    superior_margin_voxels: 120
+
+validation:
+  validate_every: 5
+  roi_size: [96, 96, 96]
+  sw_batch_size: 4
+  inference_overlap: 0.5
+  threshold: 0.99
+
+optimizer:
+  name: adamw
+  lr: 0.0003
+  weight_decay: 0.00001
+
+scheduler:
+  name: cosine
+  warmup_epochs: 10
+
+amp:
+  enabled: true
+
+loss:
+  dice_weight: 1.0
+  bce_weight: 1.0
+  positive_class_weight: 10.0
