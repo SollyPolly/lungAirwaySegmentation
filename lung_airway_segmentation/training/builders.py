@@ -196,6 +196,7 @@ def build_datasets(
             cache_rate=float(sampling["cache_rate"]),
             hu_window=hu_window,
             distal_sampling=sampling.get("distal_sampling"),
+            lung_crop=sampling.get("lung_crop"),
         )
 
     if dataset_name != "aeropath":

@@ -26,6 +26,7 @@ from monai.transforms import (
     RandShiftIntensityd,
     RandSpatialCropSamplesd,
     ScaleIntensityRanged,
+    SpatialCrop,
     SpatialPadd,
 )
 from lung_airway_segmentation.datasets.distal_classes import compute_distal_crop_classes
@@ -33,6 +34,7 @@ from lung_airway_segmentation.datasets.patches import normalize_patch_size
 from lung_airway_segmentation.io.atm22_layout import (
     resolve_case_paths,
     resolve_distal_classes_path,
+    resolve_lung_mask_path,
 )
 from lung_airway_segmentation.settings import DEFAULT_HU_WINDOW
 
@@ -102,6 +104,8 @@ def build_atm22_labelled_records(
         batch_root: Path,
         distal_radius: float | None = None,
         classes_root: Path | None = None,
+        lung_crop: bool = False,
+        lung_root: Path | None = None,
 ) -> list[dict]:
     """Build CT + airway-mask records for ATM'22 used as *labelled* training data.
 
@@ -109,6 +113,12 @@ def build_atm22_labelled_records(
     (``crop_classes``) for distal-skeleton patch sampling. The map must already exist
     on disk (run ``scripts/precompute_distal_classes.py`` once per dataset+radius) —
     a missing file raises with the exact command to generate it.
+
+    When ``lung_crop`` is set, attach the precomputed binary lung-mask path (``lung``)
+    used to crop CT + airway to the lung bounding box instead of the whole-body CT
+    foreground. The mask must already exist on disk (run
+    ``scripts/precompute_lung_masks.py`` once per dataset) — a missing file raises with
+    the exact command to generate it.
     """
     records = []
     for case_id in case_ids:
@@ -132,6 +142,17 @@ def build_atm22_labelled_records(
                     f"--batch-root <BATCH_ROOT> --radius {distal_radius:g}"
                 )
             record["crop_classes"] = str(classes_path)
+        if lung_crop:
+            lung_path = resolve_lung_mask_path(
+                paths["case_id"], batch_root=batch_root, lung_root=lung_root
+            )
+            if not lung_path.is_file():
+                raise FileNotFoundError(
+                    f"Precomputed lung mask missing for case {paths['case_id']}: {lung_path}\n"
+                    f"Generate it once with:\n"
+                    f"  python -u -m scripts.precompute_lung_masks --batch-root <BATCH_ROOT>"
+                )
+            record["lung"] = str(lung_path)
         records.append(record)
     return records
 
@@ -312,6 +333,127 @@ def _build_crop_transforms(
     ]
 
 
+# Lung-crop defaults (voxels). Measured over all 150 ATM cases: airway NEVER overhangs
+# the lung bbox in-plane/inferiorly (max 0), but the cervical trachea overhangs it
+# SUPERIORLY by up to ~100 voxels — hence a large superior margin, modest elsewhere.
+_DEFAULT_INPLANE_MARGIN = 8
+_DEFAULT_SUPERIOR_MARGIN = 120
+_LUNG_CROP_STRATEGIES = ("lung_with_trachea_extension", "lung_union_airway")
+
+
+def _resolve_lung_crop(lung_crop: dict | None) -> tuple[bool, str | None, int, int]:
+    """Interpret ``lung_crop`` -> (enabled, strategy, margin_voxels, superior_margin_voxels).
+
+    Disabled (``None``/``enabled: false``) returns ``(False, None, 0, 0)`` so the crop
+    stage falls back to the CT-foreground crop, bit-identical to the prior behaviour.
+    """
+    if not lung_crop or not lung_crop.get("enabled", False):
+        return False, None, 0, 0
+    strategy = str(lung_crop.get("strategy", "lung_with_trachea_extension"))
+    if strategy not in _LUNG_CROP_STRATEGIES:
+        raise ValueError(f"lung_crop.strategy must be one of {_LUNG_CROP_STRATEGIES}, got {strategy!r}.")
+    margin = int(lung_crop.get("margin_voxels", _DEFAULT_INPLANE_MARGIN))
+    superior_margin = int(lung_crop.get("superior_margin_voxels", _DEFAULT_SUPERIOR_MARGIN))
+    if margin < 0 or superior_margin < 0:
+        raise ValueError("lung_crop margins must be >= 0.")
+    return True, strategy, margin, superior_margin
+
+
+def _superior_axis(affine) -> tuple[int, int]:
+    """(array_axis, sign) that points SUPERIOR, from a RAS affine (world +z = superior).
+
+    The array axis whose voxel step has the largest world-z component is superior/
+    inferior; its sign says whether increasing the index moves superior (+1) or
+    inferior (-1). Falls back to (last spatial axis, +1) — the ATM native layout — when
+    no affine is available (e.g. a plain tensor in a unit test).
+    """
+    if affine is None:
+        return 2, 1
+    zrow = np.asarray(affine, dtype=np.float64)[2, :3]
+    axis = int(np.argmax(np.abs(zrow)))
+    return axis, (1 if zrow[axis] >= 0 else -1)
+
+
+class LungTracheaCropd(MapTransform):
+    """Crop ``keys`` to the lung bounding box, extended SUPERIORLY to keep the trachea.
+
+    Inference-valid (the main method): the crop box needs only the CT-derived lung mask
+    (``lung_key``) + the image affine — never the airway GT — so the identical crop is
+    computable at train / val / test / prediction / pseudo-labelling time. The lung bbox
+    is extended by ``superior_margin_voxels`` on the superior end (the cervical trachea
+    overhangs the lungs there) and by ``margin_voxels`` on every other side.
+
+    ``strategy="lung_union_airway"`` additionally unions the airway mask into the box
+    source — an ORACLE diagnostic / upper-bound only (it uses the label to set the FOV,
+    so it is not valid for val/test claims); kept for ablation.
+    """
+
+    def __init__(self, keys, *, lung_key="lung", airway_key="airway_mask",
+                 strategy="lung_with_trachea_extension",
+                 margin_voxels=_DEFAULT_INPLANE_MARGIN,
+                 superior_margin_voxels=_DEFAULT_SUPERIOR_MARGIN,
+                 allow_missing_keys=False):
+        super().__init__(keys, allow_missing_keys=allow_missing_keys)
+        if strategy not in _LUNG_CROP_STRATEGIES:
+            raise ValueError(f"strategy must be one of {_LUNG_CROP_STRATEGIES}, got {strategy!r}.")
+        self.lung_key = lung_key
+        self.airway_key = airway_key
+        self.strategy = strategy
+        self.margin = int(margin_voxels)
+        self.superior_margin = int(superior_margin_voxels)
+
+    @staticmethod
+    def _spatial(mask) -> np.ndarray:
+        arr = np.asarray(mask)
+        return (arr[0] if arr.ndim == 4 else arr) > 0
+
+    def __call__(self, data):
+        d = dict(data)
+        source = self._spatial(d[self.lung_key])
+        if self.strategy == "lung_union_airway" and self.airway_key in d:
+            source = source | self._spatial(d[self.airway_key])
+        if not source.any():
+            return d  # no lung found (logged upstream) — leave the volume uncropped
+
+        axis, sign = _superior_axis(getattr(d[self.lung_key], "affine", None))
+        coords = np.where(source)
+        starts, ends = [], []
+        for a in range(3):
+            lo, hi = int(coords[a].min()), int(coords[a].max())
+            m_lo = m_hi = self.margin
+            if a == axis:
+                if sign > 0:
+                    m_hi = self.superior_margin
+                else:
+                    m_lo = self.superior_margin
+            starts.append(max(0, lo - m_lo))
+            ends.append(min(source.shape[a], hi + m_hi + 1))
+
+        cropper = SpatialCrop(roi_start=starts, roi_end=ends)
+        for key in self.key_iterator(d):
+            d[key] = cropper(d[key])
+        return d
+
+
+def _build_foreground_crop(*, data_keys: list[str], lung_crop: dict | None) -> list:
+    """The crop-to-region stage: lung-bbox+trachea crop or CT intensity foreground.
+
+    Lung crop concentrates capacity on the airway region (the biggest fixable gap vs
+    ATM'22 pipelines, PROJECT_STATE 2026-07-01). The ``lung`` mask is loaded upstream
+    only to define the box; it is dropped straight after so it never reaches collation.
+    """
+    enabled, strategy, margin, superior_margin = _resolve_lung_crop(lung_crop)
+    if not enabled:
+        return [CropForegroundd(keys=data_keys, source_key="image", allow_smaller=True)]
+    return [
+        LungTracheaCropd(
+            keys=data_keys, lung_key="lung", airway_key="airway_mask", strategy=strategy,
+            margin_voxels=margin, superior_margin_voxels=superior_margin,
+        ),
+        DeleteItemsd(keys="lung"),
+    ]
+
+
 def build_atm22_labelled_transforms(
         *,
         patch_size: tuple[int, int, int],
@@ -319,18 +461,24 @@ def build_atm22_labelled_transforms(
         foreground_probability: float,
         hu_window: tuple[float, float] = DEFAULT_HU_WINDOW,
         distal_sampling: dict | None = None,
+        lung_crop: dict | None = None,
 ) -> Compose:
     """Patch-based supervised transforms for labelled ATM'22 (CT + airway mask).
 
-    Mirrors the AeroPath patch pipeline, but crops on CT-intensity foreground
-    (ATM'22 has no lung masks) and normalises before cropping so the foreground
-    selector operates on the [0, 1] image like the unlabelled ATM'22 pipeline.
+    Mirrors the AeroPath patch pipeline. By default crops on CT-intensity foreground
+    (whole body) and normalises before cropping so the foreground selector operates on
+    the [0, 1] image like the unlabelled ATM'22 pipeline.
 
     ``distal_sampling`` (optional) switches the crop stage to distal-biased class
     sampling — see ``_build_crop_transforms``. When enabled, the precomputed
     ``crop_classes`` map is loaded and carried through the deterministic spatial
     stages (load/crop/pad) so it stays aligned with the mask, then used as the crop
     label and dropped before augmentation/collation.
+
+    ``lung_crop`` (optional) replaces the CT-foreground crop with a crop to the
+    precomputed lung bounding box (+margin), tightening the FOV onto the airway region.
+    The ``lung`` mask is loaded, used as the crop ``source_key`` and dropped before
+    padding — see ``_build_foreground_crop``.
     """
     patch_size = normalize_patch_size(patch_size)
     if not 0.0 <= foreground_probability <= 1.0:
@@ -338,13 +486,15 @@ def build_atm22_labelled_transforms(
     if patches_per_case <= 0:
         raise ValueError("patches_per_case must be positive.")
 
-    # ``aug_keys`` are cropped + augmented and collated; ``crop_classes`` (when distal
-    # sampling is on) is only loaded/cropped/padded as the sampling label and deleted
-    # by the crop stage, so it must NOT appear in the post-crop augmentation keys.
+    # ``aug_keys`` are cropped + augmented and collated; ``crop_classes`` (distal
+    # sampling) and ``lung`` (lung crop) are load-only helpers deleted before collation.
+    # ``data_keys`` flow through crop+pad; ``load_keys`` also pulls the lung mask in.
     aug_keys = ["image", "airway_mask"]
     modes = ["bilinear", "nearest"]
     distal_enabled = bool(distal_sampling and distal_sampling.get("enabled", False))
-    load_keys = [*aug_keys, "crop_classes"] if distal_enabled else aug_keys
+    lung_enabled = _resolve_lung_crop(lung_crop)[0]
+    data_keys = [*aug_keys, "crop_classes"] if distal_enabled else list(aug_keys)
+    load_keys = [*data_keys, "lung"] if lung_enabled else data_keys
     lower, upper = hu_window
 
     crop_transforms = _build_crop_transforms(
@@ -367,8 +517,8 @@ def build_atm22_labelled_transforms(
                 b_max=1.0,
                 clip=True,
             ),
-            CropForegroundd(keys=load_keys, source_key="image", allow_smaller=True),
-            SpatialPadd(keys=load_keys, spatial_size=patch_size),
+            *_build_foreground_crop(data_keys=data_keys, lung_crop=lung_crop),
+            SpatialPadd(keys=data_keys, spatial_size=patch_size),
             *crop_transforms,
             RandFlipd(keys=aug_keys, prob=0.5, spatial_axis=0),
             RandFlipd(keys=aug_keys, prob=0.5, spatial_axis=1),
@@ -391,15 +541,22 @@ def build_atm22_labelled_transforms(
 def build_atm22_labelled_val_transforms(
         *,
         hu_window: tuple[float, float] = DEFAULT_HU_WINDOW,
+        lung_crop: dict | None = None,
 ) -> Compose:
-    """Full-volume validation transforms for labelled ATM'22 (CT + airway mask)."""
-    keys = ["image", "airway_mask"]
+    """Full-volume validation transforms for labelled ATM'22 (CT + airway mask).
+
+    ``lung_crop`` (optional) crops CT + airway to the precomputed lung bounding box
+    (+margin) instead of the CT-intensity foreground, matching the train FOV.
+    """
+    data_keys = ["image", "airway_mask"]
+    lung_enabled = _resolve_lung_crop(lung_crop)[0]
+    load_keys = [*data_keys, "lung"] if lung_enabled else data_keys
     lower, upper = hu_window
 
     return Compose(
         [
-            LoadImaged(keys=keys, ensure_channel_first=True, image_only=False),
-            EnsureTyped(keys=keys),
+            LoadImaged(keys=load_keys, ensure_channel_first=True, image_only=False),
+            EnsureTyped(keys=load_keys),
             ScaleIntensityRanged(
                 keys="image",
                 a_min=lower,
@@ -408,7 +565,7 @@ def build_atm22_labelled_val_transforms(
                 b_max=1.0,
                 clip=True,
             ),
-            CropForegroundd(keys=keys, source_key="image", allow_smaller=True),
+            *_build_foreground_crop(data_keys=data_keys, lung_crop=lung_crop),
         ]
     )
 
@@ -424,6 +581,7 @@ def build_monai_atm22_labelled_datasets(
         cache_rate: float = 0.0,
         hu_window: tuple[float, float] = DEFAULT_HU_WINDOW,
         distal_sampling: dict | None = None,
+        lung_crop: dict | None = None,
 ) -> tuple[Dataset, Dataset]:
     """Build MONAI train and validation datasets for labelled ATM'22 data."""
     if not 0.0 <= cache_rate <= 1.0:
@@ -438,10 +596,21 @@ def build_monai_atm22_labelled_datasets(
         configured_root = distal_sampling.get("classes_root")
         classes_root = Path(configured_root) if configured_root else None
 
+    # Lung crop needs the precomputed lung mask on BOTH train and val records (both
+    # crop CT + airway to the lung bbox so their FOV matches).
+    lung_enabled = bool(lung_crop and lung_crop.get("enabled", False))
+    lung_root: Path | None = None
+    if lung_enabled:
+        configured_lung_root = lung_crop.get("lung_root")
+        lung_root = Path(configured_lung_root) if configured_lung_root else None
+
     train_records = build_atm22_labelled_records(
-        train_ids, batch_root=batch_root, distal_radius=distal_radius, classes_root=classes_root
+        train_ids, batch_root=batch_root, distal_radius=distal_radius, classes_root=classes_root,
+        lung_crop=lung_enabled, lung_root=lung_root,
     )
-    val_records = build_atm22_labelled_records(val_ids, batch_root=batch_root)
+    val_records = build_atm22_labelled_records(
+        val_ids, batch_root=batch_root, lung_crop=lung_enabled, lung_root=lung_root,
+    )
 
     dataset_class = CacheDataset if cache_rate > 0.0 else Dataset
     cache_kwargs = {"cache_rate": cache_rate} if cache_rate > 0.0 else {}
@@ -454,12 +623,13 @@ def build_monai_atm22_labelled_datasets(
             foreground_probability=foreground_probability,
             hu_window=hu_window,
             distal_sampling=distal_sampling,
+            lung_crop=lung_crop,
         ),
         **cache_kwargs,
     )
     val_dataset = dataset_class(
         data=val_records,
-        transform=build_atm22_labelled_val_transforms(hu_window=hu_window),
+        transform=build_atm22_labelled_val_transforms(hu_window=hu_window, lung_crop=lung_crop),
         **cache_kwargs,
     )
 

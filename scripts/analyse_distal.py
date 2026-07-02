@@ -144,12 +144,25 @@ def parse_threshold_list(raw: str | None, default: list[float]) -> list[float]:
     return values
 
 
-def load_case(dataset_name, data_config, case_id, hu_window):
-    """Return (ct_tensor, gt_mask_bool) for one case, normalised as in training."""
+def load_case(dataset_name, data_config, case_id, hu_window, lung_crop=None):
+    """Return (ct_tensor, gt_mask_bool, affine) for one case, normalised as in training.
+
+    When ``lung_crop`` is enabled (sourced from the run's own resolved_config so eval
+    matches training), CT + GT are cropped to the lung bounding box (+margin) with the
+    SAME MONAI CropForegroundd the training pipeline uses — otherwise a lung-cropped
+    model would be scored over regions (neck/abdomen/upper trachea) it never trained on.
+    """
     if dataset_name == "atm22":
         from monai.transforms import LoadImage, ScaleIntensityRange
 
-        from lung_airway_segmentation.io.atm22_layout import resolve_case_paths
+        from lung_airway_segmentation.datasets.monai_atm22 import (
+            LungTracheaCropd,
+            _resolve_lung_crop,
+        )
+        from lung_airway_segmentation.io.atm22_layout import (
+            resolve_case_paths,
+            resolve_lung_mask_path,
+        )
 
         batch_root = resolve_project_path(data_config["batch_root"])
         paths = resolve_case_paths(case_id, batch_root=batch_root)
@@ -160,7 +173,24 @@ def load_case(dataset_name, data_config, case_id, hu_window):
         ct_img = loader(paths["ct"])
         affine = np.asarray(ct_img.affine, dtype=np.float64)  # native orientation → superior axis
         ct = scaler(ct_img)
-        gt = np.asarray(loader(paths["airway"])[0]) > 0
+        gt_img = loader(paths["airway"])
+
+        lung_enabled, lung_strategy, lung_margin, lung_superior = _resolve_lung_crop(lung_crop)
+        if lung_enabled:
+            lung_root = lung_crop.get("lung_root") if isinstance(lung_crop, dict) else None
+            lung_path = resolve_lung_mask_path(paths["case_id"], batch_root=batch_root, lung_root=lung_root)
+            if not lung_path.is_file():
+                raise FileNotFoundError(
+                    f"Lung-crop eval needs a precomputed lung mask for case {paths['case_id']}: {lung_path}\n"
+                    f"Generate it once with:\n"
+                    f"  python -u -m scripts.precompute_lung_masks --batch-root <BATCH_ROOT>"
+                )
+            cropped = LungTracheaCropd(
+                keys=["image", "airway_mask"], lung_key="lung", airway_key="airway_mask",
+                strategy=lung_strategy, margin_voxels=lung_margin, superior_margin_voxels=lung_superior,
+            )({"image": ct, "airway_mask": gt_img, "lung": loader(lung_path)})
+            ct, gt_img = cropped["image"], cropped["airway_mask"]
+        gt = np.asarray(gt_img[0]) > 0
         return ct, gt, affine
 
     if dataset_name == "aeropath":
@@ -392,7 +422,7 @@ def print_candidates(candidate_means, n_total=None):
 
 def run_split(model, dataset_name, data_config, hu_window, cases, *, device, roi_size, overlap, sw_batch,
               chosen_threshold=None, compute_bd=False, collect_bins=False, cldice_candidates=None, cldice_max_ratio=6.0,
-              lcc_fn=_default_lcc, sweep_thresholds=SWEEP_THRESHOLDS, use_amp=False):
+              lcc_fn=_default_lcc, sweep_thresholds=SWEEP_THRESHOLDS, use_amp=False, lung_crop=None):
     """Inference over a list of cases.
 
     Always returns the cheap per-case sweep. If ``cldice_candidates`` is given, also
@@ -405,7 +435,7 @@ def run_split(model, dataset_name, data_config, hu_window, cases, *, device, roi
 
     for cid in cases:
         print(f"case {cid}: starting", flush=True)
-        ct, gt, affine = load_case(dataset_name, data_config, cid, hu_window)
+        ct, gt, affine = load_case(dataset_name, data_config, cid, hu_window, lung_crop=lung_crop)
         gt_sum = int(gt.sum())
         td_slices, gt_skeleton, gt_skeleton_sum = gt_centerline(gt)
         prob = infer_probability(model, ct, device=device, roi_size=roi_size, overlap=overlap, sw_batch=sw_batch, use_amp=use_amp)
@@ -543,6 +573,9 @@ def main() -> None:
     dataset_name = str(data_config["dataset_name"]).lower()
     hu_window = tuple(float(v) for v in data_config["preprocessing"]["hu_window"])
     roi_size = tuple(int(v) for v in cfg["training"]["validation"]["roi_size"])
+    # Source the lung crop from the run's OWN config so eval matches training (the frozen
+    # full-volume baselines have no sampling.lung_crop -> None -> full-volume, unchanged).
+    lung_crop = cfg["training"].get("sampling", {}).get("lung_crop")
     candidates = parse_threshold_list(args.cldice_candidates, CLDICE_CANDIDATES_DEFAULT)
     sweep_thresholds = parse_threshold_list(args.sweep_thresholds, SWEEP_THRESHOLDS)
 
@@ -564,7 +597,11 @@ def main() -> None:
         lcc_fn=lcc_fn,
         sweep_thresholds=sweep_thresholds,
         use_amp=args.amp,
+        lung_crop=lung_crop,
     )
+    if lung_crop and lung_crop.get("enabled"):
+        print(f"[preproc] LUNG CROP on (from run config): CT+GT cropped to the lung bbox "
+              f"+{int(lung_crop.get('margin_voxels', 0))} vox margin, matching training.")
     if args.reconnect_max_gap and args.reconnect_max_gap > 0:
         print(f"[postproc] RECONNECTION on: bridging components within {args.reconnect_max_gap:g} voxels of the "
               f"trachea tree before LCC (max_passes={args.reconnect_max_passes}).")
@@ -719,6 +756,10 @@ def main() -> None:
             "lcc": "reconnect+trachea" if (args.reconnect_max_gap and args.reconnect_max_gap > 0) else "trachea",
             "reconnect_max_gap_voxels": float(args.reconnect_max_gap),
             "reconnect_max_passes": int(args.reconnect_max_passes),
+        },
+        "preprocessing": {
+            "lung_crop": bool(lung_crop and lung_crop.get("enabled")),
+            "lung_crop_margin_voxels": int(lung_crop.get("margin_voxels", 0)) if (lung_crop and lung_crop.get("enabled")) else None,
         },
         "report_split": report_label,
         "report_cases": report_cases,

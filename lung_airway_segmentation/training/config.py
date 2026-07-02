@@ -221,6 +221,31 @@ def build_argument_parser(config_args: argparse.Namespace) -> argparse.ArgumentP
         default=None,
         help="Optional override for sampling.distal_sampling.distal_radius_voxels (EDT voxels; <= this = distal).",
     )
+    parser.add_argument(
+        "--lung-crop",
+        dest="lung_crop",
+        action="store_true",
+        default=None,
+        help="Enable lung-bbox cropping (sets sampling.lung_crop.enabled=true; needs precompute_lung_masks).",
+    )
+    parser.add_argument(
+        "--no-lung-crop",
+        dest="lung_crop",
+        action="store_false",
+        help="Disable lung-bbox cropping (sets sampling.lung_crop.enabled=false; crops CT foreground instead).",
+    )
+    parser.add_argument(
+        "--lung-crop-margin",
+        type=int,
+        default=None,
+        help="Optional override for sampling.lung_crop.margin_voxels (in-plane + inferior voxel margin around the lung bbox).",
+    )
+    parser.add_argument(
+        "--lung-crop-superior-margin",
+        type=int,
+        default=None,
+        help="Optional override for sampling.lung_crop.superior_margin_voxels (superior extension for the cervical trachea).",
+    )
     return parser
 
 
@@ -322,6 +347,12 @@ def build_resolved_training_config(
         resolved["sampling"].setdefault("distal_sampling", {})["enabled"] = bool(args.distal_sampling)
     if getattr(args, "distal_radius", None) is not None:
         resolved["sampling"].setdefault("distal_sampling", {})["distal_radius_voxels"] = float(args.distal_radius)
+    if getattr(args, "lung_crop", None) is not None:
+        resolved["sampling"].setdefault("lung_crop", {})["enabled"] = bool(args.lung_crop)
+    if getattr(args, "lung_crop_margin", None) is not None:
+        resolved["sampling"].setdefault("lung_crop", {})["margin_voxels"] = int(args.lung_crop_margin)
+    if getattr(args, "lung_crop_superior_margin", None) is not None:
+        resolved["sampling"].setdefault("lung_crop", {})["superior_margin_voxels"] = int(args.lung_crop_superior_margin)
     if args.val_threshold is not None:
         resolved["validation"]["threshold"] = args.val_threshold
     if getattr(args, "batch_size_unlabelled", None) is not None:
@@ -475,6 +506,23 @@ def validate_training_config(training_config: dict) -> None:
                 "sampling.distal_sampling.ratios must be three non-negative numbers summing to > 0 "
                 "([background, proximal-airway, distal-skeleton])."
             )
+
+    lung_crop = sampling.get("lung_crop")
+    if lung_crop is not None:
+        if not isinstance(lung_crop, dict):
+            raise ValueError("sampling.lung_crop must be a mapping.")
+        if not isinstance(lung_crop.get("enabled", False), bool):
+            raise ValueError("sampling.lung_crop.enabled must be a boolean.")
+        strategy = lung_crop.get("strategy", "lung_with_trachea_extension")
+        if strategy not in ("lung_with_trachea_extension", "lung_union_airway"):
+            raise ValueError(
+                "sampling.lung_crop.strategy must be 'lung_with_trachea_extension' "
+                "(inference-valid) or 'lung_union_airway' (oracle diagnostic)."
+            )
+        if int(lung_crop.get("margin_voxels", 0)) < 0:
+            raise ValueError("sampling.lung_crop.margin_voxels must be >= 0.")
+        if int(lung_crop.get("superior_margin_voxels", 0)) < 0:
+            raise ValueError("sampling.lung_crop.superior_margin_voxels must be >= 0.")
 
     validation = training_config["validation"]
     if int(validation["validate_every"]) <= 0:
