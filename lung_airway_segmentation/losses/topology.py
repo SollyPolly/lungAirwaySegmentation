@@ -131,86 +131,48 @@ class SoftClDiceLoss(nn.Module):
 # Faithful binary (single-channel sigmoid) adaptation of the repo's SoftcbDiceLoss.
 # As in the reference, the skeleton is taken on the *hard* mask under no_grad and the
 # distance/radius maps are fixed weights (the EDT is non-differentiable); the gradient
-# reaches the network only through the soft probabilities at the skeleton/mask.
-# Behaviour-preserving differences from the repo: (1) sigmoid foreground prob instead
-# of softmax max-channel; (2) the EDT is computed per-sample with scipy (unambiguous
-# 3D, no MONAI/cucim shape dependency); (3) the morphological soft_skeleton above is
-# used (the repo's default; its optional Euler-characteristic skeletonizer is an
-# nnU-Net dependency we skip); (4) we return ``1 - cbDice`` (>=0, identical gradient)
-# to match soft_cldice_loss rather than the repo's ``-cbDice``.
+# reaches the network only through the soft probabilities at the skeleton/mask. The
+# structure below mirrors the repo's ``get_weights`` / ``combine_tensors`` 1:1 in
+# VOXEL units with the literal one-voxel floors (``max(skel_radius, 1)``).
+#
+# The ONLY intentional deviations from the repo, each behaviour-preserving:
+#   (1) sigmoid foreground prob instead of the softmax max-over-foreground-channels
+#       (we are single-channel binary; numerically the same foreground prob map);
+#   (2) the EDT runs per-sample via scipy in voxel units — identical in result to the
+#       repo's ``monai.transforms.distance_transform_edt`` (which is also voxel-unit,
+#       no physical spacing) — chosen only for unambiguous 3D handling;
+#   (3) the morphological ``soft_skeleton`` above is used (the repo's default; its
+#       optional Euler-characteristic skeletonizer is an nnU-Net dependency we skip);
+#   (4) we return ``1 - cbDice`` (a proper [0, 1] loss, consistent with
+#       soft_cldice_loss) rather than the repo's ``-cbDice`` — a constant offset with
+#       an identical gradient.
+#
+# NOTE (2026-07-04): an earlier version of this port used a *physical-spacing* EDT
+# (scipy ``sampling=spacing``) and a ``min(spacing)`` radius floor instead of the
+# literal 1. That is NOT what the repo does (the repo is voxel-unit throughout) and it
+# changed the radius normalisation / thin-branch importance. Reverted here to the
+# faithful voxel-unit form; ``voxel_spacing`` is accepted-and-ignored for backward
+# compatibility with existing callers/configs.
 # ===========================================================================
 
 
-def _normalise_voxel_spacing(
-    voxel_spacing,
-    *,
-    batch_size: int,
-    spatial_dims: int,
-):
-    """Return positive per-sample spacing with shape ``(B, spatial_dims)``.
+def _edt_voxel_per_sample(binary_mask: torch.Tensor) -> torch.Tensor:
+    """Per-sample Euclidean distance transform in VOXEL units.
 
-    ``MetaTensor.pixdim`` is a tensor for one sample and a list of tensors after
-    MONAI collation, so both forms are accepted alongside ordinary tuples/arrays.
-    ``None`` intentionally means unit spacing for plain tensors and legacy callers.
-    """
-    import numpy as np
-
-    if voxel_spacing is None:
-        return np.ones((batch_size, spatial_dims), dtype=np.float64)
-
-    if isinstance(voxel_spacing, (list, tuple)) and voxel_spacing and any(
-        torch.is_tensor(value) for value in voxel_spacing
-    ):
-        spacing = np.stack(
-            [torch.as_tensor(value).detach().cpu().numpy() for value in voxel_spacing]
-        )
-    elif torch.is_tensor(voxel_spacing):
-        spacing = voxel_spacing.detach().cpu().numpy()
-    else:
-        spacing = np.asarray(voxel_spacing)
-
-    spacing = np.asarray(spacing, dtype=np.float64)
-    if spacing.ndim == 1:
-        if spacing.shape[0] != spatial_dims:
-            raise ValueError(
-                f"voxel_spacing must contain {spatial_dims} values, got shape {spacing.shape}."
-            )
-        spacing = np.repeat(spacing[None, :], batch_size, axis=0)
-    elif spacing.shape != (batch_size, spatial_dims):
-        raise ValueError(
-            "voxel_spacing must have shape "
-            f"({spatial_dims},) or ({batch_size}, {spatial_dims}), got {spacing.shape}."
-        )
-
-    if not np.isfinite(spacing).all() or (spacing <= 0).any():
-        raise ValueError("voxel_spacing values must be finite and positive.")
-    return spacing
-
-
-def _edt_per_sample(binary_mask: torch.Tensor, voxel_spacing=None) -> torch.Tensor:
-    """Per-sample physical Euclidean distance transform.
-
-    ``binary_mask`` is (B, D, H, W) in {0, 1}; returns the same shape/device. Used as
-    a fixed (non-differentiable) radius weight, so it runs on CPU via scipy. Spacing
-    may be one ``(D,H,W)`` tuple or one tuple per batch item; distances are then in
-    physical units. Plain tensors default explicitly to unit spacing.
+    ``binary_mask`` is (B, D, H, W) in {0, 1}; returns the same shape/device. Matches
+    the reference repo's ``monai.transforms.distance_transform_edt(mask)``, which is
+    voxel-unit (no physical spacing). Computed as a fixed, non-differentiable radius
+    weight, so it runs on CPU via scipy per sample (unambiguous 3D); ``sampling`` is
+    left at its default (unit / voxel), identical in result to the repo's MONAI EDT.
     """
     import numpy as np
     from scipy import ndimage
 
     array = binary_mask.detach().cpu().numpy().astype(bool)
-    spacing = _normalise_voxel_spacing(
-        voxel_spacing,
-        batch_size=array.shape[0],
-        spatial_dims=array.ndim - 1,
-    )
     out = np.zeros(array.shape, dtype=np.float32)
     for index in range(array.shape[0]):
         if array[index].any():
-            out[index] = ndimage.distance_transform_edt(
-                array[index],
-                sampling=tuple(float(value) for value in spacing[index]),
-            )
+            out[index] = ndimage.distance_transform_edt(array[index])
     return torch.from_numpy(out).to(device=binary_mask.device, dtype=binary_mask.dtype)
 
 
@@ -230,74 +192,56 @@ def _cbdice_combine_tensors(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor) -
 
 
 def _cbdice_get_weights(
-    mask_soft: torch.Tensor,
-    skel_soft: torch.Tensor,
+    mask_input: torch.Tensor,
+    skel_input: torch.Tensor,
     dim: int,
-    voxel_spacing=None,
+    prob_flag: bool,
 ):
     """Radius-normalised (distance, skeleton-radius, thin-branch-importance) maps.
 
-    Mirrors the repo ``get_weights``. ``mask_soft``/``skel_soft`` are soft for the
-    prediction (carry gradient) and binary for the GT. The radius normalisation is a
-    fixed weight (computed under no_grad from the hard mask); each returned map is
-    multiplied by the soft input so the gradient flows through the probabilities only.
+    Faithful binary port of the repo ``get_weights`` in VOXEL units. When
+    ``prob_flag`` the inputs are the SOFT prediction (mask prob / soft skeleton) and
+    carry the gradient; otherwise they are the binary GT. All three maps are fixed
+    weights computed under no_grad from the binarised mask/skeleton — exactly as in
+    the repo, the radius normalisation uses ``max(skel_radius.max(), 1)`` and
+    ``max(skel_radius.min(), 1)`` (the literal one-voxel floor). The gradient reaches
+    the network only through the final multiply by the soft input.
     """
-    mask_hard = (mask_soft > 0.5).float()
-    skel_hard = (skel_soft > 0.5).float()
+    if prob_flag:
+        mask_soft = mask_input
+        skel_soft = skel_input
+        mask = (mask_soft > 0.5).float()
+        skel = (skel_soft > 0.5).float()
+    else:
+        mask = mask_input
+        skel = skel_input
+        mask_soft = mask
+        skel_soft = skel
 
     with torch.no_grad():
-        spacing = _normalise_voxel_spacing(
-            voxel_spacing,
-            batch_size=mask_hard.shape[0],
-            spatial_dims=mask_hard.ndim - 1,
-        )
-        distances = _edt_per_sample(mask_hard, voxel_spacing=spacing) * mask_hard
-        skel_radius = distances * skel_hard
+        distances = _edt_voxel_per_sample(mask) * mask  # distances[mask == 0] = 0
+        skel_radius = distances * skel
 
         dist_map_norm = torch.zeros_like(distances)
         skel_radius_norm = torch.zeros_like(distances)
         importance = torch.zeros_like(distances)
-        eps = torch.finfo(distances.dtype).eps
         for index in range(distances.shape[0]):
-            radius_i = skel_radius[index]
-            positive_radius = radius_i[radius_i > 0]
-            # The repo floors radius normalisation at the literal `1` (= one voxel,
-            # because its EDT is in voxel units). With a physical EDT the faithful
-            # floor is one voxel's smallest physical extent, min(spacing): the
-            # minimum non-zero EDT distance is exactly min(spacing) (the nearest
-            # background voxel one step along the finest axis), so every skeleton
-            # radius is >= radius_floor. eps only guards a pathological zero spacing.
-            radius_floor = torch.as_tensor(
-                spacing[index].min(),
-                device=distances.device,
-                dtype=distances.dtype,
-            )
-            radius_floor = torch.clamp(radius_floor, min=eps)
-            if positive_radius.numel() == 0:
-                positive_distance = distances[index][distances[index] > 0]
-                if positive_distance.numel() == 0:
-                    continue
-                radius_max = torch.clamp(positive_distance.max(), min=radius_floor)
-            else:
-                radius_max = torch.clamp(positive_radius.max(), min=radius_floor)
-            # Reference: skel_radius_min = max(skel_radius.min(), 1). skel_radius is
-            # zero off the skeleton, so skel_radius.min() == 0 over the volume and the
-            # term collapses to the constant one-voxel floor — here radius_floor (and
-            # radius_max >= radius_floor, so the minimum just returns the floor). With
-            # radius_min == radius_floor <= every skeleton radius, the importance below
-            # is bounded in (0, 1]; the first geomfix's literal `1.0` mm floor instead
-            # exceeded sub-mm radii, pushing importance > 1 and the loss negative.
-            radius_min = torch.minimum(radius_floor, radius_max)
+            skel_i = skel_radius[index]
+            # Repo: skel_radius_max = max(skel_i.max(), 1); skel_radius_min =
+            # max(skel_i.min(), 1). skel_i is 0 off the skeleton, so its min over the
+            # volume is 0 => radius_min is the constant one voxel. The literal 1 is the
+            # one-voxel floor of the voxel-unit EDT; because skel_i >= 1 on the
+            # skeleton, importance below is bounded in (0, 1] with no extra clamp.
+            radius_max = torch.clamp(skel_i.max(), min=1.0)
+            radius_min = torch.clamp(skel_i.min(), min=1.0)
 
             dist_map_norm[index] = torch.clamp(distances[index], max=radius_max) / radius_max
-            skel_radius_norm[index] = radius_i / radius_max
+            skel_radius_norm[index] = skel_i / radius_max
             # subtraction-based inverse (linear): thin branches (small radius) get the
-            # largest weight; squared in 3D. The public repo floors this at 1 voxel;
-            # for physical EDTs the same-units floor is one voxel's smallest spacing.
-            # Non-skeleton voxels are zeroed next.
-            linear = (radius_max - radius_i + radius_min) / radius_max
-            importance[index] = torch.clamp(linear if dim == 2 else linear ** 2, 0.0, 1.0)
-        importance = importance * skel_hard
+            # largest weight; squared in 3D. Non-skeleton voxels are zeroed next.
+            linear = (radius_max - skel_i + radius_min) / radius_max
+            importance[index] = linear if dim == 2 else linear ** 2
+        importance = importance * skel  # 0 for non-skeleton voxels
 
     return dist_map_norm * mask_soft, skel_radius_norm * mask_soft, importance * skel_soft
 
@@ -312,11 +256,14 @@ def soft_cbdice_loss(
     """Return ``1 - soft cbDice`` (centerline boundary Dice), averaged over the batch.
 
     ``probabilities`` and ``targets`` are (B, 1, D, H, W) in [0, 1]
-    (probabilities = sigmoid(logits); targets = binary mask). Radius-aware centerline
-    Dice — see the reference/idea note above (Shi et al., MICCAI 2024). When
-    ``voxel_spacing`` is omitted and ``targets`` is a MONAI ``MetaTensor``, spacing
-    is read from ``targets.pixdim``; plain tensors use unit spacing.
+    (probabilities = sigmoid(logits); targets = binary mask). Faithful binary port of
+    the repo ``SoftcbDiceLoss`` (Shi et al., MICCAI 2024): VOXEL-unit EDT radius
+    weights with the literal one-voxel floors. ``voxel_spacing`` is accepted for
+    backward compatibility but IGNORED — the reference operates in voxel units, and
+    passing physical spacing was a deviation (see the module note above).
     """
+    del voxel_spacing  # accepted for backward compatibility; the repo is voxel-unit.
+
     if probabilities.shape != targets.shape:
         raise ValueError(
             f"probabilities and targets must match: {tuple(probabilities.shape)} "
@@ -326,9 +273,6 @@ def soft_cbdice_loss(
         raise ValueError(
             f"soft_cbdice_loss expects 5D (B,1,D,H,W) tensors, got {tuple(probabilities.shape)}."
         )
-
-    if voxel_spacing is None:
-        voxel_spacing = getattr(targets, "pixdim", None)
 
     dim = 3
     pred_prob = probabilities[:, 0]  # (B, D, H, W); carries the gradient
@@ -343,12 +287,8 @@ def soft_cbdice_loss(
 
     skel_pred_prob = skel_pred_hard * pred_prob  # gradient via pred_prob
 
-    q_vl, q_slvl, q_sl = _cbdice_get_weights(
-        true_mask, skel_true, dim, voxel_spacing=voxel_spacing
-    )
-    q_vp, q_spvp, q_sp = _cbdice_get_weights(
-        pred_prob, skel_pred_prob, dim, voxel_spacing=voxel_spacing
-    )
+    q_vl, q_slvl, q_sl = _cbdice_get_weights(true_mask, skel_true, dim, prob_flag=False)
+    q_vp, q_spvp, q_sp = _cbdice_get_weights(pred_prob, skel_pred_prob, dim, prob_flag=True)
 
     w_tprec = (torch.sum(q_sp * q_vl) + smooth) / (
         torch.sum(_cbdice_combine_tensors(q_spvp, q_slvl, q_sp)) + smooth
@@ -356,6 +296,9 @@ def soft_cbdice_loss(
     w_tsens = (torch.sum(q_sl * q_vp) + smooth) / (
         torch.sum(_cbdice_combine_tensors(q_slvl, q_spvp, q_sl)) + smooth
     )
+    # Repo returns ``-2·(prec·sens)/(prec+sens)``; we return ``1 - that`` so the term
+    # is a proper [0, 1] loss consistent with soft_cldice_loss (constant offset,
+    # identical gradient).
     return 1.0 - 2.0 * (w_tprec * w_tsens) / (w_tprec + w_tsens)
 
 
