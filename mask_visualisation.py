@@ -92,7 +92,6 @@ def _():
         marching_cubes,
         mo,
         ndimage,
-        nib,
         np,
         preprocess_case,
         resolve_atm22_case_paths,
@@ -755,7 +754,6 @@ def _(
     clip_ct_to_hu_window,
     json,
     load_canonical_image,
-    nib,
     np,
     resolve_atm22_case_paths,
     resolve_case_paths,
@@ -869,6 +867,170 @@ def _(
             for path in sorted(mask_paths, key=lambda path: (path.name != "airway_pred_lcc_full.nii.gz", path.name))
         }
 
+    def list_distal_analysis_options(run_dir):
+        if run_dir is None:
+            return {}
+
+        analysis_paths = []
+        for pattern in ("distal_analysis*.json", "nnunet*_topology.json"):
+            analysis_paths.extend(path for path in run_dir.glob(pattern) if path.is_file())
+
+        unique_paths = sorted(
+            set(analysis_paths),
+            key=lambda path: (path.stat().st_mtime, path.name),
+            reverse=True,
+        )
+        return {path.name: path.name for path in unique_paths}
+
+    def load_distal_analysis(run_dir, analysis_filename):
+        if run_dir is None or analysis_filename is None:
+            return None
+
+        run_dir = run_dir.resolve()
+        analysis_path = (run_dir / analysis_filename).resolve()
+        if analysis_path.parent != run_dir:
+            raise ValueError(f"Analysis file is outside the selected run: {analysis_filename}")
+        if not analysis_path.is_file():
+            raise FileNotFoundError(f"Missing distal analysis JSON: {analysis_path}")
+
+        analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
+        analysis["_path"] = analysis_path
+        return analysis
+
+    def format_distal_analysis_markdown(analysis):
+        def fmt_metric(value, digits=3):
+            if value is None:
+                return "-"
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                return str(value)
+            if number != number:
+                return "-"
+            return f"{number:.{digits}f}"
+
+        def fmt_int(value):
+            if value is None:
+                return "-"
+            try:
+                return f"{int(value):,}"
+            except (TypeError, ValueError):
+                return str(value)
+
+        def fmt_percent(value):
+            if value is None:
+                return "-"
+            try:
+                return f"{100.0 * float(value):.1f}%"
+            except (TypeError, ValueError):
+                return str(value)
+
+        if analysis is None:
+            return "### Distal Analysis\nNo analysis JSON is selected."
+
+        analysis_path = analysis.get("_path")
+        table_mean = analysis.get("table_mean") or {}
+        operating_point = analysis.get("operating_point") or {}
+        report_cases = analysis.get("report_cases") or []
+        postprocessing = analysis.get("postprocessing") or {}
+
+        file_label = analysis_path.name if analysis_path is not None else "analysis JSON"
+        threshold = operating_point.get("threshold")
+        threshold_label = (
+            f"`{float(threshold):.2f}`"
+            if isinstance(threshold, (int, float))
+            else f"`{threshold}`" if threshold is not None else "`unavailable`"
+        )
+        split_label = analysis.get("report_split", "unavailable")
+        selected_on = operating_point.get("selected_on")
+        selection_label = f", selected on `{selected_on}`" if selected_on else ""
+        checkpoint = analysis.get("checkpoint")
+        checkpoint_label = f", checkpoint `{checkpoint}`" if checkpoint else ""
+        postproc = postprocessing.get("lcc")
+        postproc_label = f", postprocess `{postproc}`" if postproc else ""
+
+        lines = [
+            "### Distal Analysis",
+            "",
+            (
+                f"`{file_label}` - split `{split_label}`, n={len(report_cases)}, "
+                f"threshold {threshold_label}{selection_label}{checkpoint_label}{postproc_label}"
+            ),
+        ]
+
+        reason = operating_point.get("reason") or operating_point.get("note")
+        if reason:
+            lines.append(f"- **Operating point**: {reason}")
+
+        if not table_mean:
+            lines.append("")
+            lines.append("No `table_mean` block was found in this analysis JSON.")
+            return "\n".join(lines)
+
+        lines.extend(
+            [
+                "",
+                "| Mask | Dice | TD/TLD | BD | clDice | TPrec | Precision | LCC kept |",
+                "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+                (
+                    "| Raw | "
+                    f"{fmt_metric(table_mean.get('dice_raw'))} | "
+                    f"{fmt_metric(table_mean.get('td_raw'))} | "
+                    "- | - | - | "
+                    f"{fmt_metric(table_mean.get('prec_raw'))} | "
+                    "- |"
+                ),
+                (
+                    "| +LCC | "
+                    f"{fmt_metric(table_mean.get('dice_lcc'))} | "
+                    f"{fmt_metric(table_mean.get('td_lcc'))} | "
+                    f"{fmt_metric(table_mean.get('bd_lcc'))} | "
+                    f"{fmt_metric(table_mean.get('cldice_lcc'))} | "
+                    f"{fmt_metric(table_mean.get('tprec_lcc'))} | "
+                    f"{fmt_metric(table_mean.get('prec_lcc'))} | "
+                    f"{fmt_metric(table_mean.get('lcc_retained_fraction'))} |"
+                ),
+            ]
+        )
+
+        if table_mean.get("cldice_atm") is not None or table_mean.get("td_atm") is not None:
+            lines.extend(
+                [
+                    "",
+                    "| ATM branch parser | clDice | TD/TLD |",
+                    "| --- | ---: | ---: |",
+                    (
+                        "| ATM | "
+                        f"{fmt_metric(table_mean.get('cldice_atm'))} | "
+                        f"{fmt_metric(table_mean.get('td_atm'))} |"
+                    ),
+                ]
+            )
+
+        bins = analysis.get("bins") or []
+        if bins:
+            lines.extend(
+                [
+                    "",
+                    "| Radius bin | Voxels | % airway | Mean P | Median P | Recall @ op | Recall @ 0.5 |",
+                    "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+                ]
+            )
+            for row in bins:
+                recall_at_op = row.get("recall_at_threshold", row.get("recall"))
+                lines.append(
+                    "| "
+                    f"{row.get('bin', '-')} | "
+                    f"{fmt_int(row.get('voxels'))} | "
+                    f"{fmt_metric(row.get('pct_airway'), digits=1)} | "
+                    f"{fmt_metric(row.get('mean_prob'))} | "
+                    f"{fmt_metric(row.get('median_prob'))} | "
+                    f"{fmt_percent(recall_at_op)} | "
+                    f"{fmt_percent(row.get('recall_at_0.5'))} |"
+                )
+
+        return "\n".join(lines)
+
     def preferred_prediction_run_name(run_names):
         preferred_suffix = (
             Path("aeropath-supervised")
@@ -943,7 +1105,7 @@ def _(
             if case_paths["lung"] is not None
             else None
         )
-        prediction_mask = np.asarray(nib.load(str(prediction_mask_path)).dataobj) > 0
+        prediction_mask = np.asarray(load_canonical_image(prediction_mask_path).dataobj) > 0
 
         if ct.shape != true_mask.shape or ct.shape != prediction_mask.shape:
             raise ValueError(
@@ -986,6 +1148,7 @@ def _(
             "lung_mask": lung_mask,
             "true_mask": true_mask,
             "prediction_mask": prediction_mask,
+            "missed_truth_mask": true_mask & ~prediction_mask,
             # Probability maps are large and unused by this viewer. Keep only
             # the path so opening ATM'22 predictions does not allocate ~600 MB.
             "probability_volume": None,
@@ -998,10 +1161,13 @@ def _(
         }
 
     return (
+        format_distal_analysis_markdown,
+        list_distal_analysis_options,
         list_prediction_case_ids,
         list_prediction_mask_options,
         list_prediction_run_names,
         list_prediction_set_names,
+        load_distal_analysis,
         load_prediction_bundle,
         prediction_run_root,
         preferred_prediction_case_id,
@@ -1057,6 +1223,7 @@ def _(
     show_prediction_lung_mask = mo.ui.switch(value=False, label="Lung")
     show_true_prediction_mask = mo.ui.switch(value=True, label="Truth")
     show_predicted_mask = mo.ui.switch(value=True, label="Prediction")
+    show_missed_truth_mask = mo.ui.switch(value=False, label="Missed truth")
     show_gt_confidence = mo.ui.switch(value=False, label="GT confidence (prob×truth)")
     predicted_mask_opacity = mo.ui.slider(
         0.05,
@@ -1072,6 +1239,7 @@ def _(
         prediction_runs_available,
         prediction_view_height_slider,
         show_gt_confidence,
+        show_missed_truth_mask,
         show_predicted_mask,
         show_prediction_lung_mask,
         show_true_prediction_mask,
@@ -1212,6 +1380,71 @@ def _(
 
 
 @app.cell
+def _(
+    list_distal_analysis_options,
+    mo,
+    prediction_bundle,
+    prediction_bundle_error,
+):
+    if prediction_bundle is None or prediction_bundle_error is not None:
+        distal_analysis_options = {}
+        distal_analysis_selector = None
+    else:
+        distal_analysis_options = list_distal_analysis_options(prediction_bundle["run_dir"])
+        distal_analysis_selector = (
+            mo.ui.dropdown(
+                distal_analysis_options,
+                value=next(iter(distal_analysis_options)),
+                label="Analysis table",
+                searchable=True,
+            )
+            if distal_analysis_options
+            else None
+        )
+    return (distal_analysis_selector,)
+
+
+@app.cell
+def _(
+    distal_analysis_selector,
+    format_distal_analysis_markdown,
+    load_distal_analysis,
+    mo,
+    prediction_bundle,
+    prediction_bundle_error,
+):
+    if prediction_bundle is None or prediction_bundle_error is not None:
+        distal_analysis_panel = mo.md("")
+    elif distal_analysis_selector is None:
+        distal_analysis_panel = mo.md(
+            "### Distal Analysis\n"
+            "No `distal_analysis*.json` or `nnunet*_topology.json` file was found in this run folder."
+        )
+    else:
+        try:
+            distal_analysis = load_distal_analysis(
+                prediction_bundle["run_dir"],
+                distal_analysis_selector.value,
+            )
+            distal_analysis_panel = mo.vstack(
+                [
+                    distal_analysis_selector,
+                    mo.md(format_distal_analysis_markdown(distal_analysis)),
+                ],
+                gap=0.45,
+            )
+        except Exception as error:
+            distal_analysis_panel = mo.vstack(
+                [
+                    distal_analysis_selector,
+                    mo.md(f"### Distal Analysis\nCould not load analysis table: `{error}`"),
+                ],
+                gap=0.45,
+            )
+    return (distal_analysis_panel,)
+
+
+@app.cell
 def _(default_mask_index, mo, prediction_bundle, prediction_plane_selector):
     prediction_axis = int(prediction_plane_selector.value)
     if prediction_bundle is None:
@@ -1234,6 +1467,7 @@ def _(default_mask_index, mo, prediction_bundle, prediction_plane_selector):
 def _(
     build_mask_mesh,
     prediction_bundle,
+    show_missed_truth_mask,
     show_predicted_mask,
     show_prediction_lung_mask,
     show_true_prediction_mask,
@@ -1242,6 +1476,7 @@ def _(
         prediction_lung_mesh = None
         prediction_true_mesh = None
         prediction_mask_mesh = None
+        prediction_missed_mesh = None
     else:
         prediction_lung_mesh = (
             build_mask_mesh(
@@ -1267,14 +1502,27 @@ def _(
             if show_predicted_mask.value
             else None
         )
-    return prediction_lung_mesh, prediction_mask_mesh, prediction_true_mesh
+        prediction_missed_mesh = (
+            build_mask_mesh(
+                prediction_bundle["missed_truth_mask"],
+                prediction_bundle["spacing"],
+            )
+            if show_missed_truth_mask.value
+            else None
+        )
+    return (
+        prediction_lung_mesh,
+        prediction_mask_mesh,
+        prediction_missed_mesh,
+        prediction_true_mesh,
+    )
 
 
 @app.cell
 def _(
     RADIUS_BINS,
+    load_canonical_image,
     ndimage,
-    nib,
     np,
     prediction_bundle,
     show_gt_confidence,
@@ -1304,7 +1552,7 @@ def _(
         }
     else:
         _prob = np.asarray(
-            nib.load(str(prediction_bundle["probability_path"])).dataobj,
+            load_canonical_image(prediction_bundle["probability_path"]).dataobj,
             dtype=np.float32,
         )
         _gt = prediction_bundle["true_mask"]
@@ -1411,9 +1659,11 @@ def _(
     prediction_bundle_error,
     prediction_lung_mesh,
     prediction_mask_mesh,
+    prediction_missed_mesh,
     prediction_true_mesh,
     prediction_view_height_slider,
     show_gt_confidence,
+    show_missed_truth_mask,
     show_predicted_mask,
     show_prediction_lung_mask,
     show_true_prediction_mask,
@@ -1482,6 +1732,25 @@ def _(
                 )
             )
 
+        if show_missed_truth_mask.value and prediction_missed_mesh is not None:
+            missed_truth_vertices = prediction_missed_mesh["vertices"]
+            missed_truth_faces = prediction_missed_mesh["faces"]
+            prediction_mesh_figure.add_trace(
+                go.Mesh3d(
+                    x=missed_truth_vertices[:, 0],
+                    y=missed_truth_vertices[:, 1],
+                    z=missed_truth_vertices[:, 2],
+                    i=missed_truth_faces[:, 0],
+                    j=missed_truth_faces[:, 1],
+                    k=missed_truth_faces[:, 2],
+                    color="#ffb000",
+                    opacity=0.92,
+                    name="Missed truth (GT - prediction)",
+                    hovertemplate="Missed truth<extra></extra>",
+                    flatshading=True,
+                )
+            )
+
         if (
             show_gt_confidence.value
             and gt_confidence is not None
@@ -1543,6 +1812,7 @@ def _(
 
 @app.cell
 def _(
+    distal_analysis_panel,
     mo,
     predicted_mask_opacity,
     prediction_bundle,
@@ -1557,6 +1827,7 @@ def _(
     prediction_slice_slider,
     prediction_view_height_slider,
     show_gt_confidence,
+    show_missed_truth_mask,
     show_predicted_mask,
     show_prediction_lung_mask,
     show_true_prediction_mask,
@@ -1625,6 +1896,7 @@ def _(
                 show_prediction_lung_mask,
                 show_true_prediction_mask,
                 show_predicted_mask,
+                show_missed_truth_mask,
                 show_gt_confidence,
             ],
             widths="equal",
@@ -1680,6 +1952,7 @@ def _(
                 prediction_slider_controls,
                 mo.md("### Masks"),
                 prediction_mask_controls,
+                distal_analysis_panel,
                 *prediction_summary_blocks,
             ],
             gap=0.8,
@@ -1703,6 +1976,7 @@ def _(
     prediction_slice_slider,
     prediction_view_height_slider,
     show_gt_confidence,
+    show_missed_truth_mask,
     show_predicted_mask,
     show_prediction_lung_mask,
     show_true_prediction_mask,
@@ -1770,6 +2044,20 @@ def _(
                         [0.0, "rgba(216,27,96,0.0)"],
                         [1.0, f"rgba(216,27,96,{predicted_alpha:.2f})"],
                     ],
+                    showscale=False,
+                    hoverinfo="skip",
+                )
+            )
+
+        if show_missed_truth_mask.value:
+            prediction_slice_figure.add_trace(
+                go.Heatmap(
+                    z=overlay_mask(
+                        prediction_bundle["missed_truth_mask"],
+                        prediction_axis,
+                        prediction_slice_index,
+                    ),
+                    colorscale=[[0.0, "rgba(255,176,0,0.0)"], [1.0, "rgba(255,176,0,0.85)"]],
                     showscale=False,
                     hoverinfo="skip",
                 )
