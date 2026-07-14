@@ -80,11 +80,45 @@ def parse_args() -> argparse.Namespace:
         help="Comma-separated folds used for prediction.",
     )
     parser.add_argument(
+        "--study-name",
+        default="nnunet-track-a",
+        help="runs/<study-name>/ bucket + study label in the metadata.",
+    )
+    parser.add_argument(
+        "--run-label",
+        default=None,
+        help="Short run label. Default: dataset<id>-<config>-5fold-final.",
+    )
+    parser.add_argument(
+        "--experiment-name",
+        default=None,
+        help="Experiment label. Default: nnunetv2-dataset<id>-<config>.",
+    )
+    parser.add_argument(
+        "--description",
+        default=(
+            "Stock nnU-Net v2 Track-A control exported for mask_visualisation. "
+            "Predictions are hard native-argmax masks from the 5-fold ensemble; "
+            "the native nnU-Net workspace remains under data/nnunet."
+        ),
+        help="Free-text description recorded in run_metadata.json.",
+    )
+    parser.add_argument(
+        "--checkpoint-model",
+        default="5fold_ensemble_native_argmax",
+        help="checkpoint_model tag recorded in run_metadata.json.",
+    )
+    parser.add_argument(
         "--overwrite",
         action="store_true",
         help="Overwrite files in an existing exported run.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.run_label is None:
+        args.run_label = f"dataset{args.dataset_id}-{args.configuration}-5fold-final"
+    if args.experiment_name is None:
+        args.experiment_name = f"nnunetv2-dataset{args.dataset_id}-{args.configuration}"
+    return args
 
 
 def load_json(path: Path) -> dict:
@@ -127,14 +161,10 @@ def build_run_metadata(args: argparse.Namespace, source_metadata: dict, cases: l
     folds = [int(value.strip()) for value in args.folds.split(",") if value.strip()]
     run_name = args.out_run_dir.name
     return {
-        "study_name": "nnunet-track-a",
-        "run_label": f"dataset{args.dataset_id}-{args.configuration}-5fold-final",
-        "experiment_name": f"nnunetv2-dataset{args.dataset_id}-{args.configuration}",
-        "description": (
-            "Stock nnU-Net v2 Track-A control exported for mask_visualisation. "
-            "Predictions are hard native-argmax masks from the 5-fold ensemble; "
-            "the native nnU-Net workspace remains under data/nnunet."
-        ),
+        "study_name": args.study_name,
+        "run_label": args.run_label,
+        "experiment_name": args.experiment_name,
+        "description": args.description,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "run_name": run_name,
         "run_dir": str(args.out_run_dir),
@@ -145,7 +175,7 @@ def build_run_metadata(args: argparse.Namespace, source_metadata: dict, cases: l
         "data_root": "data/ATM22",
         "data_pipeline": "nnunetv2_native_export",
         "model_name": "nnunetv2",
-        "checkpoint_model": "5fold_ensemble_native_argmax",
+        "checkpoint_model": args.checkpoint_model,
         "nnunet": {
             "dataset_id": args.dataset_id,
             "dataset_name": args.dataset_name,
@@ -182,9 +212,9 @@ def build_resolved_config(args: argparse.Namespace) -> dict:
             "checkpoint": args.checkpoint,
         },
         "training": {
-            "study_name": "nnunet-track-a",
-            "run_label": f"dataset{args.dataset_id}-{args.configuration}-5fold-final",
-            "experiment_name": f"nnunetv2-dataset{args.dataset_id}-{args.configuration}",
+            "study_name": args.study_name,
+            "run_label": args.run_label,
+            "experiment_name": args.experiment_name,
             "validation": {"threshold": None},
         },
     }
@@ -224,9 +254,9 @@ def main() -> None:
             case_dir / "prediction_metadata.json",
             {
                 "case_id": case_id,
-                "study_name": "nnunet-track-a",
-                "run_label": f"dataset{args.dataset_id}-{args.configuration}-5fold-final",
-                "experiment_name": f"nnunetv2-dataset{args.dataset_id}-{args.configuration}",
+                "study_name": args.study_name,
+                "run_label": args.run_label,
+                "experiment_name": args.experiment_name,
                 "source_prediction_path": str(src),
                 "source_prediction_dir": str(args.pred_dir),
                 "checkpoint": args.checkpoint,
