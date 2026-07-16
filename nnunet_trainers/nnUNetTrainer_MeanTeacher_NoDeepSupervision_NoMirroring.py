@@ -69,6 +69,58 @@ except Exception:  # pragma: no cover
         )
 
 
+# ---------------------------------------------------------------------------------------------------
+# Differentiable soft-skeleton / soft-clDice (Shit et al. 2021), self-contained so the trainer needs
+# no import from the lung_airway_segmentation package inside the ctfm nnU-Net env. Mirrors
+# lung_airway_segmentation/losses/topology.py (soft_erode/soft_open/soft_skeleton/soft_cldice_loss);
+# used for the geometry-aware "cldice" consistency mode. Reference: https://github.com/jocpae/clDice
+# ---------------------------------------------------------------------------------------------------
+def _soft_erode3d(x: torch.Tensor) -> torch.Tensor:
+    d = -F.max_pool3d(-x, (3, 1, 1), 1, (1, 0, 0))
+    h = -F.max_pool3d(-x, (1, 3, 1), 1, (0, 1, 0))
+    w = -F.max_pool3d(-x, (1, 1, 3), 1, (0, 0, 1))
+    return torch.minimum(torch.minimum(d, h), w)
+
+
+def _soft_open3d(x: torch.Tensor) -> torch.Tensor:
+    return F.max_pool3d(_soft_erode3d(x), 3, 1, 1)
+
+
+def _soft_skeleton3d(x: torch.Tensor, iterations: int) -> torch.Tensor:
+    opened = _soft_open3d(x)
+    skeleton = F.relu(x - opened)
+    for _ in range(int(iterations)):
+        x = _soft_erode3d(x)
+        opened = _soft_open3d(x)
+        delta = F.relu(x - opened)
+        skeleton = skeleton + F.relu(delta - skeleton * delta)
+    return skeleton
+
+
+def _soft_cldice_consistency(student_fg: torch.Tensor, teacher_fg: torch.Tensor,
+                             iterations: int, smooth: float = 1.0) -> torch.Tensor:
+    """Soft-clDice between the student's airway prob and the teacher's (binarised) tree.
+
+    student_fg / teacher_fg are (B, 1, D, H, W) in [0, 1]; the teacher is detached and thresholded at
+    0.5 to a fixed target tree (an online, geometry-level pseudo-label). Gradient flows only through the
+    student's soft skeleton / soft prob. Unlike voxel-MSE this normalises over the CENTRELINE, so the
+    sparse airway is at the right scale WITHOUT class-balancing — which removes the ~100x gradient
+    amplification that collapsed the balanced-MSE teacher.
+    """
+    target = (teacher_fg > 0.5).float()
+    skel_pred = _soft_skeleton3d(student_fg, iterations)
+    skel_true = _soft_skeleton3d(target, iterations)
+    batch = student_fg.shape[0]
+    skel_p = skel_pred.reshape(batch, -1)
+    skel_t = skel_true.reshape(batch, -1)
+    pred = student_fg.reshape(batch, -1)
+    true = target.reshape(batch, -1)
+    t_prec = (torch.sum(skel_p * true, dim=1) + smooth) / (torch.sum(skel_p, dim=1) + smooth)
+    t_sens = (torch.sum(skel_t * pred, dim=1) + smooth) / (torch.sum(skel_t, dim=1) + smooth)
+    cl_dice = 1.0 - 2.0 * (t_prec * t_sens) / (t_prec + t_sens)
+    return cl_dice.mean()
+
+
 class nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring(_Base):
     """EMA Mean-Teacher on top of the NoDeepSupervision + NoMirroring nnU-Net recipe."""
 
@@ -89,16 +141,14 @@ class nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring(_Base):
                                          # the rest). A slower teacher is a stabiliser once consistency
                                          # is doing real work: it resists being dragged into the MT
                                          # collapse the pilot exhibited at high weight.
-        self.consistency_max = 0.3       # w_max for MSE consistency. History: plain whole-patch MSE
-                                         # gave <0.1% of the loss (airways ~1% of voxels drowned by bg
-                                         # agreement). Class-balancing (below) fixed that BUT balancing
-                                         # divides by the small airway count, so each airway voxel's
-                                         # gradient is amplified ~100x -> at w_max=1.0 the pilot teacher
-                                         # COLLAPSED (pseudo-Dice 0.96 -> 0.28 as weight -> 1.0): the
-                                         # consistency term dominates the gradient even at ~3% of the
-                                         # loss value. 0.3 keeps consistency meaningful (~1%) with a
-                                         # gradient the supervised signal can anchor. Re-pilot to
-                                         # confirm pseudo-Dice holds through the ramp before scaling up.
+        self.consistency_max = 0.1       # w_max. NOTE the right scale depends on consistency_mode:
+                                         # the voxel-MSE modes use ~0.3 (and still COLLAPSED — plain MSE
+                                         # was diluted to the null, class-balancing then amplified the
+                                         # airway gradient ~100x and collapsed the teacher: 0.96->0.28).
+                                         # The default "cldice" mode returns 1-clDice in [0,1] (~0.3-0.6
+                                         # early), ~5x larger than balanced-MSE, so it wants a ~5x
+                                         # SMALLER weight -> start 0.1 and calibrate from the pilot's
+                                         # consistency_fraction (target a few %) + pseudo-Dice stability.
 
         # --- supervised warm-up then sigmoid ramp (tied to the ~epoch-300 supervised plateau) ---
         self.consistency_warmup_epochs = 300  # consistency held at 0 before this epoch
@@ -111,20 +161,20 @@ class nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring(_Base):
         self.teacher_noise_std = 0.0     # teacher sees the clean (weak) view
 
         # --- consistency reduction mode ---
-        #   "balanced_confident" (DEFAULT) — class-balanced MSE over only teacher-CONFIDENT voxels:
-        #               average airway-channel MSE over confident-airway (teacher_fg>=fg_conf) and
-        #               confident-bg (teacher_fg<=bg_conf) separately, combine 50/50; DROP the uncertain
-        #               band. This is UA-MT confidence gating + CBMT class-balancing. Rationale: plain
-        #               "balanced" (below) escaped the null but COLLAPSED the teacher at both w=1.0 and
-        #               w=0.3 — balancing amplifies the airway gradient ~100x and the disagreement lives
-        #               on the uncertain boundary/distal voxels, so chasing the teacher's unreliable
-        #               guesses there drove positive-feedback collapse. Gating to confident voxels breaks
-        #               that loop. (Risk: confident voxels are agreement zones -> may revert to the null.)
-        #   "balanced"  — class-balanced MSE over ALL voxels (partition at partition_threshold). Escapes
-        #               the null but collapses on sparse airways; kept as the ablation that shows why.
-        #   "confident" — hard confidence mask, UNbalanced (still bg-dominated); ablation.
+        #   "cldice" (DEFAULT) — GEOMETRY-AWARE consistency: soft-clDice between the student's airway
+        #               prob and the teacher's binarised tree (an online centreline-level pseudo-label).
+        #               Enforces agreement on the SKELETON/tree, not per-voxel probability. Motivated by
+        #               the tubular-SSL literature (MICCAI 2024, airways): "data-level [voxel] consistency
+        #               overlooks geometric shape". Normalises over the centreline, so no class-balancing
+        #               and hence NONE of the ~100x gradient amplification that collapsed the MSE modes.
+        #   "balanced_confident" — class-balanced MSE over teacher-CONFIDENT voxels only (UA-MT gating +
+        #               CBMT balancing). Kept as a voxel-consistency comparison.
+        #   "balanced"  — class-balanced MSE over ALL voxels. Escapes the null but COLLAPSED the teacher
+        #               (0.96->0.28 at w=1.0; ->0.19 val at w=0.3); the ablation that shows why.
+        #   "confident" — hard confidence mask, UNbalanced (bg-dominated); ablation.
         #   "plain"     — UA-MT whole-patch MSE (the null baseline); ablation.
-        self.consistency_mode = "balanced_confident"
+        self.consistency_mode = "cldice"
+        self.cldice_iters = 10           # soft-skeleton iterations; >= largest airway radius in voxels
         self.partition_threshold = 0.5   # teacher airway/bg split for "balanced"
         self.fg_conf_threshold = 0.8     # confident-airway cut for the *_confident modes
         self.bg_conf_threshold = 0.2     # confident-bg cut for the *_confident modes
@@ -176,6 +226,11 @@ class nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring(_Base):
     def _consistency(self, student_logits: torch.Tensor, teacher_logits: torch.Tensor) -> torch.Tensor:
         student = torch.softmax(student_logits.float(), dim=1)
         teacher = torch.softmax(teacher_logits.float(), dim=1).detach()
+
+        if self.consistency_mode == "cldice":
+            # Geometry-aware: soft-clDice on the airway channel (B,1,D,H,W), student vs teacher tree.
+            return _soft_cldice_consistency(student[:, 1:2], teacher[:, 1:2], self.cldice_iters)
+
         student_fg = student[:, 1]                       # [B, *spatial] airway channel
         teacher_fg = teacher[:, 1]
         err = (student_fg - teacher_fg).pow(2)           # per-voxel MSE on the airway prob
@@ -228,8 +283,8 @@ class nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring(_Base):
             f"[MeanTeacher] teacher built from student. ema_decay={self.ema_decay} "
             f"consistency_max={self.consistency_max} warmup={self.consistency_warmup_epochs} "
             f"rampup={self.consistency_rampup} epochs={self.num_epochs} lr={self.initial_lr} "
-            f"consistency_mode={self.consistency_mode} fg_conf={self.fg_conf_threshold} "
-            f"bg_conf={self.bg_conf_threshold}"
+            f"consistency_mode={self.consistency_mode} cldice_iters={self.cldice_iters} "
+            f"fg_conf={self.fg_conf_threshold} bg_conf={self.bg_conf_threshold}"
         )
 
     def on_train_end(self) -> None:
