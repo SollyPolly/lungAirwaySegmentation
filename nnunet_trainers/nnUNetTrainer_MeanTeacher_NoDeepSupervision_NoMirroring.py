@@ -235,15 +235,20 @@ class nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring(_Base):
         # retained.)
         if self.teacher is None:
             return
-        ema_history = self.logger.my_fantastic_logging.get('ema_fg_dice', [])
-        if not ema_history:
+        # Piggyback on the base trainer's OWN running-best signal `self._best_ema` — the exact value it
+        # uses to decide checkpoint_best and to print "Yayy! New best EMA pseudo Dice". This avoids the
+        # logger internals, whose attribute varies across nnU-Net builds (this env's logger is a
+        # `MetaLogger` with no `my_fantastic_logging`). When `_best_ema` advances this epoch, the student
+        # (hence its EMA teacher) just peaked -> snapshot the teacher. getattr keeps it non-fatal if the
+        # attribute is ever renamed (best-teacher just no-ops rather than crashing the run).
+        best_ema = getattr(self, "_best_ema", None)
+        if best_ema is None:
             return
-        ema_dice = ema_history[-1]
-        if self._best_teacher_ema is None or ema_dice > self._best_teacher_ema:
-            self._best_teacher_ema = ema_dice
+        if self._best_teacher_ema is None or best_ema > self._best_teacher_ema:
+            self._best_teacher_ema = best_ema
             self._save_teacher_checkpoint('checkpoint_best_teacher.pth')
             self.print_to_log_file(
-                f"[MeanTeacher] new best teacher @ EMA pseudo Dice {ema_dice:.4f} "
+                f"[MeanTeacher] new best teacher @ EMA pseudo Dice {best_ema:.4f} "
                 f"-> checkpoint_best_teacher.pth"
             )
 
