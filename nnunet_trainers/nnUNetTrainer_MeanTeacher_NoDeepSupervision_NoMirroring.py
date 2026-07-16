@@ -84,7 +84,11 @@ class nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring(_Base):
 
         # --- Mean-Teacher hyperparameters (UA-MT defaults) ---
         self.ema_decay = 0.99            # with the step clamp below == "fast-early / slow-later"
-        self.consistency_max = 0.1       # w_max for MSE consistency
+        self.consistency_max = 1.0       # w_max for MSE consistency. Bumped 0.1 -> 1.0 alongside the
+                                         # class-balanced consistency below: plain whole-patch MSE
+                                         # collapsed to <0.1% of the loss (airways are ~1% of voxels,
+                                         # so background agreement drowned the signal). Balancing lifts
+                                         # cons ~100x, so w_max is raised to keep it a few % of sup.
 
         # --- supervised warm-up then sigmoid ramp (tied to the ~epoch-300 supervised plateau) ---
         self.consistency_warmup_epochs = 300  # consistency held at 0 before this epoch
@@ -96,10 +100,18 @@ class nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring(_Base):
         self.student_shift = 0.1
         self.teacher_noise_std = 0.0     # teacher sees the clean (weak) view
 
-        # --- optional MONAI-style hard confidence mask (ablation; UA-MT uses none) ---
-        self.use_confidence_mask = False
-        self.fg_threshold = 0.8
-        self.bg_threshold = 0.2
+        # --- consistency reduction mode ---
+        #   "balanced"  (DEFAULT) — class-balanced MSE: average the airway-channel MSE over the
+        #               teacher-airway voxels and over the teacher-background voxels SEPARATELY, then
+        #               combine 50/50, so the sparse airway region is not diluted 100:1 by background.
+        #               This is the fix for the starved-consistency null (both the MONAI leaky-teacher
+        #               null and the plain-MSE-on-nnU-Net pilot null).
+        #   "confident" — MONAI-style hard confidence mask, UNbalanced (kept as an ablation: this is
+        #               what the earlier pilot's use_confidence_mask path did; still bg-dominated).
+        #   "plain"     — UA-MT whole-patch MSE (the null baseline; kept for the ablation table).
+        self.consistency_mode = "balanced"
+        self.fg_threshold = 0.5          # teacher airway-prob split for the balanced partition
+        self.bg_threshold = 0.2          # confident-bg cut, only used by the "confident" ablation
 
         # --- state ---
         self.teacher = None
@@ -142,15 +154,28 @@ class nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring(_Base):
     def _consistency(self, student_logits: torch.Tensor, teacher_logits: torch.Tensor) -> torch.Tensor:
         student = torch.softmax(student_logits.float(), dim=1)
         teacher = torch.softmax(teacher_logits.float(), dim=1).detach()
-        squared_error = (student - teacher).pow(2)
-        if not self.use_confidence_mask:
-            return squared_error.mean()
-        # Ablation: restrict to voxels where the teacher's airway prob is confident.
-        fg = teacher[:, 1:2]
-        confident = (fg >= self.fg_threshold) | (fg <= self.bg_threshold)
-        if not confident.any():
-            return student.sum() * 0.0
-        return squared_error.mean(dim=1, keepdim=True)[confident].mean()
+        student_fg = student[:, 1]                       # [B, *spatial] airway channel
+        teacher_fg = teacher[:, 1]
+        err = (student_fg - teacher_fg).pow(2)           # per-voxel MSE on the airway prob
+
+        if self.consistency_mode == "plain":
+            return err.mean()
+
+        if self.consistency_mode == "confident":
+            # Ablation: mask to teacher-confident voxels but do NOT class-balance (bg-dominated).
+            confident = (teacher_fg >= self.fg_threshold) | (teacher_fg <= self.bg_threshold)
+            if not confident.any():
+                return err.sum() * 0.0
+            return err[confident].mean()
+
+        # "balanced" (default): equal weight to the sparse airway region and the background so the
+        # ~1% airway voxels where teacher/student actually disagree are not diluted to ~0. Partition
+        # every voxel by the teacher's airway belief, average the MSE within each side, combine 50/50.
+        fg_mask = teacher_fg >= self.fg_threshold
+        bg_mask = ~fg_mask
+        fg_err = err[fg_mask].mean() if fg_mask.any() else err.sum() * 0.0
+        bg_err = err[bg_mask].mean() if bg_mask.any() else err.sum() * 0.0
+        return 0.5 * (fg_err + bg_err)
 
     def _perturb(self, data: torch.Tensor, noise_std: float, scale_amp: float, shift_amp: float) -> torch.Tensor:
         out = data
@@ -171,7 +196,7 @@ class nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring(_Base):
             f"[MeanTeacher] teacher built from student. ema_decay={self.ema_decay} "
             f"consistency_max={self.consistency_max} warmup={self.consistency_warmup_epochs} "
             f"rampup={self.consistency_rampup} epochs={self.num_epochs} lr={self.initial_lr} "
-            f"confidence_mask={self.use_confidence_mask}"
+            f"consistency_mode={self.consistency_mode} fg_threshold={self.fg_threshold}"
         )
 
     def on_train_end(self) -> None:
