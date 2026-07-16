@@ -5,19 +5,28 @@ self-training rung (Dataset121). Trains on Dataset122_ATM22MT: 20 real-GT cases 
 cases. nnU-Net's DC+CE loss skips the 90's voxels automatically (ignore label); this trainer adds
 an EMA-teacher consistency loss so the 90 (and the labelled patches too) contribute online.
 
-Design (grounded in the literature, see PROJECT_STATE / the plan):
-  - Init: warm-start from the @20 model via ``nnUNetv2_train ... -pretrained_weights <@20 ckpt>``.
-    The EMA teacher is deep-copied from the student AFTER those weights load, so it is the strong,
-    few-FP @20 model from step 1 — the fix for the from-scratch MONAI MT confirmation-bias null.
+PROTOCOL — matched to the @121 self-training rung so the arms are comparable:
+  from-scratch, 1000 epochs, fold 0, NoDeepSupervision + NoMirroring, nnU-Net's default poly LR.
+  NO warm-start: the EMA teacher co-evolves from a random-init student. This is (a) canonical Mean
+  Teacher (UA-MT trains from scratch), and (b) the clean counterpart to self-training's FIXED @20
+  teacher — so "@122 (MT) vs @121 (self-training)" isolates online-EMA vs offline-frozen targets,
+  nothing else. (An @20-warm-started, short-schedule variant is possible but confounds the compare;
+  keep it only as a fast pilot, not the reportable run.)
+
+Design (grounded in the literature — UA-MT / Yu et al. MICCAI 2019, Tarvainen & Valpola 2017):
   - EMA:  θ'_t = α θ'_{t-1} + (1-α) θ_t, with UA-MT's step clamp α = min(1 - 1/(t+1), 0.99), which
-    is the original Mean-Teacher "fast-early / slow-later" schedule (Tarvainen & Valpola 2017).
-  - Consistency: plain MSE on softmax probabilities over the WHOLE batch (UA-MT, Yu et al. MICCAI
-    2019). Whole-batch (not unlabelled-only) means nnU-Net's foreground oversampling on the 20
-    labelled cases feeds airway-rich patches into the consistency term — the fix for the MONAI
-    starved-signal null. A MONAI-style hard confidence mask is available as an ablation (off).
-  - Ramp: sigmoid w = 0.1 * exp(-5 (1-x)^2), x = min(epoch/rampup, 1), rampup = 40 epochs.
+    is the original Mean-Teacher "fast-early / slow-later" schedule.
+  - Consistency: plain MSE on softmax probabilities over the WHOLE batch (UA-MT). Whole-batch (not
+    unlabelled-only) means nnU-Net's foreground oversampling on the 20 labelled cases feeds
+    airway-rich patches into the consistency term — the fix for the MONAI starved-signal null. A
+    MONAI-style hard confidence mask is available as an ablation (off by default).
+  - SUPERVISED WARM-UP: hold consistency at 0 until the supervised task plateaus (~epoch 300), THEN
+    sigmoid-ramp w = 0.1 * exp(-5 (1-x)^2) over the next 200 epochs. From scratch the early EMA
+    teacher is unreliable; engaging consistency only once the teacher is a good, high-precision
+    model is what avoids the from-scratch confirmation-bias window that sank the original MONAI MT.
   - Views: student = strong intensity perturbation, teacher = clean; both share nnU-Net's spatial
-    augmentation upstream, so voxel correspondence (required for consistency) is exact.
+    augmentation upstream, so voxel correspondence (required for consistency) is exact. During the
+    warm-up the student trains on the clean patch (identical to a standard supervised run).
   - Inference model = the EMA teacher: at train end the teacher weights are copied into the network
     so checkpoint_final holds the teacher (predict with the default checkpoint_final).
 
@@ -34,7 +43,7 @@ import os
 from copy import deepcopy
 
 import torch
-import torch.nn.functional as F
+import torch.nn.functional as F  # noqa: F401  (kept for ablation experiments)
 from torch import autocast
 
 import nnunetv2
@@ -63,17 +72,23 @@ except Exception:  # pragma: no cover
 class nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring(_Base):
     """EMA Mean-Teacher on top of the NoDeepSupervision + NoMirroring nnU-Net recipe."""
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, plans: dict, configuration: str, fold: int, dataset_json: dict,
+                 device: torch.device = torch.device("cuda")):
+        # NOTE: keep these exact parameter names — nnUNetTrainer.__init__ reflects on
+        # self.__init__'s signature and does `locals()[name]`, so a (*args, **kwargs)
+        # signature raises KeyError: 'args'. Must mirror the base signature exactly.
+        super().__init__(plans, configuration, fold, dataset_json, device)
 
-        # --- schedule: a short warm-start fine-tune, NOT the 1000-epoch from-scratch run ---
-        self.num_epochs = 100
-        self.initial_lr = 1e-3  # nnU-Net's default 1e-2 poly would blow up a converged @20
+        # --- schedule: from-scratch, protocol-matched to @121 (inherit num_epochs=1000, lr=1e-2) ---
+        # No overrides here on purpose: same length + LR schedule as the self-training rung.
 
         # --- Mean-Teacher hyperparameters (UA-MT defaults) ---
         self.ema_decay = 0.99            # with the step clamp below == "fast-early / slow-later"
         self.consistency_max = 0.1       # w_max for MSE consistency
-        self.consistency_rampup = 40.0   # epochs of the sigmoid ramp
+
+        # --- supervised warm-up then sigmoid ramp (tied to the ~epoch-300 supervised plateau) ---
+        self.consistency_warmup_epochs = 300  # consistency held at 0 before this epoch
+        self.consistency_rampup = 200.0       # then ramp to full weight over this many epochs
 
         # --- student(strong) / teacher(weak) intensity perturbation on nnU-Net-normalised CT ---
         self.student_noise_std = 0.1
@@ -100,7 +115,7 @@ class nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring(_Base):
 
     # ------------------------------------------------------------------ teacher / EMA -------
     def _build_teacher(self) -> None:
-        """Deep-copy the (warm-started) student into a frozen EMA teacher."""
+        """Deep-copy the student into a frozen EMA teacher (random-init copy when from scratch)."""
         self.teacher = deepcopy(self.network)
         for p in self.teacher.parameters():
             p.requires_grad_(False)
@@ -118,7 +133,10 @@ class nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring(_Base):
 
     # ------------------------------------------------------------------ consistency --------
     def _consistency_weight(self) -> float:
-        x = min(self.current_epoch / max(self.consistency_rampup, 1e-8), 1.0)
+        epoch = self.current_epoch - self.consistency_warmup_epochs
+        if epoch < 0:
+            return 0.0
+        x = min(epoch / max(self.consistency_rampup, 1e-8), 1.0)
         return self.consistency_max * math.exp(-5.0 * (1.0 - x) ** 2)
 
     def _consistency(self, student_logits: torch.Tensor, teacher_logits: torch.Tensor) -> torch.Tensor:
@@ -147,12 +165,12 @@ class nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring(_Base):
 
     # ------------------------------------------------------------------ hooks --------------
     def on_train_start(self) -> None:
-        super().on_train_start()  # ensures initialize() ran; pretrained weights already loaded
+        super().on_train_start()  # ensures initialize() ran (builds the random-init network)
         self._build_teacher()
         self.print_to_log_file(
             f"[MeanTeacher] teacher built from student. ema_decay={self.ema_decay} "
-            f"consistency_max={self.consistency_max} rampup={self.consistency_rampup} "
-            f"epochs={self.num_epochs} lr={self.initial_lr} "
+            f"consistency_max={self.consistency_max} warmup={self.consistency_warmup_epochs} "
+            f"rampup={self.consistency_rampup} epochs={self.num_epochs} lr={self.initial_lr} "
             f"confidence_mask={self.use_confidence_mask}"
         )
 
@@ -190,19 +208,31 @@ class nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring(_Base):
         if self.teacher is None:  # safety net if on_train_start ordering ever changes
             self._build_teacher()
 
-        student_in = self._perturb(data, self.student_noise_std, self.student_scale, self.student_shift)
-        teacher_in = data if self.teacher_noise_std <= 0 else self._perturb(data, self.teacher_noise_std, 0.0, 0.0)
+        weight = self._consistency_weight()
+        use_consistency = weight > 0.0
+        # During the supervised warm-up: train on the clean patch (== a standard supervised run) and
+        # skip the teacher forward (saves ~1/3 compute). The strong student view + consistency only
+        # switch on once the teacher is a reliable target.
+        student_in = (
+            self._perturb(data, self.student_noise_std, self.student_scale, self.student_shift)
+            if use_consistency else data
+        )
 
         self.optimizer.zero_grad(set_to_none=True)
         with autocast(self.device.type, enabled=True) if self.device.type == "cuda" else dummy_context():
             output = self.network(student_in)
             supervised_loss = self.loss(output, target)  # ignore label masks the 90 automatically
-            with torch.no_grad():
-                self.teacher.eval()
-                teacher_output = self.teacher(teacher_in)
-            consistency = self._consistency(output, teacher_output)
-            weight = self._consistency_weight()
-            loss = supervised_loss + weight * consistency
+            if use_consistency:
+                teacher_in = data if self.teacher_noise_std <= 0 else self._perturb(
+                    data, self.teacher_noise_std, 0.0, 0.0)
+                with torch.no_grad():
+                    self.teacher.eval()
+                    teacher_output = self.teacher(teacher_in)
+                consistency = self._consistency(output, teacher_output)
+                loss = supervised_loss + weight * consistency
+            else:
+                consistency = supervised_loss.new_zeros(())
+                loss = supervised_loss
 
         if self.grad_scaler is not None:
             self.grad_scaler.scale(loss).backward()
