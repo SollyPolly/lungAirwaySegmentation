@@ -253,3 +253,29 @@ class nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring(_Base):
         self._log_w = weight
         self._log_n += 1
         return {"loss": loss.detach().cpu().numpy()}
+
+
+class nnUNetTrainer_MeanTeacher_Pilot_NoDeepSupervision_NoMirroring(
+    nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring
+):
+    """FAST pilot — validate the whole MT machinery end-to-end in ~15-20 min. NOT reportable.
+
+    Meant to be launched WARM-STARTED from the @20 model, so a converged teacher exists from
+    step 1 and consistency can engage almost immediately:
+        nnUNetv2_train 122 3d_fullres 0 \
+          -tr nnUNetTrainer_MeanTeacher_Pilot_NoDeepSupervision_NoMirroring \
+          -pretrained_weights <Dataset120 fold_0 checkpoint_final.pth>
+
+    It exercises: pretrained load, teacher build, supervised (ignore-masked) loss, the strong/weak
+    views, consistency + sigmoid ramp, `consistency_fraction` logging, EMA update, and the
+    teacher-as-checkpoint_final deploy — then you can predict+score it as a dry run of the chain.
+    The REPORTABLE run uses the parent trainer (from scratch, 1000 ep, no pretrained).
+    """
+
+    def __init__(self, plans: dict, configuration: str, fold: int, dataset_json: dict,
+                 device: torch.device = torch.device("cuda")):
+        super().__init__(plans, configuration, fold, dataset_json, device)
+        self.num_epochs = 10             # ~15-20 min total
+        self.initial_lr = 1e-3           # low LR: warm-started from a converged @20
+        self.consistency_warmup_epochs = 1   # engage consistency almost immediately
+        self.consistency_rampup = 3.0        # full weight by epoch 4, so the pilot exercises it
