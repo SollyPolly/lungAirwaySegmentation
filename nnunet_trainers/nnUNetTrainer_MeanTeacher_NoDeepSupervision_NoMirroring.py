@@ -84,11 +84,21 @@ class nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring(_Base):
 
         # --- Mean-Teacher hyperparameters (UA-MT defaults) ---
         self.ema_decay = 0.99            # with the step clamp below == "fast-early / slow-later"
-        self.consistency_max = 1.0       # w_max for MSE consistency. Bumped 0.1 -> 1.0 alongside the
-                                         # class-balanced consistency below: plain whole-patch MSE
-                                         # collapsed to <0.1% of the loss (airways are ~1% of voxels,
-                                         # so background agreement drowned the signal). Balancing lifts
-                                         # cons ~100x, so w_max is raised to keep it a few % of sup.
+        self.ema_decay_late = 0.999      # after the consistency ramp completes, slow the teacher down
+                                         # (Tarvainen & Valpola: alpha 0.99 during ramp-up -> 0.999 for
+                                         # the rest). A slower teacher is a stabiliser once consistency
+                                         # is doing real work: it resists being dragged into the MT
+                                         # collapse the pilot exhibited at high weight.
+        self.consistency_max = 0.3       # w_max for MSE consistency. History: plain whole-patch MSE
+                                         # gave <0.1% of the loss (airways ~1% of voxels drowned by bg
+                                         # agreement). Class-balancing (below) fixed that BUT balancing
+                                         # divides by the small airway count, so each airway voxel's
+                                         # gradient is amplified ~100x -> at w_max=1.0 the pilot teacher
+                                         # COLLAPSED (pseudo-Dice 0.96 -> 0.28 as weight -> 1.0): the
+                                         # consistency term dominates the gradient even at ~3% of the
+                                         # loss value. 0.3 keeps consistency meaningful (~1%) with a
+                                         # gradient the supervised signal can anchor. Re-pilot to
+                                         # confirm pseudo-Dice holds through the ramp before scaling up.
 
         # --- supervised warm-up then sigmoid ramp (tied to the ~epoch-300 supervised plateau) ---
         self.consistency_warmup_epochs = 300  # consistency held at 0 before this epoch
@@ -120,6 +130,7 @@ class nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring(_Base):
         self._log_sup = 0.0
         self._log_w = 0.0
         self._log_n = 0
+        self._best_teacher_ema = None    # best EMA pseudo-Dice at which we snapshotted the teacher
 
     # torch.compile complicates deepcopy + EMA + state_dict swapping; disable it for this arm.
     def _do_i_compile(self) -> bool:
@@ -133,8 +144,13 @@ class nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring(_Base):
             p.requires_grad_(False)
         self.teacher.eval()
 
+    def _ramp_end_epoch(self) -> float:
+        return self.consistency_warmup_epochs + self.consistency_rampup
+
     def _update_ema(self) -> None:
-        alpha = min(1.0 - 1.0 / (self._mt_step + 1), self.ema_decay)
+        # 0.99 during warm-up + ramp, 0.999 once consistency is at full weight (Tarvainen & Valpola).
+        cap = self.ema_decay_late if self.current_epoch >= self._ramp_end_epoch() else self.ema_decay
+        alpha = min(1.0 - 1.0 / (self._mt_step + 1), cap)
         student_params = dict(self.network.named_parameters())
         student_buffers = dict(self.network.named_buffers())
         with torch.no_grad():
@@ -206,6 +222,44 @@ class nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring(_Base):
             self.network.load_state_dict(self.teacher.state_dict())
             self.print_to_log_file("[MeanTeacher] deployed EMA teacher weights as the final network.")
         super().on_train_end()
+
+    def on_epoch_end(self) -> None:
+        super().on_epoch_end()  # logs metrics, saves checkpoint_best (STUDENT) + periodic, steps epoch
+        # Best-TEACHER checkpoint. checkpoint_final holds the FINAL teacher (reportable protocol), but
+        # if the teacher collapses late (the pilot's failure mode) that file is poisoned AND nnU-Net's
+        # checkpoint_best is a STUDENT, not the teacher we infer with. So snapshot the teacher whenever
+        # nnU-Net records a new best EMA pseudo-Dice: a late collapse stays fully recoverable to a good
+        # teacher via `nnUNetv2_predict ... -chk checkpoint_best_teacher.pth`. (Uses the student's
+        # smoothed pseudo-Dice as the proxy for teacher quality — teacher is its EMA, so they peak
+        # together; when the student collapses no new best is recorded and the pre-collapse teacher is
+        # retained.)
+        if self.teacher is None:
+            return
+        ema_history = self.logger.my_fantastic_logging.get('ema_fg_dice', [])
+        if not ema_history:
+            return
+        ema_dice = ema_history[-1]
+        if self._best_teacher_ema is None or ema_dice > self._best_teacher_ema:
+            self._best_teacher_ema = ema_dice
+            self._save_teacher_checkpoint('checkpoint_best_teacher.pth')
+            self.print_to_log_file(
+                f"[MeanTeacher] new best teacher @ EMA pseudo Dice {ema_dice:.4f} "
+                f"-> checkpoint_best_teacher.pth"
+            )
+
+    def _save_teacher_checkpoint(self, filename: str) -> None:
+        """Write a fully nnU-Net-loadable checkpoint holding the TEACHER weights, by temporarily
+        swapping them into self.network and reusing the base save_checkpoint (so the file structure
+        matches checkpoint_final exactly). Student weights are restored in a finally block; load_state_dict
+        copies in place, so parameter identity — and thus the optimizer state — is preserved."""
+        if self.teacher is None:
+            return
+        student_state = deepcopy(self.network.state_dict())
+        try:
+            self.network.load_state_dict(self.teacher.state_dict())
+            self.save_checkpoint(os.path.join(self.output_folder, filename))
+        finally:
+            self.network.load_state_dict(student_state)
 
     def on_train_epoch_end(self, train_outputs) -> None:
         super().on_train_epoch_end(train_outputs)
