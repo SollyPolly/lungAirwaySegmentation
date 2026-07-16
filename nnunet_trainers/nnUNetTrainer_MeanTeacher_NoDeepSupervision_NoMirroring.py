@@ -111,17 +111,23 @@ class nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring(_Base):
         self.teacher_noise_std = 0.0     # teacher sees the clean (weak) view
 
         # --- consistency reduction mode ---
-        #   "balanced"  (DEFAULT) — class-balanced MSE: average the airway-channel MSE over the
-        #               teacher-airway voxels and over the teacher-background voxels SEPARATELY, then
-        #               combine 50/50, so the sparse airway region is not diluted 100:1 by background.
-        #               This is the fix for the starved-consistency null (both the MONAI leaky-teacher
-        #               null and the plain-MSE-on-nnU-Net pilot null).
-        #   "confident" — MONAI-style hard confidence mask, UNbalanced (kept as an ablation: this is
-        #               what the earlier pilot's use_confidence_mask path did; still bg-dominated).
-        #   "plain"     — UA-MT whole-patch MSE (the null baseline; kept for the ablation table).
-        self.consistency_mode = "balanced"
-        self.fg_threshold = 0.5          # teacher airway-prob split for the balanced partition
-        self.bg_threshold = 0.2          # confident-bg cut, only used by the "confident" ablation
+        #   "balanced_confident" (DEFAULT) — class-balanced MSE over only teacher-CONFIDENT voxels:
+        #               average airway-channel MSE over confident-airway (teacher_fg>=fg_conf) and
+        #               confident-bg (teacher_fg<=bg_conf) separately, combine 50/50; DROP the uncertain
+        #               band. This is UA-MT confidence gating + CBMT class-balancing. Rationale: plain
+        #               "balanced" (below) escaped the null but COLLAPSED the teacher at both w=1.0 and
+        #               w=0.3 — balancing amplifies the airway gradient ~100x and the disagreement lives
+        #               on the uncertain boundary/distal voxels, so chasing the teacher's unreliable
+        #               guesses there drove positive-feedback collapse. Gating to confident voxels breaks
+        #               that loop. (Risk: confident voxels are agreement zones -> may revert to the null.)
+        #   "balanced"  — class-balanced MSE over ALL voxels (partition at partition_threshold). Escapes
+        #               the null but collapses on sparse airways; kept as the ablation that shows why.
+        #   "confident" — hard confidence mask, UNbalanced (still bg-dominated); ablation.
+        #   "plain"     — UA-MT whole-patch MSE (the null baseline); ablation.
+        self.consistency_mode = "balanced_confident"
+        self.partition_threshold = 0.5   # teacher airway/bg split for "balanced"
+        self.fg_conf_threshold = 0.8     # confident-airway cut for the *_confident modes
+        self.bg_conf_threshold = 0.2     # confident-bg cut for the *_confident modes
 
         # --- state ---
         self.teacher = None
@@ -179,16 +185,26 @@ class nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring(_Base):
 
         if self.consistency_mode == "confident":
             # Ablation: mask to teacher-confident voxels but do NOT class-balance (bg-dominated).
-            confident = (teacher_fg >= self.fg_threshold) | (teacher_fg <= self.bg_threshold)
+            confident = (teacher_fg >= self.fg_conf_threshold) | (teacher_fg <= self.bg_conf_threshold)
             if not confident.any():
                 return err.sum() * 0.0
             return err[confident].mean()
 
-        # "balanced" (default): equal weight to the sparse airway region and the background so the
-        # ~1% airway voxels where teacher/student actually disagree are not diluted to ~0. Partition
-        # every voxel by the teacher's airway belief, average the MSE within each side, combine 50/50.
-        fg_mask = teacher_fg >= self.fg_threshold
-        bg_mask = ~fg_mask
+        if self.consistency_mode == "balanced":
+            # Class-balance over ALL voxels. Escapes the null but collapses on sparse airways (see note).
+            fg_mask = teacher_fg >= self.partition_threshold
+            bg_mask = ~fg_mask
+            fg_err = err[fg_mask].mean() if fg_mask.any() else err.sum() * 0.0
+            bg_err = err[bg_mask].mean() if bg_mask.any() else err.sum() * 0.0
+            return 0.5 * (fg_err + bg_err)
+
+        # "balanced_confident" (default): balance FG/BG but ONLY over teacher-CONFIDENT voxels; the
+        # uncertain band (bg_conf < teacher_fg < fg_conf) is excluded. That band is the boundary/distal
+        # region where the teacher is unreliable, and the ~100x-amplified FG gradient chasing it is what
+        # collapsed "balanced" at w=1.0 and w=0.3. Gating (UA-MT) + balancing (CBMT) keeps the airway
+        # signal without the positive-feedback loop.
+        fg_mask = teacher_fg >= self.fg_conf_threshold
+        bg_mask = teacher_fg <= self.bg_conf_threshold
         fg_err = err[fg_mask].mean() if fg_mask.any() else err.sum() * 0.0
         bg_err = err[bg_mask].mean() if bg_mask.any() else err.sum() * 0.0
         return 0.5 * (fg_err + bg_err)
@@ -212,7 +228,8 @@ class nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring(_Base):
             f"[MeanTeacher] teacher built from student. ema_decay={self.ema_decay} "
             f"consistency_max={self.consistency_max} warmup={self.consistency_warmup_epochs} "
             f"rampup={self.consistency_rampup} epochs={self.num_epochs} lr={self.initial_lr} "
-            f"consistency_mode={self.consistency_mode} fg_threshold={self.fg_threshold}"
+            f"consistency_mode={self.consistency_mode} fg_conf={self.fg_conf_threshold} "
+            f"bg_conf={self.bg_conf_threshold}"
         )
 
     def on_train_end(self) -> None:
