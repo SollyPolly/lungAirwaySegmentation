@@ -275,12 +275,46 @@ class nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring(_Base):
             out = out + torch.randn_like(out) * noise_std
         return out
 
+    # ------------------------------------------------------------------ checkpoint I/O -----
+    # Persist the EMA teacher ALONGSIDE nnU-Net's checkpoint (sidecar "<ckpt>.mt"). Without this a
+    # `-c` resume reloads the student into self.network, then on_train_start rebuilds teacher = copy of
+    # the student — DISCARDING the EMA teacher. Since consistency is active after ep300 and the ~40 h
+    # reportable run WILL resume >=1x, that would silently corrupt the teacher/target on every resume.
+    def save_checkpoint(self, filename: str) -> None:
+        super().save_checkpoint(filename)
+        if self.local_rank == 0 and not self.disable_checkpointing and self.teacher is not None:
+            torch.save(
+                {
+                    "teacher_weights": self.teacher.state_dict(),
+                    "_mt_step": self._mt_step,
+                    "_best_teacher_ema": self._best_teacher_ema,
+                },
+                filename + ".mt",
+            )
+
+    def load_checkpoint(self, filename_or_checkpoint) -> None:
+        super().load_checkpoint(filename_or_checkpoint)  # restores student into self.network + optimizer
+        if isinstance(filename_or_checkpoint, str) and os.path.isfile(filename_or_checkpoint + ".mt"):
+            mt = torch.load(filename_or_checkpoint + ".mt", map_location=self.device, weights_only=False)
+            if self.teacher is None:
+                self._build_teacher()  # allocate the module (self.network is loaded by now)
+            self.teacher.load_state_dict(mt["teacher_weights"])
+            self._mt_step = mt.get("_mt_step", self._mt_step)
+            self._best_teacher_ema = mt.get("_best_teacher_ema", self._best_teacher_ema)
+            self.print_to_log_file(
+                f"[MeanTeacher] restored EMA teacher from sidecar (.mt); _mt_step={self._mt_step}."
+            )
+
     # ------------------------------------------------------------------ hooks --------------
     def on_train_start(self) -> None:
         super().on_train_start()  # ensures initialize() ran (builds the random-init network)
-        self._build_teacher()
+        if self.teacher is None:  # fresh run; on a -c resume load_checkpoint already restored it
+            self._build_teacher()
+            built = "built from student"
+        else:
+            built = "restored from checkpoint (resume)"
         self.print_to_log_file(
-            f"[MeanTeacher] teacher built from student. ema_decay={self.ema_decay} "
+            f"[MeanTeacher] teacher {built}. ema_decay={self.ema_decay}->{self.ema_decay_late} "
             f"consistency_max={self.consistency_max} warmup={self.consistency_warmup_epochs} "
             f"rampup={self.consistency_rampup} epochs={self.num_epochs} lr={self.initial_lr} "
             f"consistency_mode={self.consistency_mode} cldice_iters={self.cldice_iters} "
