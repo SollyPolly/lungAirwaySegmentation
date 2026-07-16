@@ -22,6 +22,7 @@ docs/
 plot_scripts/
 presentation_scripts/
 tests/
+logs/
 
 writeup.md
 PROJECT_STATE.md
