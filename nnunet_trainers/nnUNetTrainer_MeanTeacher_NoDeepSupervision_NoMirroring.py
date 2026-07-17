@@ -469,3 +469,35 @@ class nnUNetTrainer_MeanTeacher_Pilot_NoDeepSupervision_NoMirroring(
         self.initial_lr = 1e-3           # low LR: warm-started from a converged @20
         self.consistency_warmup_epochs = 1   # engage consistency almost immediately
         self.consistency_rampup = 3.0        # full weight by epoch 4, so the pilot exercises it
+
+
+class nnUNetTrainer_MeanTeacher_WarmStart_NoDeepSupervision_NoMirroring(
+    nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring
+):
+    """REPORTABLE warm-started MT — initialise the student from the @20 floor (canonical UA-MT).
+
+    Launch warm-started from the Dataset120 @20 checkpoint:
+        nnUNetv2_train 122 3d_fullres 0 \
+          -tr nnUNetTrainer_MeanTeacher_WarmStart_NoDeepSupervision_NoMirroring \
+          -pretrained_weights <Dataset120 fold_0 checkpoint_final.pth>
+
+    WHY warm-start (not from scratch). Dataset122's 90 unlabelled cases are all-`ignore`, so during a
+    from-scratch SUPERVISED warm-up they are dead weight: nnU-Net samples cases ~uniformly, ~80% of
+    patches land in all-ignore cases -> their supervised loss is fully masked -> zero gradient. Measured
+    consequence (from-scratch run 2026-07-17): the supervised warm-up STALLS — train_loss ~flat at
+    ~-0.63 through ep57 (vs the @20 floor hitting -0.76 by ep5 and pseudo-Dice 0.87), pseudo-Dice pinned
+    at 0.0. Warm-starting from the converged @20 model removes the dependence on that warm-up: the
+    student is already good (so the dilution is harmless), and consistency engages early so the 90 earn
+    their keep via the label-free cldice consistency instead of sitting idle. This is exactly the config
+    the pilot validated (stable, Val Dice 0.907). The from-scratch variant (parent trainer) is kept for
+    the "match @121 from-scratch" protocol only if the sampling dilution is fixed first (dataloader
+    subclass biasing case selection to the GT cases while consistency is off) — see PROJECT_STATE.
+    """
+
+    def __init__(self, plans: dict, configuration: str, fold: int, dataset_json: dict,
+                 device: torch.device = torch.device("cuda")):
+        super().__init__(plans, configuration, fold, dataset_json, device)
+        self.num_epochs = 500                 # fine-tune from the converged @20 seed (~11 h)
+        self.initial_lr = 1e-3                # low LR: don't wreck the warm-started weights
+        self.consistency_warmup_epochs = 5    # teacher = seed copy from step 1 -> engage early
+        self.consistency_rampup = 20.0        # full consistency weight by ~ep25 (alpha->0.999 then)
