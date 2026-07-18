@@ -98,7 +98,7 @@ def _soft_skeleton3d(x: torch.Tensor, iterations: int) -> torch.Tensor:
 
 
 def _soft_cldice_consistency(student_fg: torch.Tensor, teacher_fg: torch.Tensor,
-                             iterations: int, smooth: float = 1.0) -> torch.Tensor:
+                             iterations: int, smooth: float = 1.0, beta: float = 1.0) -> torch.Tensor:
     """Soft-clDice between the student's airway prob and the teacher's (binarised) tree.
 
     student_fg / teacher_fg are (B, 1, D, H, W) in [0, 1]; the teacher is detached and thresholded at
@@ -106,6 +106,22 @@ def _soft_cldice_consistency(student_fg: torch.Tensor, teacher_fg: torch.Tensor,
     student's soft skeleton / soft prob. Unlike voxel-MSE this normalises over the CENTRELINE, so the
     sparse airway is at the right scale WITHOUT class-balancing — which removes the ~100x gradient
     amplification that collapsed the balanced-MSE teacher.
+
+    The two directional terms:
+      t_prec = fraction of the STUDENT's skeleton that lies inside the teacher tree  — low when the
+               student paints branches the teacher LACKS (i.e. exceeds the teacher). Its gradient prunes
+               the student BACK toward the teacher's tree.
+      t_sens = fraction of the TEACHER's skeleton covered by the student                — low when the
+               student MISSES teacher branches. Its gradient pushes the student to reach further.
+
+    `beta` weights the two directions as an F-beta score (1 - F_beta):
+      beta = 1  -> harmonic mean = symmetric clDice (unchanged; the validated baseline).
+      beta > 1  -> emphasise t_sens (cover the teacher), soften t_prec (penalty for EXCEEDING it).
+    Motivation: on the high-precision / low-distal-recall nnU-Net teacher, the teacher's error is
+    distal MISSES, not spurious branches — so the symmetric term spends half its gradient pruning the
+    student back to the teacher's truncated tree, i.e. reinforcing the very distal truncation we fight.
+    beta > 1 keeps "cover the teacher's tree" while relaxing "don't guess past it". (F-beta -> t_sens as
+    beta -> inf; -> t_prec as beta -> 0.)
     """
     target = (teacher_fg > 0.5).float()
     skel_pred = _soft_skeleton3d(student_fg, iterations)
@@ -117,7 +133,9 @@ def _soft_cldice_consistency(student_fg: torch.Tensor, teacher_fg: torch.Tensor,
     true = target.reshape(batch, -1)
     t_prec = (torch.sum(skel_p * true, dim=1) + smooth) / (torch.sum(skel_p, dim=1) + smooth)
     t_sens = (torch.sum(skel_t * pred, dim=1) + smooth) / (torch.sum(skel_t, dim=1) + smooth)
-    cl_dice = 1.0 - 2.0 * (t_prec * t_sens) / (t_prec + t_sens)
+    b2 = float(beta) ** 2
+    f_beta = (1.0 + b2) * (t_prec * t_sens) / (b2 * t_prec + t_sens + 1e-8)
+    cl_dice = 1.0 - f_beta
     return cl_dice.mean()
 
 
@@ -175,9 +193,31 @@ class nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring(_Base):
         #   "plain"     — UA-MT whole-patch MSE (the null baseline); ablation.
         self.consistency_mode = "cldice"
         self.cldice_iters = 10           # soft-skeleton iterations; >= largest airway radius in voxels
+        self.cldice_cons_beta = 1.0      # F-beta weighting of the two clDice-consistency directions.
+                                         # 1.0 = symmetric clDice (the validated baseline; DEFAULT, so
+                                         # the queued warm-start run is unchanged). >1 emphasises t_sens
+                                         # (student COVERS the teacher tree) and softens t_prec (penalty
+                                         # for EXCEEDING it) — see _soft_cldice_consistency. Motivated by
+                                         # the high-precision/low-distal-recall teacher: symmetric clDice
+                                         # spends half its gradient pruning the student back to the
+                                         # teacher's truncated tree. The AsymCLDice subclass sets 2.0.
         self.partition_threshold = 0.5   # teacher airway/bg split for "balanced"
         self.fg_conf_threshold = 0.8     # confident-airway cut for the *_confident modes
         self.bg_conf_threshold = 0.2     # confident-bg cut for the *_confident modes
+
+        # --- Bidirectional Copy-Paste (BCP; Bai et al., CVPR 2023) — OFF by default ---------------
+        # Cross-paste a random cuboid between a LABELLED patch and an all-IGNORE (unlabelled) patch in
+        # the batch, mixing image AND target by the SAME box. Result: the unlabelled host now carries a
+        # region of REAL GT (with correct distal tips) inside a novel context, and the labelled host
+        # carries a region of unlabelled context. Because we mix the target too, the ignore-masked
+        # supervised loss AUTOMATICALLY covers exactly the labelled-origin voxels wherever they land, and
+        # the EMA-teacher consistency covers the rest. This injects a distally-correct target that does
+        # NOT come from the (distally-blind) teacher — the one signal EMA consistency can never provide;
+        # and as a bonus it feeds supervised gradient into the 90 all-ignore patches, mitigating the
+        # from-scratch ignore-dilution stall. Enabled by the *_BCP subclass. NoDeepSupervision only
+        # (single target tensor). See PROJECT_STATE / writeup §5.6.
+        self.use_bcp = False
+        self.bcp_box_ratio = 0.6         # cuboid side length as a fraction of each patch dim (BCP ~2/3)
 
         # --- state ---
         self.teacher = None
@@ -229,7 +269,8 @@ class nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring(_Base):
 
         if self.consistency_mode == "cldice":
             # Geometry-aware: soft-clDice on the airway channel (B,1,D,H,W), student vs teacher tree.
-            return _soft_cldice_consistency(student[:, 1:2], teacher[:, 1:2], self.cldice_iters)
+            return _soft_cldice_consistency(
+                student[:, 1:2], teacher[:, 1:2], self.cldice_iters, beta=self.cldice_cons_beta)
 
         student_fg = student[:, 1]                       # [B, *spatial] airway channel
         teacher_fg = teacher[:, 1]
@@ -275,6 +316,46 @@ class nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring(_Base):
             out = out + torch.randn_like(out) * noise_std
         return out
 
+    # ------------------------------------------------------------------ BCP mixing ---------
+    def _bcp_box_mask(self, spatial, device) -> torch.Tensor:
+        """A (D, H, W) float mask with a single random cuboid == 1 (side = bcp_box_ratio * dim)."""
+        box = torch.zeros(spatial, device=device)
+        idx = []
+        for s in spatial:
+            length = max(1, int(round(int(s) * self.bcp_box_ratio)))
+            length = min(length, int(s))
+            start = int(torch.randint(0, max(1, int(s) - length + 1), (1,)).item())
+            idx.append(slice(start, start + length))
+        box[idx[0], idx[1], idx[2]] = 1.0
+        return box
+
+    def _bcp_mix(self, data: torch.Tensor, target):
+        """Bidirectional Copy-Paste between labelled and unlabelled patches IN THE BATCH.
+
+        A patch is 'labelled' iff it holds a real class voxel (0/1), i.e. not all-ignore and not pure
+        crop-padding (-1). For each labelled/unlabelled pair we swap a random cuboid in BOTH the image and
+        the target, so: the unlabelled host gains a box of real GT (distal tips) in a novel context; the
+        labelled host gains a box of unlabelled context. Mixing the target too means the ignore-masked
+        supervised loss follows the real-GT voxels automatically. In place; NoDeepSupervision only.
+        """
+        if isinstance(target, list):
+            return data, target  # deep-supervision targets not supported; the NoDS arm passes a tensor
+        ig = getattr(getattr(self, "label_manager", None), "ignore_label", None)
+        if ig is None:
+            return data, target
+        valid = ((target >= 0) & (target != ig)).flatten(1).any(1)  # (B,) real-class voxel present
+        lab_idx = torch.nonzero(valid, as_tuple=False).flatten().tolist()
+        unlab_idx = torch.nonzero(~valid, as_tuple=False).flatten().tolist()
+        for i, j in zip(lab_idx, unlab_idx):  # pair labelled host i <-> unlabelled host j
+            box = self._bcp_box_mask(data.shape[2:], data.device).bool()  # (D,H,W), broadcasts over C
+            di, dj = data[i].clone(), data[j].clone()
+            ti, tj = target[i].clone(), target[j].clone()
+            data[i] = torch.where(box, dj, di)      # labelled host: box <- unlabelled context
+            data[j] = torch.where(box, di, dj)      # unlabelled host: box <- labelled image (+ its GT)
+            target[i] = torch.where(box, tj, ti)     # -> box becomes ignore (masked from supervised loss)
+            target[j] = torch.where(box, ti, tj)     # -> box becomes real GT (covered by supervised loss)
+        return data, target
+
     # ------------------------------------------------------------------ checkpoint I/O -----
     # Persist the EMA teacher ALONGSIDE nnU-Net's checkpoint (sidecar "<ckpt>.mt"). Without this a
     # `-c` resume reloads the student into self.network, then on_train_start rebuilds teacher = copy of
@@ -318,6 +399,8 @@ class nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring(_Base):
             f"consistency_max={self.consistency_max} warmup={self.consistency_warmup_epochs} "
             f"rampup={self.consistency_rampup} epochs={self.num_epochs} lr={self.initial_lr} "
             f"consistency_mode={self.consistency_mode} cldice_iters={self.cldice_iters} "
+            f"cldice_cons_beta={self.cldice_cons_beta} use_bcp={self.use_bcp} "
+            f"bcp_box_ratio={self.bcp_box_ratio} "
             f"fg_conf={self.fg_conf_threshold} bg_conf={self.bg_conf_threshold}"
         )
 
@@ -397,6 +480,12 @@ class nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring(_Base):
 
         if self.teacher is None:  # safety net if on_train_start ordering ever changes
             self._build_teacher()
+
+        # Bidirectional Copy-Paste (if enabled) BEFORE the student/teacher split, so both see the same
+        # mixed image (voxel correspondence for consistency) and the supervised target carries real GT in
+        # the pasted regions. Applies during the warm-up too (feeds the all-ignore patches supervision).
+        if self.use_bcp:
+            data, target = self._bcp_mix(data, target)
 
         weight = self._consistency_weight()
         use_consistency = weight > 0.0
@@ -501,3 +590,64 @@ class nnUNetTrainer_MeanTeacher_WarmStart_NoDeepSupervision_NoMirroring(
         self.initial_lr = 1e-3                # low LR: don't wreck the warm-started weights
         self.consistency_warmup_epochs = 5    # teacher = seed copy from step 1 -> engage early
         self.consistency_rampup = 20.0        # full consistency weight by ~ep25 (alpha->0.999 then)
+
+
+class nnUNetTrainer_MeanTeacher_WarmStart_AsymCLDice_NoDeepSupervision_NoMirroring(
+    nnUNetTrainer_MeanTeacher_WarmStart_NoDeepSupervision_NoMirroring
+):
+    """Warm-started MT with RECALL-DIRECTED (asymmetric) clDice consistency (Group-2 loss tweak).
+
+    Identical to the reportable warm-start arm except the clDice-consistency F-beta weight beta=2: the
+    consistency keeps pushing the student to COVER the teacher's tree (t_sens) but stops spending half
+    its gradient pruning the student back inside the teacher's (distally truncated) tree (t_prec). This
+    isolates 'does relaxing the exceed-the-teacher penalty let the student reach past the teacher's
+    distal blindness?' — one variable vs the symmetric baseline. Launch exactly like the baseline:
+        nnUNetv2_train 122 3d_fullres 0 \
+          -tr nnUNetTrainer_MeanTeacher_WarmStart_AsymCLDice_NoDeepSupervision_NoMirroring \
+          -pretrained_weights <Dataset120 fold_0 checkpoint_final.pth>
+    """
+
+    def __init__(self, plans: dict, configuration: str, fold: int, dataset_json: dict,
+                 device: torch.device = torch.device("cuda")):
+        super().__init__(plans, configuration, fold, dataset_json, device)
+        self.cldice_cons_beta = 2.0           # emphasise t_sens (cover teacher), soften t_prec (exceed)
+
+
+class nnUNetTrainer_MeanTeacher_WarmStart_BCP_NoDeepSupervision_NoMirroring(
+    nnUNetTrainer_MeanTeacher_WarmStart_NoDeepSupervision_NoMirroring
+):
+    """Warm-started MT with Bidirectional Copy-Paste (Group-1: real-GT target into unlabelled stream).
+
+    Cross-pastes a random cuboid between labelled and all-ignore patches in each batch, mixing image AND
+    target, so the unlabelled patches gain regions of REAL GT (correct distal tips) in novel context —
+    a distally-correct signal the EMA teacher can never provide (Bai et al., CVPR 2023). Everything else
+    matches the reportable warm-start arm. NOTE: needs an HPC dry-run — every trainer change so far has
+    surfaced an env-only bug; watch that batches actually contain both a labelled and an unlabelled patch
+    (nnU-Net foreground-oversamples the 20 GT cases, so labelled patches are common; if a batch is all
+    labelled or all unlabelled, _bcp_mix is a safe no-op that step). Launch:
+        nnUNetv2_train 122 3d_fullres 0 \
+          -tr nnUNetTrainer_MeanTeacher_WarmStart_BCP_NoDeepSupervision_NoMirroring \
+          -pretrained_weights <Dataset120 fold_0 checkpoint_final.pth>
+    """
+
+    def __init__(self, plans: dict, configuration: str, fold: int, dataset_json: dict,
+                 device: torch.device = torch.device("cuda")):
+        super().__init__(plans, configuration, fold, dataset_json, device)
+        self.use_bcp = True
+
+
+class nnUNetTrainer_MeanTeacher_WarmStart_BCP_AsymCLDice_NoDeepSupervision_NoMirroring(
+    nnUNetTrainer_MeanTeacher_WarmStart_NoDeepSupervision_NoMirroring
+):
+    """Warm-started MT combining BOTH levers: BCP real-GT injection + recall-directed clDice (beta=2).
+
+    The 'everything on' arm — run only after the single-lever arms above have each been read against the
+    symmetric-clDice baseline, so any combined gain is attributable. Launch as the others with
+    -pretrained_weights <Dataset120 fold_0 checkpoint_final.pth>.
+    """
+
+    def __init__(self, plans: dict, configuration: str, fold: int, dataset_json: dict,
+                 device: torch.device = torch.device("cuda")):
+        super().__init__(plans, configuration, fold, dataset_json, device)
+        self.use_bcp = True
+        self.cldice_cons_beta = 2.0
