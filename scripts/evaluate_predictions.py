@@ -18,7 +18,10 @@ from lung_airway_segmentation.metrics.segmentation import (
     binary_precision_from_masks,
     binary_recall_from_masks,
 )
-from lung_airway_segmentation.metrics.topology import airway_topology_metrics_from_masks
+from lung_airway_segmentation.metrics.topology import (
+    TOPOLOGY_METRIC_VERSION,
+    airway_topology_metrics_from_masks,
+)
 from lung_airway_segmentation.reporting.run_index import refresh_run_index
 from lung_airway_segmentation.settings import RAW_AEROPATH_ROOT
 from lung_airway_segmentation.training.config import resolve_project_path
@@ -296,6 +299,8 @@ def main() -> None:
         for case_dir in case_dirs
     ]
     summary = summarize_case_metrics(case_metrics)
+    if args.topology_metrics:
+        summary["topology_metric_version"] = TOPOLOGY_METRIC_VERSION
 
     write_case_metrics_csv(case_metrics, output_dir / "per_case_metrics.csv")
     write_json(case_metrics, output_dir / "per_case_metrics.json")

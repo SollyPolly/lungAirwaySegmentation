@@ -55,6 +55,7 @@ from lung_airway_segmentation.inference.postprocess import (
 )
 from lung_airway_segmentation.inference.sliding_window import predict_logits_for_volume
 from lung_airway_segmentation.metrics.topology import (
+    TOPOLOGY_METRIC_VERSION,
     _foreground_slices,
     _largest_connected_component,
     _skeletonize,
@@ -69,13 +70,15 @@ from lung_airway_segmentation.training.config import (
     resolve_project_path,
 )
 
-# radius bins in voxels (distance to wall): (label, lo, hi)
+# Foreground wall-distance bins in voxels: (label, lo, hi). These are NOT
+# anatomical distal/proximal or branch-calibre bins: r=1 contains the surface
+# shell of every airway, including the trachea and proximal bronchi.
 RADIUS_BINS = [
-    ("r=1 (distal)", 0.5, 1.5),
-    ("r=2", 1.5, 2.5),
-    ("r=3", 2.5, 3.5),
-    ("r=4-5", 3.5, 5.5),
-    ("r>=6 (proximal)", 5.5, 1e9),
+    ("r=1 (wall shell; voxel EDT)", 0.5, 1.5),
+    ("r=2 (wall distance; voxel EDT)", 1.5, 2.5),
+    ("r=3 (wall distance; voxel EDT)", 2.5, 3.5),
+    ("r=4-5 (wall distance; voxel EDT)", 3.5, 5.5),
+    ("r>=6 (thick core; voxel EDT)", 5.5, 1e9),
 ]
 
 # Cheap sweep grid (Dice/TD/voxel-precision, no skeletonisation). 0.3/0.4 included
@@ -740,6 +743,7 @@ def main() -> None:
 
     out_path = Path(args.out) if Path(args.out).is_absolute() else run_dir / args.out
     out_path.write_text(json.dumps({
+        "topology_metric_version": TOPOLOGY_METRIC_VERSION,
         "run": metadata.get("experiment_name"),
         "study_name": metadata.get("study_name"),
         "run_label": metadata.get("run_label"),

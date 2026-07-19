@@ -1,5 +1,7 @@
 # Core notebook / visualization
-marimo==0.22.4
+marimo==0.23.14
+anywidget==0.11.0
+ipyniivue==2.4.4  # WebGL NIfTI viewer (anywidget) used by mask_visualisation.py
 nibabel==5.4.2
 numpy==2.2.6
 pandas==2.2.3

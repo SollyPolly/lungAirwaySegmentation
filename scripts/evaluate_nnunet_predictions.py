@@ -16,7 +16,7 @@ only worth it if this comparison lands close.
 Metrics (matched to analyse_distal dev-mode):
   raw:  dice_raw, td_raw (GT-skeleton recall), prec_raw (voxel precision)
   +LCC: dice_lcc, td_lcc (=TLD), prec_lcc, tprec_lcc, cldice_lcc = harmonic(tprec_lcc, td_lcc)
-  lcc_retained_fraction; radius-stratified recall (distal r=1 ... proximal), voxel-pooled.
+  lcc_retained_fraction; foreground wall-distance recall, voxel-pooled in voxel-EDT bins.
   --branch also computes ATM'22 BD (+ its own clDice/TLD) via airway_topology_metrics_from_masks.
 
 Geometry: the nnU-Net export links the ORIGINAL ATM niftis and nnU-Net restores predictions to
@@ -46,6 +46,7 @@ from scripts.analyse_distal import RADIUS_BINS, cheap_metrics, gt_centerline, lo
 from lung_airway_segmentation.inference.postprocess import keep_component_containing_trachea
 from lung_airway_segmentation.io.atm22_layout import resolve_case_paths
 from lung_airway_segmentation.metrics.topology import (
+    TOPOLOGY_METRIC_VERSION,
     airway_topology_metrics_from_masks,
     topology_precision_from_masks,
 )
@@ -211,6 +212,7 @@ def main() -> None:
 
     out_path = Path(args.out) if args.out else (args.pred_dir / "nnunet_topology.json")
     out_path.write_text(json.dumps({
+        "topology_metric_version": TOPOLOGY_METRIC_VERSION,
         "scorer": "evaluate_nnunet_predictions",
         "pred_dir": str(args.pred_dir),
         "dataset": "atm22",
@@ -235,7 +237,7 @@ def main() -> None:
         print(f"  ATM: BD {mean_row['bd_lcc']:.4f} | clDice(atm) {mean_row['cldice_atm']:.4f} | TLD(atm) {mean_row['td_atm']:.4f}")
     for b in bins_out:
         if b["bin"].startswith("r=1"):
-            print(f"  distal r=1 recall {b['recall']:.4f}  ({b['voxels']:,} voxels)")
+            print(f"  wall-shell r=1 recall {b['recall']:.4f}  ({b['voxels']:,} voxels)")
     print(f"\nSaved {out_path}")
 
 

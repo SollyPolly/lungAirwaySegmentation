@@ -13,6 +13,12 @@ from scipy import ndimage
 from skimage.morphology import skeletonize
 
 
+# v2 fixes the hard-clDice extension at TPrec == TSens == 0: non-empty,
+# fully-disjoint masks score 0 rather than 1. Target-component policies are
+# otherwise unchanged from the original scorer.
+TOPOLOGY_METRIC_VERSION = "hard-cldice-v2"
+
+
 def _as_binary_mask(mask) -> np.ndarray:
     binary_mask = np.asarray(mask) > 0
     if binary_mask.ndim != 3:
@@ -75,6 +81,12 @@ def _fraction(numerator: int, denominator: int) -> float:
     return 1.0 if denominator == 0 else float(numerator / denominator)
 
 
+def _harmonic_mean(first: float, second: float) -> float:
+    """Return the harmonic mean, continuously extended to zero at (0, 0)."""
+    denominator = first + second
+    return 0.0 if denominator == 0 else float(2.0 * first * second / denominator)
+
+
 def _foreground_slices(mask: np.ndarray, padding: int = 4) -> tuple[slice, slice, slice]:
     coordinates = np.where(mask)
     if coordinates[0].size == 0:
@@ -122,10 +134,7 @@ def cldice_score_from_masks(predictions, targets) -> float:
         int(np.logical_and(target_skeleton, prediction_mask).sum()),
         int(target_skeleton.sum()),
     )
-    denominator = topology_precision + topology_sensitivity
-    return 1.0 if denominator == 0 else float(
-        2.0 * topology_precision * topology_sensitivity / denominator
-    )
+    return _harmonic_mean(topology_precision, topology_sensitivity)
 
 
 def hard_centerline_metrics_from_masks(
@@ -199,10 +208,7 @@ def hard_centerline_metrics_from_masks(
         int(np.logical_and(target_skeleton, prediction_mask).sum()),
         int(target_skeleton.sum()),
     )
-    denominator = topology_precision + topology_sensitivity
-    cldice = 1.0 if denominator == 0 else float(
-        2.0 * topology_precision * topology_sensitivity / denominator
-    )
+    cldice = _harmonic_mean(topology_precision, topology_sensitivity)
     return {
         "cldice": float(cldice),
         "topology_precision": float(topology_precision),
@@ -495,10 +501,7 @@ def airway_topology_metrics_from_masks(
         int(np.logical_and(target_skeleton, prediction_mask).sum()),
         int(target_skeleton.sum()),
     )
-    cldice_denominator = topology_precision + topology_sensitivity
-    cldice = 1.0 if cldice_denominator == 0 else float(
-        2.0 * topology_precision * topology_sensitivity / cldice_denominator
-    )
+    cldice = _harmonic_mean(topology_precision, topology_sensitivity)
     target_component = _largest_connected_component(target_mask)
     target_slices = _foreground_slices(target_component)
     atm_prediction_mask = prediction_mask[target_slices]

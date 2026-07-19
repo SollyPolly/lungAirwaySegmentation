@@ -8,6 +8,7 @@ from lung_airway_segmentation.metrics.topology import (
     cldice_score_from_masks,
     hard_centerline_metrics_from_masks,
     topology_precision_from_masks,
+    topology_sensitivity_from_masks,
     tree_length_detected_from_masks,
 )
 
@@ -37,6 +38,42 @@ def test_cldice_penalizes_disconnected_false_positive_skeleton():
     assert np.isclose(metrics["topology_sensitivity"], 1.0)
     assert metrics["topology_precision"] < 1.0
     assert metrics["cldice"] < 1.0
+
+
+def test_cldice_is_zero_for_nonempty_disjoint_trees_across_metric_apis():
+    target = np.zeros((12, 12, 12), dtype=np.uint8)
+    target[1:11, 3, 3] = 1
+    prediction = np.zeros_like(target)
+    prediction[1:11, 8, 8] = 1
+
+    combined = hard_centerline_metrics_from_masks(prediction, target)
+    airway = airway_topology_metrics_from_masks(prediction, target)
+
+    assert topology_precision_from_masks(prediction, target) == 0.0
+    assert topology_sensitivity_from_masks(prediction, target) == 0.0
+    assert cldice_score_from_masks(prediction, target) == 0.0
+    assert combined["cldice"] == 0.0
+    assert combined["tree_length_detected"] == 0.0
+    assert airway["cldice"] == 0.0
+    assert airway["topology_precision"] == 0.0
+    assert airway["topology_sensitivity"] == 0.0
+    assert airway["tree_length_detected"] == 0.0
+
+
+def test_cldice_empty_mask_conventions_are_explicit_and_consistent():
+    empty = np.zeros((9, 9, 9), dtype=np.uint8)
+    tree = np.zeros_like(empty)
+    tree[1:8, 4, 4] = 1
+
+    # Both empty represents perfect agreement. One-sided empty masks do not.
+    assert cldice_score_from_masks(empty, empty) == 1.0
+    assert hard_centerline_metrics_from_masks(empty, empty)["cldice"] == 1.0
+    assert airway_topology_metrics_from_masks(empty, empty)["cldice"] == 1.0
+
+    for prediction, target in ((empty, tree), (tree, empty)):
+        assert cldice_score_from_masks(prediction, target) == 0.0
+        assert hard_centerline_metrics_from_masks(prediction, target)["cldice"] == 0.0
+        assert airway_topology_metrics_from_masks(prediction, target)["cldice"] == 0.0
 
 
 def test_branch_detection_uses_eighty_percent_coverage_threshold():
