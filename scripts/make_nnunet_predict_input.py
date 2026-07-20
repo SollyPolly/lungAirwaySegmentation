@@ -20,7 +20,8 @@ import os
 import shutil
 from pathlib import Path
 
-from lung_airway_segmentation.io.atm22_layout import resolve_case_paths
+from lung_airway_segmentation.io.atm22_layout import resolve_case_paths, resolve_lung_mask_path
+from lung_airway_segmentation.io.nnunet_lungcrop import write_lung_roi_ct
 from lung_airway_segmentation.training.config import load_yaml_config, resolve_project_path
 
 _SPLIT_KEYS = {"val": "val_case_ids", "test": "test_case_ids", "train": "train_case_ids"}
@@ -53,6 +54,11 @@ def main() -> None:
     ap.add_argument("--prefix", type=str, default="ATM_", help="Filename prefix (default 'ATM_').")
     ap.add_argument("--mode", choices=("symlink", "copy"), default="symlink",
                     help="Link (default, saves space) or copy the CTs.")
+    ap.add_argument("--lung-roi", action="store_true",
+                    help="Zero outside the affine-aware lung/trachea ROI instead of linking the full CT.")
+    ap.add_argument("--lung-root", type=Path, default=None, help="Lung masks (default <batch_root>/lungTr).")
+    ap.add_argument("--margin-voxels", type=int, default=8)
+    ap.add_argument("--superior-margin-voxels", type=int, default=120)
     args = ap.parse_args()
 
     if args.report_split == "test" and not args.cases:
@@ -69,13 +75,38 @@ def main() -> None:
     if not cases:
         raise SystemExit(f"No {args.report_split} case ids resolved.")
 
+    roi_records = {}
     for cid in cases:
         paths = resolve_case_paths(cid, batch_root=batch_root)
         if paths["ct"] is None:
             raise FileNotFoundError(f"ATM case {cid} has no CT.")
-        _place(str(paths["ct"]), args.out_dir / f"{args.prefix}{paths['case_id']}_0000.nii.gz", args.mode)
+        destination = args.out_dir / f"{args.prefix}{paths['case_id']}_0000.nii.gz"
+        if args.lung_roi:
+            lung_path = resolve_lung_mask_path(
+                paths["case_id"], batch_root=batch_root, lung_root=args.lung_root
+            )
+            if not lung_path.is_file():
+                raise FileNotFoundError(f"Precomputed lung mask not found: {lung_path}")
+            roi_records[f"ATM_{paths['case_id']}"] = write_lung_roi_ct(
+                Path(paths["ct"]),
+                lung_path,
+                destination,
+                margin_voxels=args.margin_voxels,
+                superior_margin_voxels=args.superior_margin_voxels,
+            )
+        else:
+            _place(str(paths["ct"]), destination, args.mode)
 
-    print(f"placed {len(cases)} CT(s) -> {args.out_dir}  (split={args.report_split}, mode={args.mode})")
+    if args.lung_roi:
+        (args.out_dir / "lung_crop_manifest.json").write_text(json.dumps({
+            "method": "full_grid_zero_outside_lung_bbox",
+            "margin_voxels": args.margin_voxels,
+            "superior_margin_voxels": args.superior_margin_voxels,
+            "cases": roi_records,
+        }, indent=2), encoding="utf-8")
+
+    mode = "lung-roi" if args.lung_roi else args.mode
+    print(f"placed {len(cases)} CT(s) -> {args.out_dir}  (split={args.report_split}, mode={mode})")
 
 
 if __name__ == "__main__":

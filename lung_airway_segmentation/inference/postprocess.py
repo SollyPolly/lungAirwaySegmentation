@@ -145,6 +145,52 @@ def _superior_axis_and_sign(affine: np.ndarray) -> tuple[int, int]:
     return axis, sign
 
 
+def lung_bbox_slices(
+    lung_mask: np.ndarray,
+    *,
+    affine: np.ndarray | None = None,
+    margin_voxels: int = 8,
+    superior_margin_voxels: int = 120,
+) -> tuple[slice, slice, slice] | None:
+    """Return an inference-valid lung bounding box with a superior trachea extension.
+
+    The box is derived only from a CT-derived lung mask. ``margin_voxels`` is used on
+    the in-plane faces and the inferior face; the superior face instead receives
+    ``superior_margin_voxels`` so that the cervical trachea is not clipped.  The
+    affine determines which array axis/direction is world-superior.  With no affine,
+    the final array axis increasing toward superior is used (the ATM native fallback).
+
+    ``None`` is returned for an empty lung mask, allowing callers to fail closed or
+    preserve the uncropped volume explicitly.  Axis projections are used instead of
+    ``np.where`` so full CT volumes do not allocate three large coordinate arrays.
+    """
+    if lung_mask.ndim != 3:
+        raise ValueError(f"Expected a 3D lung mask, got shape {lung_mask.shape}.")
+    if margin_voxels < 0 or superior_margin_voxels < 0:
+        raise ValueError("Lung ROI margins must be >= 0.")
+    if not np.any(lung_mask):
+        return None
+
+    if affine is None:
+        superior_axis, superior_sign = lung_mask.ndim - 1, 1
+    else:
+        superior_axis, superior_sign = _superior_axis_and_sign(affine)
+
+    bounds: list[slice] = []
+    for axis, size in enumerate(lung_mask.shape):
+        other_axes = tuple(candidate for candidate in range(3) if candidate != axis)
+        occupied = np.flatnonzero(np.any(lung_mask, axis=other_axes))
+        lo, hi = int(occupied[0]), int(occupied[-1])
+        lower_margin = upper_margin = int(margin_voxels)
+        if axis == superior_axis:
+            if superior_sign > 0:
+                upper_margin = int(superior_margin_voxels)
+            else:
+                lower_margin = int(superior_margin_voxels)
+        bounds.append(slice(max(0, lo - lower_margin), min(size, hi + upper_margin + 1)))
+    return tuple(bounds)  # type: ignore[return-value]
+
+
 def keep_component_containing_trachea(
     binary_mask: np.ndarray,
     connectivity: int = 6,

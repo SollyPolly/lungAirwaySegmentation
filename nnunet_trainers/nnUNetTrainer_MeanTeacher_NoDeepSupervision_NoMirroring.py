@@ -46,27 +46,19 @@ import torch
 import torch.nn.functional as F  # noqa: F401  (kept for ablation experiments)
 from torch import autocast
 
-import nnunetv2
-from nnunetv2.utilities.find_class_by_name import recursive_find_python_class
 from nnunetv2.utilities.helpers import dummy_context
 
-# Resolve the NoDeepSupervision + NoMirroring base class (installed from the cbDice repo). Try the
-# direct import first; fall back to nnU-Net's own discovery so we don't hard-depend on the filename.
-try:  # pragma: no cover - exercised only inside the HPC nnU-Net env
+# Import the real train-safe base directly. Do not use recursive class discovery here:
+# this repository installs inference-only compatibility shims with the same class name,
+# and discovery can silently select one of those for training.
+if __package__ == "nnunet_trainers":  # repository-local import; avoid installed inference shims
+    from nnunet_trainers.nnUNetTrainer_NoDeepSupervision_NoMirroring import (  # type: ignore[no-redef]
+        nnUNetTrainer_NoDeepSupervision_NoMirroring as _Base,
+    )
+else:  # installed beside this module in the nnU-Net trainer variants directory
     from nnunetv2.training.nnUNetTrainer.variants.network_architecture.nnUNetTrainer_NoDeepSupervision_NoMirroring import (  # noqa: E501
         nnUNetTrainer_NoDeepSupervision_NoMirroring as _Base,
     )
-except Exception:  # pragma: no cover
-    _Base = recursive_find_python_class(
-        os.path.join(nnunetv2.__path__[0], "training", "nnUNetTrainer"),
-        "nnUNetTrainer_NoDeepSupervision_NoMirroring",
-        "nnunetv2.training.nnUNetTrainer",
-    )
-    if _Base is None:
-        raise ImportError(
-            "Could not locate base trainer 'nnUNetTrainer_NoDeepSupervision_NoMirroring'. "
-            "Is the cbDice trainer install present? (see hpc-nnunet-cbdice-install)"
-        )
 
 
 # ---------------------------------------------------------------------------------------------------

@@ -20,9 +20,18 @@ outputs/
 legacy/
 learning/
 docs/
+!docs/
+docs/*
+!docs/NNUNET_LUNGCROP_MT_EXPERIMENT.md
 plot_scripts/
 presentation_scripts/
 tests/
+!tests/
+tests/*
+!tests/test_prediction_viewer.py
+!tests/test_nnunet_lungcrop.py
+!tests/test_nnunet_two_stream_trainer.py
+!tests/test_build_lungcrop_meanteacher_nnunet.py
 logs/
 
 writeup.md

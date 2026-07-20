@@ -31,6 +31,7 @@ from monai.transforms import (
 )
 from lung_airway_segmentation.datasets.distal_classes import compute_distal_crop_classes
 from lung_airway_segmentation.datasets.patches import normalize_patch_size
+from lung_airway_segmentation.inference.postprocess import lung_bbox_slices
 from lung_airway_segmentation.io.atm22_layout import (
     resolve_case_paths,
     resolve_distal_classes_path,
@@ -415,19 +416,16 @@ class LungTracheaCropd(MapTransform):
         if not source.any():
             return d  # no lung found (logged upstream) — leave the volume uncropped
 
-        axis, sign = _superior_axis(getattr(d[self.lung_key], "affine", None))
-        coords = np.where(source)
-        starts, ends = [], []
-        for a in range(3):
-            lo, hi = int(coords[a].min()), int(coords[a].max())
-            m_lo = m_hi = self.margin
-            if a == axis:
-                if sign > 0:
-                    m_hi = self.superior_margin
-                else:
-                    m_lo = self.superior_margin
-            starts.append(max(0, lo - m_lo))
-            ends.append(min(source.shape[a], hi + m_hi + 1))
+        bounds = lung_bbox_slices(
+            source,
+            affine=getattr(d[self.lung_key], "affine", None),
+            margin_voxels=self.margin,
+            superior_margin_voxels=self.superior_margin,
+        )
+        if bounds is None:
+            return d
+        starts = [int(bound.start) for bound in bounds]
+        ends = [int(bound.stop) for bound in bounds]
 
         cropper = SpatialCrop(roi_start=starts, roi_end=ends)
         for key in self.key_iterator(d):

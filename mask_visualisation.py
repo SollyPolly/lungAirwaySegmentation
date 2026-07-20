@@ -2,1635 +2,896 @@
 # requires-python = ">=3.10"
 # dependencies = [
 #     "marimo>=0.23.3",
-#     "anywidget==0.11.0",
-#     "ipyniivue==2.4.4",
-#     "nibabel",
-#     "numpy",
-#     "plotly",
-#     "scikit-image",
-#     "scipy",
+#     "nibabel>=5.0",
+#     "numpy>=2.0",
+#     "plotly>=6.0",
+#     "scikit-image>=0.25",
 # ]
 # ///
 
+"""Interactive airway prediction viewer.
+
+Run with:
+
+    marimo run mask_visualisation.py
+
+The browser view uses compact Plotly meshes and reads only the selected CT
+slice.  Full NIfTI volumes are never sent to the browser.  The app discovers
+both exported ``runs/`` predictions and native ``data/nnunet/predict_out``
+outputs, and can open the selected CT/GT/prediction directly in ITK-SNAP.
+"""
+
 import marimo
 
-__generated_with = "0.23.9"
-app = marimo.App(width="medium")
+__generated_with = "0.23.14"
+app = marimo.App(width="full")
 
 
 @app.cell(hide_code=True)
 def _():
-    # Distance-to-wall radius bins in voxels (label, lo, hi). Mirrors
-    # scripts/analyse_distal.py::RADIUS_BINS so the viewer's confidence curve uses
-    # the same distal definition as the headline numbers. Kept local (not imported)
-    # because analyse_distal pulls in torch, which this viewer deliberately avoids.
-    RADIUS_BINS = [
-        ("r=1 (distal)", 0.5, 1.5),
-        ("r=2", 1.5, 2.5),
-        ("r=3", 2.5, 3.5),
-        ("r=4-5", 3.5, 5.5),
-        ("r>=6 (proximal)", 5.5, 1e9),
-    ]
-    return (RADIUS_BINS,)
-
-
-@app.cell(hide_code=True)
-def _():
-    import hashlib
-    import json
-    import os
-    import shutil
-    import tempfile
     from pathlib import Path
 
     import marimo as mo
-    import nibabel as nib
     import numpy as np
     import plotly.graph_objects as go
-    from scipy import ndimage
-    from skimage.morphology import skeletonize
 
-    from ipyniivue import NiiVue, SliceType
-
-    from lung_airway_segmentation.settings import (
-        DEFAULT_HU_WINDOW,
-        RAW_AEROPATH_ROOT,
-        RAW_ATM22_ROOT,
-    )
-    from lung_airway_segmentation.io.case_layout import (
-        list_case_ids,
-        resolve_case_paths,
-    )
-    from lung_airway_segmentation.io.atm22_layout import (
-        list_case_ids as list_atm22_case_ids,
-        resolve_case_paths as resolve_atm22_case_paths,
-    )
-    from lung_airway_segmentation.io.nifti import load_canonical_image
-
-    return (
-        DEFAULT_HU_WINDOW,
-        NiiVue,
-        Path,
-        RAW_AEROPATH_ROOT,
-        RAW_ATM22_ROOT,
-        SliceType,
-        go,
-        hashlib,
-        json,
-        list_atm22_case_ids,
-        list_case_ids,
-        load_canonical_image,
-        mo,
-        ndimage,
-        nib,
-        np,
-        os,
-        resolve_atm22_case_paths,
-        resolve_case_paths,
-        shutil,
-        skeletonize,
-        tempfile,
-    )
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md("""
-    # Airway Segmentation Viewer
-
-    GPU-rendered CT + airway masks via **NiiVue** ([`ipyniivue`](https://github.com/niivue/ipyniivue)).
-    The **Saved Prediction Viewer** is the primary panel and defaults to the
-    nnU-Net runs; the labelled-data inspector below it is for eyeballing raw
-    ATM'22 / AeroPath ground truth.
-
-    Each NiiVue canvas gives synced axial/coronal/sagittal slices plus a 3D
-    volume render in one widget — scrub slices by dragging, rotate the render,
-    and right-click for its own contrast/opacity menu. Mask toggles update the
-    view without re-loading the CT.
-
-    Full chest CTs are often 200–300 MB even when compressed. Choose one canvas
-    below when you are ready to load it; keeping the canvases off initially
-    makes the app shell render reliably in browsers and VS Code.
-    """)
-    return
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    active_viewer = mo.ui.dropdown(
-        {
-            "Off (controls and analysis only)": "off",
-            "Saved prediction": "prediction",
-            "Labelled data": "labelled",
-        },
-        value="Off (controls and analysis only)",
-        label="NIfTI canvas",
-    )
-    return (active_viewer,)
-
-
-@app.cell(hide_code=True)
-def _(NiiVue, mo):
-    # ipyniivue 2.4.4 owns one module-level WebGL canvas. Keep one Python model
-    # and one marimo wrapper alive for the whole session; replacing either when
-    # the case changes can move the singleton canvas into a stale widget.
-    nv_shared = NiiVue(height=1)
-    nv_widget = mo.ui.anywidget(nv_shared)
-    return nv_shared, nv_widget
-
-
-@app.cell(hide_code=True)
-def _(active_viewer, labelled_panel, mo, nv_widget, prediction_panel):
-    # Whole UI, rendered at the top of the page. Placed here (not last) because
-    # marimo lays out cell OUTPUTS in file order; the plumbing cells below emit no
-    # output, so only this viewer + the title above it appear.
-    _load_note = mo.md(
-        "Select **Saved prediction** or **Labelled data** to load one canvas. "
-        "Volumes are fetched as files rather than pushed through the widget socket. "
-        "The first load can still take several seconds."
-    )
-    mo.vstack(
-        [
-            mo.hstack([active_viewer, _load_note], widths=[1.0, 2.5], align="center"),
-            mo.vstack([nv_widget]),
-            prediction_panel,
-            mo.md("---"),
-            labelled_panel,
-        ],
-        gap=1.0,
-    )
-    return
-
-
-@app.cell(hide_code=True)
-def _(Path, SliceType, hashlib, nib, np, os, shutil, tempfile):
-    # NiiVue built-in colormaps. The CT is the gray base; each mask is a solid-hue
-    # overlay whose zero background is transparent (cal_min sits above 0 so empty
-    # voxels fall below the colormap floor and NiiVue renders them clear).
-    SLICE_TYPES = {
-        "Multiplanar": SliceType.MULTIPLANAR,
-        "3D render": SliceType.RENDER,
-        "Axial": SliceType.AXIAL,
-        "Coronal": SliceType.CORONAL,
-        "Sagittal": SliceType.SAGITTAL,
-    }
-
-    # ipyniivue serialises a `path` by reading the entire file into widget state.
-    # A chest CT is commonly 200-300 MB, so stage selected files under marimo's
-    # public directory and give NiiVue a URL instead. Hard links avoid copying the
-    # data; the copy fallback covers filesystems that do not support hard links.
-    _PUBLIC_CACHE = Path(__file__).resolve().parent / "public" / "niivue-cache"
-    _PUBLIC_CACHE.mkdir(parents=True, exist_ok=True)
-
-    # Derived overlays are session-specific so parallel browser kernels cannot
-    # overwrite one another's missed-truth mask before it is staged.
-    _VIEWER_CACHE = Path(tempfile.gettempdir()) / f"airway_viewer_cache_{os.getpid()}"
-    _VIEWER_CACHE.mkdir(exist_ok=True)
-
-    def stage_volume(path):
-        source = Path(path).resolve(strict=True)
-        stat = source.stat()
-        fingerprint = hashlib.sha256(
-            f"{source}|{stat.st_size}|{stat.st_mtime_ns}".encode("utf-8")
-        ).hexdigest()[:20]
-        suffix = "".join(source.suffixes) or ".nii"
-        staged = _PUBLIC_CACHE / f"{fingerprint}{suffix}"
-
-        if not staged.exists():
-            temporary = staged.with_name(f".{staged.name}.{os.getpid()}.tmp")
-            try:
-                try:
-                    os.link(source, temporary)
-                except OSError:
-                    shutil.copy2(source, temporary)
-                os.replace(temporary, staged)
-            finally:
-                if temporary.exists():
-                    temporary.unlink()
-
-        return f"./public/niivue-cache/{staged.name}"
-
-    def ct_volume(path, hu_window):
-        """Base CT volume dict for NiiVue.load_volumes, windowed for contrast."""
-        return {
-            "url": stage_volume(path),
-            "name": Path(path).name,
-            "colormap": "gray",
-            "cal_min": float(hu_window[0]),
-            "cal_max": float(hu_window[1]),
-            "opacity": 1.0,
-        }
-
-    def mask_volume(path, colormap, opacity, name):
-        """Binary-mask overlay dict: cal_min=0.5 keeps the 0 background transparent.
-        NiiVue Volumes expose no `visible` trait, so the controls cells show/hide a
-        mask by driving its (reactive) `opacity` — 0.0 means hidden."""
-        return {
-            "url": stage_volume(path),
-            "name": name,
-            "colormap": colormap,
-            "cal_min": 0.5,
-            "cal_max": 1.0,
-            "opacity": float(opacity),
-        }
-
-    def configure_niivue(nv, volumes, height, slice_type):
-        """Load a case into the session's single persistent NiiVue model."""
-        nv.load_volumes(volumes)
-        nv.height = int(height)
-        nv.set_slice_type(slice_type)
-        return nv
-
-    def write_binary_overlay(mask, affine, name):
-        out_path = _VIEWER_CACHE / name
-        nib.save(nib.Nifti1Image(mask.astype(np.uint8), affine), out_path)
-        return out_path
-
-    def missed_truth_overlay(true_path, pred_path, name):
-        """GT AND NOT prediction, written from the native-orientation label/pred
-        files so its affine matches the CT NiiVue loads by path. Returns None when
-        the shapes disagree or nothing is missed."""
-        true_img = nib.load(str(true_path))
-        pred_img = nib.load(str(pred_path))
-        if true_img.shape != pred_img.shape:
-            return None
-        missed = (np.asarray(true_img.dataobj) > 0) & ~(np.asarray(pred_img.dataobj) > 0)
-        if not missed.any():
-            return None
-        return write_binary_overlay(missed, true_img.affine, name)
-
-    return (
-        SLICE_TYPES,
-        configure_niivue,
-        ct_volume,
-        mask_volume,
-        missed_truth_overlay,
-    )
-
-
-@app.cell(hide_code=True)
-def _(
-    DEFAULT_HU_WINDOW,
-    Path,
-    RAW_AEROPATH_ROOT,
-    RAW_ATM22_ROOT,
-    json,
-    nib,
-    resolve_atm22_case_paths,
-    resolve_case_paths,
-):
-    prediction_run_root = Path(__file__).resolve().parent / "runs"
-    project_root = Path(__file__).resolve().parent
-
-    def list_prediction_run_names(run_root):
-        if not run_root.exists():
-            return []
-
-        run_dirs = []
-        for metadata_path in run_root.rglob("run_metadata.json"):
-            run_dir = metadata_path.parent
-            has_case_predictions = any(
-                (case_dir / "prediction_metadata.json").is_file()
-                for predictions_dir in run_dir.glob("predictions*")
-                if predictions_dir.is_dir()
-                for case_dir in predictions_dir.iterdir()
-                if case_dir.is_dir()
-            )
-            if has_case_predictions:
-                run_dirs.append(run_dir)
-
-        # Newest first, then float the nnU-Net study buckets to the top: nnU-Net is
-        # the model vehicle now, so its runs should lead the dropdown. Python's sort
-        # is stable, so the mtime order is preserved within each group.
-        run_dirs.sort(key=lambda path: path.stat().st_mtime, reverse=True)
-        run_dirs.sort(
-            key=lambda path: 0
-            if path.relative_to(run_root).parts[0].startswith("nnunet")
-            else 1
-        )
-        return [str(path.relative_to(run_root)) for path in run_dirs]
-
-    def resolve_prediction_run_dir(run_root, run_name):
-        return (run_root / run_name).resolve()
-
-    def resolve_prediction_data_root(run_metadata, resolved_config):
-        candidate_paths = []
-
-        recorded_data_root = run_metadata.get("data_root")
-        if recorded_data_root:
-            candidate_paths.append(Path(recorded_data_root))
-
-        data_config = resolved_config.get("data", {})
-        configured_data_root = data_config.get(
-            "raw_data_root",
-            data_config.get("batch_root"),
-        )
-        if configured_data_root:
-            configured_path = Path(configured_data_root)
-            if configured_path.is_absolute():
-                candidate_paths.append(configured_path)
-            else:
-                candidate_paths.append((project_root / configured_path).resolve())
-
-        dataset_name = str(data_config.get("dataset_name", "aeropath")).lower()
-        candidate_paths.append(
-            RAW_ATM22_ROOT if dataset_name == "atm22" else RAW_AEROPATH_ROOT
-        )
-
-        for candidate_path in candidate_paths:
-            if candidate_path.exists():
-                return candidate_path.resolve()
-
-        return (
-            RAW_ATM22_ROOT.resolve()
-            if dataset_name == "atm22"
-            else RAW_AEROPATH_ROOT.resolve()
-        )
-
-    def list_prediction_set_names(run_root, run_name):
-        if run_name is None:
-            return []
-
-        run_dir = resolve_prediction_run_dir(run_root, run_name)
-        prediction_sets = [
-            path.name
-            for path in run_dir.glob("predictions*")
-            if path.is_dir()
-            and any(
-                case_dir.is_dir() and (case_dir / "prediction_metadata.json").is_file()
-                for case_dir in path.iterdir()
-            )
-        ]
-        return sorted(prediction_sets, key=lambda name: (name != "predictions_safe_crop", name))
-
-    def list_prediction_case_ids(run_root, run_name, prediction_set_name):
-        if run_name is None or prediction_set_name is None:
-            return []
-
-        predictions_dir = resolve_prediction_run_dir(run_root, run_name) / prediction_set_name
-        case_ids = [
-            case_dir.name
-            for case_dir in predictions_dir.iterdir()
-            if case_dir.is_dir() and (case_dir / "prediction_metadata.json").is_file()
-        ]
-        return sorted(case_ids, key=lambda value: (not value.isdigit(), int(value) if value.isdigit() else value))
-
-    def list_prediction_mask_options(run_root, run_name, prediction_set_name, case_id):
-        if run_name is None or prediction_set_name is None or case_id is None:
-            return {}
-
-        case_dir = resolve_prediction_run_dir(run_root, run_name) / prediction_set_name / str(case_id)
-        mask_paths = [
-            path
-            for path in case_dir.glob("airway_pred*_full.nii.gz")
-            if "lung_masked" not in path.name
-        ]
-        label_by_name = {
-            "airway_pred_full.nii.gz": "Raw prediction",
-            "airway_pred_lcc_full.nii.gz": "Largest component (6-connectivity)",
-            "airway_pred_lcc18_full.nii.gz": "Largest component (18-connectivity)",
-            "airway_pred_lcc26_full.nii.gz": "Largest component (26-connectivity)",
-        }
-        return {
-            label_by_name.get(path.name, path.name): path.name
-            for path in sorted(mask_paths, key=lambda path: (path.name != "airway_pred_lcc_full.nii.gz", path.name))
-        }
-
-    def list_distal_analysis_options(run_dir):
-        if run_dir is None:
-            return {}
-
-        analysis_paths = []
-        for pattern in ("distal_analysis*.json", "nnunet*_topology.json"):
-            analysis_paths.extend(path for path in run_dir.glob(pattern) if path.is_file())
-
-        unique_paths = sorted(
-            set(analysis_paths),
-            key=lambda path: (path.stat().st_mtime, path.name),
-            reverse=True,
-        )
-        return {path.name: path.name for path in unique_paths}
-
-    def load_distal_analysis(run_dir, analysis_filename):
-        if run_dir is None or analysis_filename is None:
-            return None
-
-        run_dir = run_dir.resolve()
-        analysis_path = (run_dir / analysis_filename).resolve()
-        if analysis_path.parent != run_dir:
-            raise ValueError(f"Analysis file is outside the selected run: {analysis_filename}")
-        if not analysis_path.is_file():
-            raise FileNotFoundError(f"Missing distal analysis JSON: {analysis_path}")
-
-        analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
-        analysis["_path"] = analysis_path
-        return analysis
-
-    def preferred_prediction_run_name(run_names):
-        # nnU-Net is the model vehicle: lead with the exported Track-A ensemble,
-        # then any other nnU-Net study, then whatever is newest.
-        for run_name in run_names:
-            if Path(run_name).parts[0] == "nnunet-track-a":
-                return run_name
-        for run_name in run_names:
-            if Path(run_name).parts[0].startswith("nnunet"):
-                return run_name
-        return run_names[0] if run_names else None
-
-    def preferred_prediction_case_id(case_ids):
-        # Case IDs arrive numerically sorted; the first held-out case is a fine
-        # default (the old AeroPath-specific "20" hard-code is gone).
-        return case_ids[0] if case_ids else None
-
-    def load_prediction_bundle(run_root, run_name, prediction_set_name, case_id, prediction_mask_filename):
-        """Resolve the paths + metadata NiiVue and the analysis panels need. This
-        deliberately loads NO image arrays — NiiVue reads the NIfTIs directly, and
-        the GT-confidence diagnostic loads what it needs lazily — so switching case
-        no longer pulls several hundred MB of volumes into Python."""
-        run_dir = resolve_prediction_run_dir(run_root, run_name)
-        prediction_case_dir = run_dir / prediction_set_name / str(case_id)
-        prediction_metadata_path = prediction_case_dir / "prediction_metadata.json"
-        prediction_mask_path = prediction_case_dir / prediction_mask_filename
-
-        if not prediction_metadata_path.exists():
-            raise FileNotFoundError(f"Missing prediction metadata: {prediction_metadata_path}")
-        if not prediction_mask_path.exists():
-            raise FileNotFoundError(f"Missing full prediction mask: {prediction_mask_path}")
-
-        prediction_metadata = json.loads(prediction_metadata_path.read_text(encoding="utf-8"))
-        run_metadata_path = run_dir / "run_metadata.json"
-        history_path = run_dir / "history.json"
-        resolved_config_path = run_dir / "resolved_config.json"
-
-        run_metadata = (
-            json.loads(run_metadata_path.read_text(encoding="utf-8"))
-            if run_metadata_path.exists()
-            else {}
-        )
-        history = (
-            json.loads(history_path.read_text(encoding="utf-8"))
-            if history_path.exists()
-            else {}
-        )
-        resolved_config = (
-            json.loads(resolved_config_path.read_text(encoding="utf-8"))
-            if resolved_config_path.exists()
-            else {}
-        )
-
-        data_config = resolved_config.get("data", {})
-        dataset_name = str(data_config.get("dataset_name", "aeropath")).lower()
-        data_root = resolve_prediction_data_root(run_metadata, resolved_config)
-        if dataset_name == "atm22":
-            case_paths = resolve_atm22_case_paths(case_id, batch_root=data_root)
-        elif dataset_name == "aeropath":
-            case_paths = resolve_case_paths(case_id, data_root=data_root)
-        else:
-            raise ValueError(f"Unsupported prediction dataset: {dataset_name}")
-
-        if case_paths["airway"] is None:
-            raise ValueError(f"Case {case_id} does not have a reference airway mask.")
-
-        # Header-only geometry read (no voxel data pulled into memory).
-        ct_header = nib.load(str(case_paths["ct"])).header
-        spacing = tuple(float(value) for value in ct_header.get_zooms()[:3])
-        hu_window = tuple(
-            float(value)
-            for value in data_config.get("preprocessing", {}).get("hu_window", DEFAULT_HU_WINDOW)
-        )
-
-        probability_path = prediction_case_dir / "airway_prob_full.nii.gz"
-        history_entries = history.get("history", []) if isinstance(history, dict) else []
-        best_metrics = history.get("best", {}) if isinstance(history, dict) else {}
-
-        return {
-            "run_dir": run_dir,
-            "run_name": run_name,
-            "study_name": run_metadata.get("study_name")
-            or resolved_config.get("training", {}).get("study_name"),
-            "run_label": run_metadata.get("run_label")
-            or resolved_config.get("training", {}).get("run_label"),
-            "experiment_name": run_metadata.get("experiment_name")
-            or resolved_config.get("training", {}).get("experiment_name"),
-            "dataset_name": dataset_name,
-            "prediction_set_name": prediction_set_name,
-            "prediction_mask_filename": prediction_mask_filename,
-            "case_id": str(case_id),
-            "ct_path": case_paths["ct"],
-            "lung_mask_path": case_paths["lung"],
-            "true_mask_path": case_paths["airway"],
-            "prediction_mask_path": prediction_mask_path,
-            "probability_path": probability_path if probability_path.exists() else None,
-            "prediction_metadata_path": prediction_metadata_path,
-            "hu_window": hu_window,
-            "spacing": spacing,
-            "best_val_dice": best_metrics.get("val_dice"),
-            "best_epoch": best_metrics.get("epoch"),
-            "last_epoch_metrics": history_entries[-1] if history_entries else None,
-            "checkpoint_epoch": prediction_metadata.get("checkpoint_epoch"),
-            "threshold": prediction_metadata.get("threshold"),
-        }
-
-    return (
-        list_distal_analysis_options,
-        list_prediction_case_ids,
-        list_prediction_mask_options,
-        list_prediction_run_names,
-        list_prediction_set_names,
-        load_distal_analysis,
+    from lung_airway_segmentation.visualization.prediction_viewer import (
+        build_mask_mesh,
+        combine_cropped_masks,
+        default_slice_index,
+        discover_prediction_sources,
+        extract_ct_plane,
+        extract_mask_plane,
+        find_itksnap_executable,
+        launch_itksnap,
+        list_prediction_cases,
         load_prediction_bundle,
-        prediction_run_root,
-        preferred_prediction_case_id,
-        preferred_prediction_run_name,
+    )
+
+    PROJECT_ROOT = Path(__file__).resolve().parent
+    REPORT_CAMERA = {
+        "eye": {"x": 1.45, "y": 1.55, "z": 0.95},
+        "center": {"x": 0.0, "y": 0.0, "z": 0.0},
+        "up": {"x": 0.0, "y": 0.0, "z": 1.0},
+    }
+    return (
+        PROJECT_ROOT,
+        REPORT_CAMERA,
+        Path,
+        build_mask_mesh,
+        combine_cropped_masks,
+        default_slice_index,
+        discover_prediction_sources,
+        extract_ct_plane,
+        extract_mask_plane,
+        find_itksnap_executable,
+        go,
+        launch_itksnap,
+        list_prediction_cases,
+        load_prediction_bundle,
+        mo,
+        np,
     )
 
 
 @app.cell(hide_code=True)
 def _(mo):
-    prediction_refresh_button = mo.ui.run_button(label="Refresh prediction runs")
-    return (prediction_refresh_button,)
+    _introduction = (
+        "# Airway Prediction Viewer\n\n"
+        "A local, dependency-light viewer for saved airway segmentations. It "
+        "discovers both **viewer exports under `runs/`** and **native nnU-Net "
+        "outputs under `data/nnunet/predict_out/`**. The in-browser view is "
+        "Plotly-based; use the ITK-SNAP button for full-resolution clinical "
+        "navigation with CT, ground truth, and prediction loaded together."
+    )
+    mo.md(_introduction)
+    return
 
 
 @app.cell(hide_code=True)
-def _(
-    SLICE_TYPES,
-    list_prediction_run_names,
-    mo,
-    prediction_refresh_button,
-    prediction_run_root,
-    preferred_prediction_run_name,
-):
-    # Filesystem changes are not reactive, so explicitly depend on this button.
-    _ = prediction_refresh_button.value
-    prediction_run_names = list_prediction_run_names(prediction_run_root)
-    prediction_runs_available = len(prediction_run_names) > 0
+def _(mo):
+    refresh_sources = mo.ui.run_button(
+        label="Refresh predictions",
+        tooltip="Rescan runs/ and native nnU-Net output folders.",
+    )
+    return (refresh_sources,)
 
-    prediction_run_selector = (
+
+@app.cell(hide_code=True)
+def _(PROJECT_ROOT, discover_prediction_sources, mo, refresh_sources):
+    _ = refresh_sources.value
+    prediction_sources = discover_prediction_sources(PROJECT_ROOT)
+    prediction_sources_by_key = {source.key: source for source in prediction_sources}
+    _source_options = {source.label: source.key for source in prediction_sources}
+    source_selector = (
         mo.ui.dropdown(
-            prediction_run_names,
-            value=preferred_prediction_run_name(prediction_run_names),
-            label="Prediction run",
+            _source_options,
+            value=next(iter(_source_options)),
+            label="Prediction collection",
             searchable=True,
+            full_width=True,
         )
-        if prediction_runs_available
+        if _source_options
         else None
     )
-    prediction_view_mode = mo.ui.dropdown(
-        list(SLICE_TYPES.keys()),
-        value="Multiplanar",
-        label="View",
+    return prediction_sources, prediction_sources_by_key, source_selector
+
+
+@app.cell(hide_code=True)
+def _(list_prediction_cases, mo, prediction_sources_by_key, source_selector):
+    selected_source = (
+        prediction_sources_by_key.get(source_selector.value)
+        if source_selector is not None
+        else None
     )
-    prediction_view_height_slider = mo.ui.slider(
-        320, 900, value=600, step=20, label="Viewer height",
+    prediction_cases = (
+        list_prediction_cases(selected_source) if selected_source is not None else []
     )
-    show_prediction_lung_mask = mo.ui.switch(value=False, label="Lung")
-    show_true_prediction_mask = mo.ui.switch(value=True, label="Truth")
-    show_predicted_mask = mo.ui.switch(value=True, label="Prediction")
-    show_missed_truth_mask = mo.ui.switch(value=False, label="Missed truth")
-    show_gt_confidence = mo.ui.switch(value=False, label="GT confidence curve")
-    predicted_mask_opacity = mo.ui.slider(
-        0.05, 1.0, value=0.70, step=0.05, label="Prediction opacity",
+    prediction_cases_by_id = {case.case_id: case for case in prediction_cases}
+    _case_options = {
+        f"{case.case_id} · {len(case.masks)} mask{'s' if len(case.masks) != 1 else ''}": case.case_id
+        for case in prediction_cases
+    }
+    case_selector = (
+        mo.ui.dropdown(
+            _case_options,
+            value=next(iter(_case_options)),
+            label="Case",
+            searchable=True,
+        )
+        if _case_options
+        else None
+    )
+    return case_selector, prediction_cases, prediction_cases_by_id, selected_source
+
+
+@app.cell(hide_code=True)
+def _(case_selector, mo, prediction_cases_by_id):
+    selected_case = (
+        prediction_cases_by_id.get(case_selector.value)
+        if case_selector is not None
+        else None
+    )
+    _mask_options = {}
+    if selected_case is not None:
+        for _mask in selected_case.masks:
+            _label = _mask.label
+            if _label in _mask_options:
+                _label = f"{_label} · {_mask.path.name}"
+            _mask_options[_label] = str(_mask.path)
+    mask_selector = (
+        mo.ui.dropdown(
+            _mask_options,
+            value=next(iter(_mask_options)),
+            label="Mask variant",
+            searchable=True,
+        )
+        if _mask_options
+        else None
+    )
+    return mask_selector, selected_case
+
+
+@app.cell(hide_code=True)
+def _(Path, mask_selector):
+    selected_prediction_path = (
+        Path(mask_selector.value) if mask_selector is not None else None
+    )
+    return (selected_prediction_path,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    comparison_mode = mo.ui.dropdown(
+        {
+            "Prediction + ground truth": "overlay",
+            "Agreement / errors": "errors",
+            "Prediction only": "prediction",
+            "Ground truth only": "truth",
+        },
+        value="Prediction + ground truth",
+        label="3D layers",
+    )
+    mesh_detail = mo.ui.dropdown(
+        {
+            "Full detail": 1,
+            "Faster (stride 2)": 2,
+            "Preview (stride 3)": 3,
+        },
+        value="Full detail",
+        label="Mesh detail",
+    )
+    prediction_opacity = mo.ui.slider(
+        0.1,
+        1.0,
+        value=0.70,
+        step=0.05,
+        label="Prediction opacity",
+        show_value=True,
+    )
+    truth_opacity = mo.ui.slider(
+        0.1,
+        1.0,
+        value=0.42,
+        step=0.05,
+        label="GT opacity",
+        show_value=True,
+    )
+    mesh_height = mo.ui.slider(
+        420,
+        900,
+        value=650,
+        step=20,
+        label="3D height",
+        show_value=True,
+    )
+    slice_height = mo.ui.slider(
+        360,
+        800,
+        value=620,
+        step=20,
+        label="Slice height",
+        show_value=True,
+    )
+    plane_selector = mo.ui.dropdown(
+        {"Axial": 2, "Coronal": 1, "Sagittal": 0},
+        value="Axial",
+        label="Slice plane",
+    )
+    hu_window_selector = mo.ui.dropdown(
+        {
+            "Lung (-1000 to 400 HU)": (-1000.0, 400.0),
+            "Airway (-1024 to 600 HU)": (-1024.0, 600.0),
+            "Mediastinal (-160 to 240 HU)": (-160.0, 240.0),
+        },
+        value="Lung (-1000 to 400 HU)",
+        label="CT window",
     )
     return (
-        predicted_mask_opacity,
-        prediction_run_selector,
-        prediction_runs_available,
-        prediction_view_height_slider,
-        prediction_view_mode,
-        show_gt_confidence,
-        show_missed_truth_mask,
-        show_predicted_mask,
-        show_prediction_lung_mask,
-        show_true_prediction_mask,
+        comparison_mode,
+        hu_window_selector,
+        mesh_detail,
+        mesh_height,
+        plane_selector,
+        prediction_opacity,
+        slice_height,
+        truth_opacity,
     )
 
 
 @app.cell(hide_code=True)
 def _(
-    list_prediction_set_names,
-    mo,
-    prediction_run_root,
-    prediction_run_selector,
-    prediction_runs_available,
-):
-    if not prediction_runs_available or prediction_run_selector is None:
-        prediction_set_selector = None
-    else:
-        prediction_set_names = list_prediction_set_names(
-            prediction_run_root,
-            prediction_run_selector.value,
-        )
-        prediction_set_selector = (
-            mo.ui.dropdown(
-                prediction_set_names,
-                value=prediction_set_names[0],
-                label="Prediction set",
-                searchable=True,
-            )
-            if prediction_set_names
-            else None
-        )
-    return (prediction_set_selector,)
-
-
-@app.cell(hide_code=True)
-def _(
-    list_prediction_case_ids,
-    mo,
-    prediction_run_root,
-    prediction_run_selector,
-    prediction_runs_available,
-    prediction_set_selector,
-    preferred_prediction_case_id,
-):
-    if (
-        not prediction_runs_available
-        or prediction_run_selector is None
-        or prediction_set_selector is None
-    ):
-        prediction_case_selector = None
-    else:
-        prediction_case_ids = list_prediction_case_ids(
-            prediction_run_root,
-            prediction_run_selector.value,
-            prediction_set_selector.value,
-        )
-        prediction_case_selector = (
-            mo.ui.dropdown(
-                prediction_case_ids,
-                value=preferred_prediction_case_id(prediction_case_ids),
-                label="Predicted case",
-                searchable=True,
-            )
-            if prediction_case_ids
-            else None
-        )
-    return (prediction_case_selector,)
-
-
-@app.cell(hide_code=True)
-def _(
-    list_prediction_mask_options,
-    mo,
-    prediction_case_selector,
-    prediction_run_root,
-    prediction_run_selector,
-    prediction_set_selector,
-):
-    if (
-        prediction_run_selector is None
-        or prediction_set_selector is None
-        or prediction_case_selector is None
-    ):
-        prediction_mask_selector = None
-    else:
-        prediction_mask_options = list_prediction_mask_options(
-            prediction_run_root,
-            prediction_run_selector.value,
-            prediction_set_selector.value,
-            prediction_case_selector.value,
-        )
-        prediction_mask_selector = (
-            mo.ui.dropdown(
-                prediction_mask_options,
-                value=next(iter(prediction_mask_options)),
-                label="Prediction mask",
-            )
-            if prediction_mask_options
-            else None
-        )
-    return (prediction_mask_selector,)
-
-
-@app.cell(hide_code=True)
-def _(
+    PROJECT_ROOT,
     load_prediction_bundle,
-    prediction_case_selector,
-    prediction_mask_selector,
-    prediction_run_root,
-    prediction_run_selector,
-    prediction_runs_available,
-    prediction_set_selector,
+    selected_case,
+    selected_prediction_path,
+    selected_source,
 ):
-    if not prediction_runs_available or prediction_run_selector is None:
-        prediction_bundle = None
-        prediction_bundle_error = None
-    elif (
-        prediction_set_selector is None
-        or prediction_case_selector is None
-        or prediction_mask_selector is None
+    if (
+        selected_source is None
+        or selected_case is None
+        or selected_prediction_path is None
     ):
         prediction_bundle = None
-        prediction_bundle_error = "Selected run does not contain a usable saved prediction mask."
+        bundle_error = None
     else:
         try:
             prediction_bundle = load_prediction_bundle(
-                prediction_run_root,
-                prediction_run_selector.value,
-                prediction_set_selector.value,
-                prediction_case_selector.value,
-                prediction_mask_selector.value,
+                selected_source,
+                selected_case.case_id,
+                selected_prediction_path,
+                PROJECT_ROOT,
             )
-            prediction_bundle_error = None
-        except Exception as error:
+            bundle_error = None
+        except Exception as _error:
             prediction_bundle = None
-            prediction_bundle_error = str(error)
-    return prediction_bundle, prediction_bundle_error
+            bundle_error = str(_error)
+    return bundle_error, prediction_bundle
 
 
 @app.cell(hide_code=True)
-def _(
-    DEFAULT_HU_WINDOW,
-    SLICE_TYPES,
-    active_viewer,
-    configure_niivue,
-    ct_volume,
-    labelled_paths,
-    mask_volume,
-    missed_truth_overlay,
-    nv_shared,
-    prediction_bundle,
-):
-    nv_prediction = None
-    nv_labelled = None
-    prediction_layer_index = {}
-    prediction_layer_shown = {}
-    labelled_layer_index = {}
-    labelled_layer_shown = {}
+def _(build_mask_mesh, combine_cropped_masks, comparison_mode, mesh_detail, prediction_bundle):
+    scene_meshes = []
+    if prediction_bundle is not None:
+        _stride = int(mesh_detail.value)
+        _prediction = prediction_bundle.prediction
+        _truth = prediction_bundle.ground_truth
+        _mode = comparison_mode.value
 
-    if active_viewer.value == "prediction" and prediction_bundle is not None:
-        _hu = prediction_bundle["hu_window"]
-        _volumes = [ct_volume(prediction_bundle["ct_path"], _hu)]
-
-        def _add(name, path, colormap, opacity):
-            _volumes.append(mask_volume(path, colormap, opacity, name))
-            prediction_layer_index[name] = len(_volumes) - 1
-            prediction_layer_shown[name] = opacity
-
-        if prediction_bundle["lung_mask_path"]:
-            _add("lung", prediction_bundle["lung_mask_path"], "blue", 0.15)
-        _add("truth", prediction_bundle["true_mask_path"], "green", 0.40)
-        _add("prediction", prediction_bundle["prediction_mask_path"], "red", 0.70)
-
-        _missed_path = missed_truth_overlay(
-            prediction_bundle["true_mask_path"],
-            prediction_bundle["prediction_mask_path"],
-            f"missed_{prediction_bundle['case_id']}.nii.gz",
-        )
-        if _missed_path is not None:
-            _add("missed", _missed_path, "warm", 0.90)
-
-        # All overlays are loaded up front; the controls cell below drives
-        # visibility/opacity by mutating traits, so no toggle re-fetches the CT.
-        nv_prediction = configure_niivue(
-            nv_shared,
-            _volumes,
-            height=600,
-            slice_type=SLICE_TYPES["Multiplanar"],
-        )
-    elif (
-        active_viewer.value == "labelled"
-        and labelled_paths is not None
-        and labelled_paths.get("airway") is not None
-    ):
-        _volumes = [ct_volume(labelled_paths["ct"], DEFAULT_HU_WINDOW)]
-        if labelled_paths.get("lung"):
-            _volumes.append(mask_volume(labelled_paths["lung"], "blue", 0.15, "lung"))
-            labelled_layer_index["lung"] = len(_volumes) - 1
-            labelled_layer_shown["lung"] = 0.15
-        _volumes.append(mask_volume(labelled_paths["airway"], "red", 0.70, "airway"))
-        labelled_layer_index["airway"] = len(_volumes) - 1
-        labelled_layer_shown["airway"] = 0.70
-        nv_labelled = configure_niivue(
-            nv_shared,
-            _volumes,
-            height=520,
-            slice_type=SLICE_TYPES["Multiplanar"],
-        )
-    else:
-        # Keep the one widget mounted, but make its empty canvas unobtrusive.
-        nv_shared.load_volumes([])
-        nv_shared.height = 1
-    return (
-        labelled_layer_index,
-        labelled_layer_shown,
-        nv_labelled,
-        nv_prediction,
-        prediction_layer_index,
-        prediction_layer_shown,
-    )
-
-
-@app.cell(hide_code=True)
-def _(
-    SLICE_TYPES,
-    nv_prediction,
-    predicted_mask_opacity,
-    prediction_layer_index,
-    prediction_layer_shown,
-    prediction_view_height_slider,
-    prediction_view_mode,
-    show_missed_truth_mask,
-    show_predicted_mask,
-    show_prediction_lung_mask,
-    show_true_prediction_mask,
-):
-    # Reactive control of the existing widget — mutating each overlay's (reactive)
-    # opacity updates the canvas in place, so no toggle re-sends the CT. A hidden
-    # mask is opacity 0; the prediction's shown opacity tracks its slider. Runs on
-    # any toggle/slider change, and right after a rebuild so a fresh widget adopts
-    # the current switch states.
-    if nv_prediction is not None:
-        _toggles = {
-            "lung": show_prediction_lung_mask.value,
-            "truth": show_true_prediction_mask.value,
-            "prediction": show_predicted_mask.value,
-            "missed": show_missed_truth_mask.value,
-        }
-        _shown = dict(prediction_layer_shown)
-        _shown["prediction"] = float(predicted_mask_opacity.value)
-        for _name, _idx in prediction_layer_index.items():
-            if _idx < len(nv_prediction.volumes):
-                _on = _toggles.get(_name, True)
-                nv_prediction.volumes[_idx].opacity = _shown.get(_name, 0.7) if _on else 0.0
-        nv_prediction.height = int(prediction_view_height_slider.value)
-        nv_prediction.set_slice_type(SLICE_TYPES[prediction_view_mode.value])
-    return
-
-
-@app.cell(hide_code=True)
-def _(
-    active_viewer,
-    mo,
-    nv_prediction,
-    prediction_bundle,
-    prediction_bundle_error,
-):
-    if active_viewer.value != "prediction":
-        prediction_viewer = mo.md(
-            "The saved-prediction canvas is not loaded. Select **Saved prediction** "
-            "from the NIfTI canvas control above to load it."
-        )
-    elif prediction_bundle_error is not None:
-        prediction_viewer = mo.md(f"Prediction viewer error: `{prediction_bundle_error}`")
-    elif nv_prediction is None or prediction_bundle is None:
-        prediction_viewer = mo.md(
-            "Prediction viewer will appear once a saved run is available under `runs/`."
-        )
-    else:
-        prediction_viewer = mo.md(
-            "The active saved-prediction canvas is shown above the panel controls."
-        )
-    return (prediction_viewer,)
-
-
-@app.cell(hide_code=True)
-def _(
-    list_distal_analysis_options,
-    mo,
-    prediction_bundle,
-    prediction_bundle_error,
-):
-    if prediction_bundle is None or prediction_bundle_error is not None:
-        distal_analysis_selector = None
-    else:
-        distal_analysis_options = list_distal_analysis_options(prediction_bundle["run_dir"])
-        distal_analysis_selector = (
-            mo.ui.dropdown(
-                distal_analysis_options,
-                value=next(iter(distal_analysis_options)),
-                label="Analysis table",
-                searchable=True,
+        if _mode == "errors" and _truth is not None:
+            _true_positive = combine_cropped_masks(_prediction, _truth, "and")
+            _false_positive = combine_cropped_masks(
+                _prediction, _truth, "first_only"
             )
-            if distal_analysis_options
-            else None
-        )
-    return (distal_analysis_selector,)
-
-
-@app.function
-def format_distal_analysis_markdown(analysis):
-    def fmt_metric(value, digits=3):
-        if value is None:
-            return "-"
-        try:
-            number = float(value)
-        except (TypeError, ValueError):
-            return str(value)
-        if number != number:
-            return "-"
-        return f"{number:.{digits}f}"
-
-    def fmt_int(value):
-        if value is None:
-            return "-"
-        try:
-            return f"{int(value):,}"
-        except (TypeError, ValueError):
-            return str(value)
-
-    def fmt_percent(value):
-        if value is None:
-            return "-"
-        try:
-            return f"{100.0 * float(value):.1f}%"
-        except (TypeError, ValueError):
-            return str(value)
-
-    if analysis is None:
-        return "### Distal Analysis\nNo analysis JSON is selected."
-
-    analysis_path = analysis.get("_path")
-    table_mean = analysis.get("table_mean") or {}
-    operating_point = analysis.get("operating_point") or {}
-    report_cases = analysis.get("report_cases") or []
-    postprocessing = analysis.get("postprocessing") or {}
-
-    file_label = analysis_path.name if analysis_path is not None else "analysis JSON"
-    threshold = operating_point.get("threshold")
-    threshold_label = (
-        f"`{float(threshold):.2f}`"
-        if isinstance(threshold, (int, float))
-        else f"`{threshold}`" if threshold is not None else "`unavailable`"
-    )
-    split_label = analysis.get("report_split", "unavailable")
-    selected_on = operating_point.get("selected_on")
-    selection_label = f", selected on `{selected_on}`" if selected_on else ""
-    checkpoint = analysis.get("checkpoint")
-    checkpoint_label = f", checkpoint `{checkpoint}`" if checkpoint else ""
-    postproc = postprocessing.get("lcc")
-    postproc_label = f", postprocess `{postproc}`" if postproc else ""
-
-    lines = [
-        "### Distal Analysis",
-        "",
-        (
-            f"`{file_label}` - split `{split_label}`, n={len(report_cases)}, "
-            f"threshold {threshold_label}{selection_label}{checkpoint_label}{postproc_label}"
-        ),
-    ]
-
-    reason = operating_point.get("reason") or operating_point.get("note")
-    if reason:
-        lines.append(f"- **Operating point**: {reason}")
-
-    if not table_mean:
-        lines.append("")
-        lines.append("No `table_mean` block was found in this analysis JSON.")
-        return "\n".join(lines)
-
-    lines.extend(
-        [
-            "",
-            "| Mask | Dice | TD/TLD | BD | clDice | TPrec | Precision | LCC kept |",
-            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
-            (
-                "| Raw | "
-                f"{fmt_metric(table_mean.get('dice_raw'))} | "
-                f"{fmt_metric(table_mean.get('td_raw'))} | "
-                "- | - | - | "
-                f"{fmt_metric(table_mean.get('prec_raw'))} | "
-                "- |"
-            ),
-            (
-                "| +LCC | "
-                f"{fmt_metric(table_mean.get('dice_lcc'))} | "
-                f"{fmt_metric(table_mean.get('td_lcc'))} | "
-                f"{fmt_metric(table_mean.get('bd_lcc'))} | "
-                f"{fmt_metric(table_mean.get('cldice_lcc'))} | "
-                f"{fmt_metric(table_mean.get('tprec_lcc'))} | "
-                f"{fmt_metric(table_mean.get('prec_lcc'))} | "
-                f"{fmt_metric(table_mean.get('lcc_retained_fraction'))} |"
-            ),
-        ]
-    )
-
-    if table_mean.get("cldice_atm") is not None or table_mean.get("td_atm") is not None:
-        lines.extend(
-            [
-                "",
-                "| ATM branch parser | clDice | TD/TLD |",
-                "| --- | ---: | ---: |",
+            _missed = combine_cropped_masks(_truth, _prediction, "first_only")
+            scene_meshes = [
                 (
-                    "| ATM | "
-                    f"{fmt_metric(table_mean.get('cldice_atm'))} | "
-                    f"{fmt_metric(table_mean.get('td_atm'))} |"
+                    "True positive",
+                    build_mask_mesh(
+                        _true_positive,
+                        prediction_bundle.affine,
+                        preferred_stride=_stride,
+                    ),
+                    "#35d07f",
+                    "error",
+                ),
+                (
+                    "False positive",
+                    build_mask_mesh(
+                        _false_positive,
+                        prediction_bundle.affine,
+                        preferred_stride=_stride,
+                    ),
+                    "#ff4d5e",
+                    "error",
+                ),
+                (
+                    "Missed ground truth",
+                    build_mask_mesh(
+                        _missed,
+                        prediction_bundle.affine,
+                        preferred_stride=_stride,
+                    ),
+                    "#ffb020",
+                    "error",
                 ),
             ]
-        )
-
-    bins = analysis.get("bins") or []
-    if bins:
-        lines.extend(
-            [
-                "",
-                "| Radius bin | Voxels | % airway | Mean P | Median P | Recall @ op | Recall @ 0.5 |",
-                "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
-            ]
-        )
-        for row in bins:
-            recall_at_op = row.get("recall_at_threshold", row.get("recall"))
-            lines.append(
-                "| "
-                f"{row.get('bin', '-')} | "
-                f"{fmt_int(row.get('voxels'))} | "
-                f"{fmt_metric(row.get('pct_airway'), digits=1)} | "
-                f"{fmt_metric(row.get('mean_prob'))} | "
-                f"{fmt_metric(row.get('median_prob'))} | "
-                f"{fmt_percent(recall_at_op)} | "
-                f"{fmt_percent(row.get('recall_at_0.5'))} |"
-            )
-
-    return "\n".join(lines)
+        else:
+            if _mode in {"overlay", "truth"} and _truth is not None:
+                scene_meshes.append(
+                    (
+                        "Ground truth",
+                        build_mask_mesh(
+                            _truth,
+                            prediction_bundle.affine,
+                            preferred_stride=_stride,
+                        ),
+                        "#19c3d8",
+                        "truth",
+                    )
+                )
+            if _mode in {"overlay", "prediction"} or _truth is None:
+                scene_meshes.append(
+                    (
+                        "Prediction",
+                        build_mask_mesh(
+                            _prediction,
+                            prediction_bundle.affine,
+                            preferred_stride=_stride,
+                        ),
+                        "#ff3b9d",
+                        "prediction",
+                    )
+                )
+    return (scene_meshes,)
 
 
 @app.cell(hide_code=True)
 def _(
-    distal_analysis_selector,
-    load_distal_analysis,
+    REPORT_CAMERA,
+    bundle_error,
+    comparison_mode,
+    go,
+    mesh_height,
     mo,
     prediction_bundle,
-    prediction_bundle_error,
+    prediction_opacity,
+    scene_meshes,
+    truth_opacity,
 ):
-    if prediction_bundle is None or prediction_bundle_error is not None:
-        distal_analysis_panel = mo.md("")
-    elif distal_analysis_selector is None:
-        distal_analysis_panel = mo.md(
-            "### Distal Analysis\n"
-            "No `distal_analysis*.json` or `nnunet*_topology.json` file was found in this run folder."
+    if bundle_error is not None:
+        mesh_view = mo.callout(
+            mo.md(f"**Could not load this prediction**\n\n`{bundle_error}`"),
+            kind="danger",
+        )
+    elif prediction_bundle is None:
+        mesh_view = mo.callout(
+            "Select a prediction collection and case to build the 3D view.",
+            kind="info",
+        )
+    else:
+        _figure = go.Figure()
+        _visible_meshes = 0
+        for _name, _mesh, _color, _opacity_kind in scene_meshes:
+            if _mesh is None:
+                continue
+            _visible_meshes += 1
+            if _opacity_kind == "prediction":
+                _opacity = float(prediction_opacity.value)
+            elif _opacity_kind == "truth":
+                _opacity = float(truth_opacity.value)
+            else:
+                _opacity = 0.94
+            _vertices = _mesh.vertices
+            _faces = _mesh.faces
+            _figure.add_trace(
+                go.Mesh3d(
+                    x=_vertices[:, 0],
+                    y=_vertices[:, 1],
+                    z=_vertices[:, 2],
+                    i=_faces[:, 0],
+                    j=_faces[:, 1],
+                    k=_faces[:, 2],
+                    name=_name,
+                    color=_color,
+                    opacity=_opacity,
+                    flatshading=True,
+                    hovertemplate=f"{_name}<extra></extra>",
+                    lighting={
+                        "ambient": 0.45,
+                        "diffuse": 0.72,
+                        "specular": 0.18,
+                        "roughness": 0.75,
+                    },
+                )
+            )
+        if _visible_meshes == 0:
+            mesh_view = mo.callout(
+                "The selected layer is empty, so no surface could be generated.",
+                kind="warn",
+            )
+        else:
+            _figure.update_layout(
+                template="plotly_dark",
+                height=int(mesh_height.value),
+                margin={"l": 0, "r": 0, "t": 44, "b": 0},
+                title={
+                    "text": (
+                        f"Case {prediction_bundle.case_id} · "
+                        f"{comparison_mode.value.replace('_', ' ').title()}"
+                    ),
+                    "x": 0.02,
+                },
+                legend={
+                    "orientation": "h",
+                    "yanchor": "bottom",
+                    "y": 1.01,
+                    "xanchor": "right",
+                    "x": 1.0,
+                },
+                scene={
+                    "aspectmode": "data",
+                    "dragmode": "turntable",
+                    "camera": REPORT_CAMERA,
+                    "xaxis": {"title": "world x (mm)", "showbackground": False},
+                    "yaxis": {"title": "world y (mm)", "showbackground": False},
+                    "zaxis": {"title": "world z (mm)", "showbackground": False},
+                },
+                uirevision=(
+                    f"{prediction_bundle.source.key}:{prediction_bundle.case_id}:"
+                    f"{comparison_mode.value}"
+                ),
+            )
+            mesh_view = mo.as_html(_figure)
+    return (mesh_view,)
+
+
+@app.cell(hide_code=True)
+def _(default_slice_index, mo, plane_selector, prediction_bundle):
+    slice_axis = int(plane_selector.value)
+    if prediction_bundle is None:
+        slice_slider = mo.ui.slider(
+            0,
+            1,
+            value=0,
+            disabled=True,
+            label="Slice",
+            show_value=True,
+        )
+    else:
+        _default_index = default_slice_index(
+            [prediction_bundle.prediction, prediction_bundle.ground_truth],
+            slice_axis,
+        )
+        slice_slider = mo.ui.slider(
+            0,
+            prediction_bundle.shape[slice_axis] - 1,
+            value=_default_index,
+            step=1,
+            debounce=True,
+            label="Slice index",
+            show_value=True,
+            full_width=True,
+        )
+    return slice_axis, slice_slider
+
+
+@app.cell(hide_code=True)
+def _(
+    comparison_mode,
+    extract_ct_plane,
+    extract_mask_plane,
+    go,
+    hu_window_selector,
+    mo,
+    np,
+    plane_selector,
+    prediction_bundle,
+    slice_axis,
+    slice_height,
+    slice_slider,
+):
+    if prediction_bundle is None:
+        slice_view = mo.callout(
+            "A CT slice will appear after a prediction is loaded.", kind="info"
         )
     else:
         try:
-            distal_analysis = load_distal_analysis(
-                prediction_bundle["run_dir"],
-                distal_analysis_selector.value,
+            _index = int(slice_slider.value)
+            _ct = extract_ct_plane(
+                prediction_bundle.ct_image, slice_axis, _index
             )
-            distal_analysis_panel = mo.vstack(
-                [
-                    distal_analysis_selector,
-                    mo.md(format_distal_analysis_markdown(distal_analysis)),
-                ],
-                gap=0.45,
+            _prediction = extract_mask_plane(
+                prediction_bundle.prediction, slice_axis, _index
             )
-        except Exception as error:
-            distal_analysis_panel = mo.vstack(
-                [
-                    distal_analysis_selector,
-                    mo.md(f"### Distal Analysis\nCould not load analysis table: `{error}`"),
-                ],
-                gap=0.45,
+            _truth = extract_mask_plane(
+                prediction_bundle.ground_truth, slice_axis, _index
             )
-    return (distal_analysis_panel,)
-
-
-@app.cell(hide_code=True)
-def _(
-    RADIUS_BINS,
-    load_canonical_image,
-    ndimage,
-    np,
-    prediction_bundle,
-    show_gt_confidence,
-    skeletonize,
-):
-    # Predicted probability restricted to the ground-truth airway, stratified by
-    # branch calibre (distance-to-wall at the nearest centreline voxel). A
-    # recall/confidence DIAGNOSTIC — it discards all false positives, so it is
-    # never a performance number; pair it with the precision-side metrics.
-    # nnU-Net runs export hard masks only, so this stays empty for them; it lights
-    # up for the from-scratch runs that saved airway_prob_full.nii.gz.
-    SHELL_VOXELS = 2.5  # background-shell thickness around the airway, in voxels.
-    if prediction_bundle is None or not show_gt_confidence.value:
-        gt_confidence = None
-    elif prediction_bundle["probability_path"] is None:
-        gt_confidence = {
-            "error": "No airway_prob_full.nii.gz saved for this run (nnU-Net exports hard masks only)."
-        }
-    else:
-        _prob = np.asarray(
-            load_canonical_image(prediction_bundle["probability_path"]).dataobj,
-            dtype=np.float32,
-        )
-        _gt = np.asarray(
-            load_canonical_image(prediction_bundle["true_mask_path"]).dataobj
-        ) > 0
-        if _prob.shape != _gt.shape:
-            gt_confidence = {"error": f"probability shape {_prob.shape} != GT shape {_gt.shape}"}
-        elif not _gt.any():
-            gt_confidence = {"error": "case has no ground-truth airway voxels"}
-        else:
-            # Work inside a padded bounding box of the airway: the shell distance
-            # transform is memory-heavy on a full volume, and everything we need is
-            # local to the tree. Pad > shell width.
-            _where = np.where(_gt)
-            _bbox = tuple(
-                slice(max(0, int(ax.min()) - 4), min(int(size), int(ax.max()) + 5))
-                for ax, size in zip(_where, _gt.shape)
+            _low, _high = (float(value) for value in hu_window_selector.value)
+            _figure = go.Figure()
+            _figure.add_trace(
+                go.Heatmap(
+                    z=_ct,
+                    colorscale="Gray",
+                    zmin=_low,
+                    zmax=_high,
+                    showscale=True,
+                    colorbar={"title": "HU", "thickness": 14},
+                    hovertemplate="HU %{z:.0f}<extra></extra>",
+                    name="CT",
+                )
             )
-            _gt_c = _gt[_bbox]
-            _prob_c = _prob[_bbox]
 
-            # Bin BOTH airway and shell voxels by the calibre of their nearest
-            # centreline voxel, so a whole branch is classified by its thickness —
-            # a cleaner distal/generation proxy than per-voxel wall distance.
-            _skeleton_c = skeletonize(_gt_c)
-            _radius = ndimage.distance_transform_edt(_gt_c)  # distance to wall
-            _, _skel_idx = ndimage.distance_transform_edt(~_skeleton_c, return_indices=True)
-            _calibre = _radius[tuple(_skel_idx)]
+            _mode = comparison_mode.value
+            _overlay = np.full(_prediction.shape, np.nan, dtype=np.float32)
+            if _mode == "errors" and _truth is not None:
+                _overlay[_prediction & _truth] = 1
+                _overlay[_prediction & ~_truth] = 2
+                _overlay[_truth & ~_prediction] = 3
+                _colors = ("#35d07f", "#ff4d5e", "#ffb020")
+                _labels = ("True positive", "False positive", "Missed GT")
+            elif _mode == "truth" and _truth is not None:
+                _overlay[_truth] = 1
+                _colors = ("#19c3d8",)
+                _labels = ("Ground truth",)
+            elif _mode == "prediction" or _truth is None:
+                _overlay[_prediction] = 1
+                _colors = ("#ff3b9d",)
+                _labels = ("Prediction",)
+            else:
+                _overlay[_truth & ~_prediction] = 1
+                _overlay[_prediction & ~_truth] = 2
+                _overlay[_prediction & _truth] = 3
+                _colors = ("#19c3d8", "#ff3b9d", "#d7ff6b")
+                _labels = ("GT only", "Prediction only", "Overlap")
 
-            _prob_gt = _prob_c[_gt_c]
-            _calibre_gt = _calibre[_gt_c]
-
-            # Background shell: non-airway voxels within SHELL_VOXELS of the wall,
-            # binned by the calibre of the branch they hug.
-            _bg_dist = ndimage.distance_transform_edt(~_gt_c)
-            _shell = (~_gt_c) & (_bg_dist > 0) & (_bg_dist <= SHELL_VOXELS)
-            _prob_shell = _prob_c[_shell]
-            _calibre_shell = _calibre[_shell]
-
-            def _stratify(values, calibres):
-                rows = []
-                total = int(values.size)
-                for label, lo, hi in RADIUS_BINS:
-                    m = (calibres >= lo) & (calibres < hi)
-                    count = int(m.sum())
-                    if count == 0:
-                        continue
-                    p = values[m]
-                    rows.append(
-                        {
-                            "bin": label,
-                            "count": count,
-                            "pct": float(100.0 * count / total) if total else 0.0,
-                            "mean_prob": float(p.mean()),
-                            "median_prob": float(np.median(p)),
-                            "p10_prob": float(np.percentile(p, 10)),
-                            "p90_prob": float(np.percentile(p, 90)),
-                        }
+            _count = len(_colors)
+            if _count == 1:
+                _colorscale = [[0.0, _colors[0]], [1.0, _colors[0]]]
+            else:
+                _colorscale = []
+                for _color_index, _color in enumerate(_colors):
+                    _start = _color_index / _count
+                    _stop = (_color_index + 1) / _count
+                    _colorscale.extend(
+                        [[_start, _color], [max(_start, _stop - 1e-6), _color]]
                     )
-                return rows
-
-            gt_confidence = {
-                "radius_curve": _stratify(_prob_gt, _calibre_gt),
-                "shell_curve": _stratify(_prob_shell, _calibre_shell),
-                "shell_voxels": SHELL_VOXELS,
-                "mean_prob": float(_prob_gt.mean()) if _prob_gt.size else 0.0,
-                "shell_mean_prob": float(_prob_shell.mean()) if _prob_shell.size else 0.0,
-            }
-    return (gt_confidence,)
+            _figure.add_trace(
+                go.Heatmap(
+                    z=_overlay,
+                    zmin=1,
+                    zmax=max(1, _count),
+                    colorscale=_colorscale,
+                    showscale=False,
+                    opacity=0.72,
+                    hoverinfo="skip",
+                    name="Segmentation",
+                )
+            )
+            for _label, _color in zip(_labels, _colors):
+                _figure.add_trace(
+                    go.Scatter(
+                        x=[None],
+                        y=[None],
+                        mode="markers",
+                        marker={"size": 11, "symbol": "square", "color": _color},
+                        name=_label,
+                        hoverinfo="skip",
+                    )
+                )
+            _figure.update_layout(
+                template="plotly_dark",
+                height=int(slice_height.value),
+                margin={"l": 0, "r": 30, "t": 52, "b": 0},
+                title={
+                    "text": (
+                        f"{plane_selector.selected_key} slice {_index} · "
+                        f"window {_low:.0f} to {_high:.0f} HU"
+                    ),
+                    "x": 0.02,
+                },
+                xaxis={"visible": False, "scaleanchor": "y"},
+                yaxis={"visible": False, "autorange": "reversed"},
+                legend={"orientation": "h", "y": 1.04, "x": 0.48},
+                uirevision=(
+                    f"slice:{prediction_bundle.source.key}:"
+                    f"{prediction_bundle.case_id}:{slice_axis}"
+                ),
+            )
+            slice_view = mo.as_html(_figure)
+        except Exception as _error:
+            slice_view = mo.callout(
+                mo.md(f"**Could not read this CT slice**\n\n`{_error}`"),
+                kind="danger",
+            )
+    return (slice_view,)
 
 
 @app.cell(hide_code=True)
-def _(
-    go,
-    gt_confidence,
-    mo,
-    prediction_bundle,
-    prediction_bundle_error,
-    prediction_view_height_slider,
-    show_gt_confidence,
-):
-    # Confidence-vs-calibre curve: mean predicted probability on the true airway
-    # and on the adjacent background shell, stratified by branch calibre, with the
-    # operating threshold drawn on so it is visible which bins are thresholded away.
-    if (
-        not show_gt_confidence.value
-        or prediction_bundle is None
-        or prediction_bundle_error is not None
-    ):
-        gt_confidence_curve_view = mo.md("")
-    elif gt_confidence is not None and "error" in gt_confidence:
-        gt_confidence_curve_view = mo.md(
-            f"GT-confidence curve unavailable: `{gt_confidence['error']}`"
-        )
-    elif gt_confidence is None or not gt_confidence["radius_curve"]:
-        gt_confidence_curve_view = mo.md("No ground-truth airway voxels to stratify.")
+def _(bundle_error, mo, prediction_bundle):
+    if bundle_error is not None:
+        summary_panel = mo.callout(bundle_error, kind="danger")
+    elif prediction_bundle is None:
+        summary_panel = mo.md("")
     else:
-        curve_rows = gt_confidence["radius_curve"]
-        shell_by_bin = {row["bin"]: row for row in gt_confidence.get("shell_curve", [])}
-        curve_labels = [row["bin"] for row in curve_rows]
-        curve_means = [row["mean_prob"] for row in curve_rows]
-        curve_err_up = [max(0.0, row["p90_prob"] - row["mean_prob"]) for row in curve_rows]
-        curve_err_down = [max(0.0, row["mean_prob"] - row["p10_prob"]) for row in curve_rows]
-        curve_customdata = [
-            (row["median_prob"], row["count"], row["pct"]) for row in curve_rows
-        ]
-        shell_means = [
-            shell_by_bin[label]["mean_prob"] if label in shell_by_bin else None
-            for label in curve_labels
-        ]
-        shell_customdata = [
-            (
-                shell_by_bin[label]["median_prob"] if label in shell_by_bin else float("nan"),
-                shell_by_bin[label]["count"] if label in shell_by_bin else 0,
-            )
-            for label in curve_labels
-        ]
+        _metrics = prediction_bundle.metrics
 
-        gt_confidence_curve_figure = go.Figure()
-        gt_confidence_curve_figure.add_trace(
-            go.Bar(
-                x=curve_labels,
-                y=curve_means,
-                error_y=dict(
-                    type="data",
-                    symmetric=False,
-                    array=curve_err_up,
-                    arrayminus=curve_err_down,
-                    thickness=1,
-                    width=4,
-                ),
-                marker_color="#277da1",
-                name="airway (true)",
-                customdata=curve_customdata,
-                hovertemplate=(
-                    "%{x}<br>airway mean P=%{y:.3f}<br>median P=%{customdata[0]:.3f}"
-                    "<br>voxels=%{customdata[1]:,} (%{customdata[2]:.1f}% of airway)"
-                    "<extra></extra>"
-                ),
-            )
-        )
-        gt_confidence_curve_figure.add_trace(
-            go.Bar(
-                x=curve_labels,
-                y=shell_means,
-                marker_color="#adb5bd",
-                name=f"background shell (≤{gt_confidence.get('shell_voxels', 2.5):g} vox)",
-                customdata=shell_customdata,
-                hovertemplate=(
-                    "%{x}<br>shell mean P=%{y:.3f}<br>median P=%{customdata[0]:.3f}"
-                    "<br>voxels=%{customdata[1]:,}<extra></extra>"
-                ),
-            )
-        )
-        gt_confidence_threshold = prediction_bundle["threshold"]
-        if gt_confidence_threshold is not None:
-            gt_confidence_curve_figure.add_hline(
-                y=float(gt_confidence_threshold),
-                line=dict(color="#d81b60", dash="dash", width=1.5),
-                annotation_text=f"op threshold {float(gt_confidence_threshold):.2f}",
-                annotation_position="top left",
-            )
-        _gt_conf_run = (
-            prediction_bundle.get("run_label")
-            or prediction_bundle.get("experiment_name")
-            or prediction_bundle.get("run_name")
-        )
-        _gt_conf_provenance = (
-            f"run: {_gt_conf_run}"
-            f"  ·  set: {prediction_bundle.get('prediction_set_name') or '—'}"
-            f"  ·  case: {prediction_bundle.get('case_id')}"
-        )
-        gt_confidence_curve_figure.update_layout(
-            title=dict(
-                text=(
-                    "Predicted confidence: true airway vs adjacent tissue, by distance to wall"
-                    f"<br><span style='font-size:12px;color:#6c757d'>{_gt_conf_provenance}</span>"
-                ),
-                x=0.01,
-                xanchor="left",
-                y=0.97,
-                yanchor="top",
-            ),
-            height=int(prediction_view_height_slider.value),
-            margin=dict(l=10, r=10, t=84, b=0),
-            yaxis=dict(title="P(airway)", range=[0, 1]),
-            xaxis=dict(title="branch calibre (centreline radius, voxels)"),
-            legend=dict(orientation="h", yanchor="bottom", y=1.04, xanchor="right", x=1.0),
-            barmode="group",
-            bargap=0.3,
-            bargroupgap=0.08,
-            plot_bgcolor="white",
-            paper_bgcolor="white",
-        )
-        gt_confidence_separability = (
-            gt_confidence["mean_prob"] - gt_confidence.get("shell_mean_prob", 0.0)
-        )
-        gt_confidence_curve_view = mo.vstack(
+        def _score(name):
+            _value = _metrics.get(name)
+            return "—" if _value is None else f"{float(_value):.3f}"
+
+        _stats = mo.hstack(
             [
-                mo.md(
-                    f"### GT Confidence — Radius Stratification "
-                    f"(airway {gt_confidence['mean_prob']:.3f} vs shell "
-                    f"{gt_confidence.get('shell_mean_prob', 0.0):.3f} → "
-                    f"separability gap {gt_confidence_separability:+.3f})"
+                mo.stat(_score("dice"), label="Dice", bordered=True),
+                mo.stat(_score("iou"), label="IoU", bordered=True),
+                mo.stat(_score("precision"), label="Precision", bordered=True),
+                mo.stat(_score("recall"), label="Recall", bordered=True),
+                mo.stat(
+                    f"{int(_metrics['predicted_voxels']):,}",
+                    label="Predicted voxels",
+                    bordered=True,
                 ),
-                mo.as_html(gt_confidence_curve_figure),
             ],
-            gap=0.5,
+            widths="equal",
+            gap=0.7,
+            wrap=True,
         )
-    return (gt_confidence_curve_view,)
+        _metadata = prediction_bundle.metadata
+        _run_lines = [
+            f"- **Source**: {_metadata.get('source_type', 'Unknown')}",
+            f"- **Dataset**: `{_metadata.get('dataset_name', 'unknown')}`",
+            f"- **Case**: `{prediction_bundle.case_id}`",
+            (
+                f"- **Spacing**: `{' × '.join(f'{value:.3f}' for value in prediction_bundle.spacing)} mm`"
+            ),
+            f"- **Shape**: `{prediction_bundle.shape}`",
+        ]
+        for _key, _label in (
+            ("study_name", "Study"),
+            ("run_label", "Run label"),
+            ("experiment_name", "Experiment"),
+            ("threshold", "Threshold"),
+            ("checkpoint_epoch", "Checkpoint epoch"),
+            ("best_val_dice", "Recorded best validation Dice"),
+        ):
+            if _metadata.get(_key) is not None:
+                _run_lines.append(f"- **{_label}**: `{_metadata[_key]}`")
+
+        _warning_view = (
+            mo.callout(
+                mo.md("\n".join(f"- {warning}" for warning in prediction_bundle.warnings)),
+                kind="warn",
+            )
+            if prediction_bundle.warnings
+            else mo.md("")
+        )
+        _file_lines = [
+            f"- CT: `{prediction_bundle.ct_path}`",
+            f"- Ground truth: `{prediction_bundle.ground_truth_path or 'not found'}`",
+            f"- Prediction: `{prediction_bundle.prediction_path}`",
+        ]
+        summary_panel = mo.vstack(
+            [
+                mo.md("### Selected case"),
+                _stats,
+                mo.hstack(
+                    [mo.md("\n".join(_run_lines)), _warning_view],
+                    widths=[1.5, 1.0],
+                    gap=1.2,
+                    wrap=True,
+                    align="start",
+                ),
+                mo.accordion({"Resolved files": mo.md("\n".join(_file_lines))}),
+            ],
+            gap=0.8,
+        )
+    return (summary_panel,)
+
+
+@app.cell(hide_code=True)
+def _(find_itksnap_executable, mo, prediction_bundle):
+    itksnap_executable = find_itksnap_executable()
+    open_itksnap = mo.ui.run_button(
+        label="Open this case in ITK-SNAP",
+        kind="success",
+        disabled=prediction_bundle is None or itksnap_executable is None,
+        tooltip=(
+            "Open CT, ground truth, and prediction as separate layers."
+            if itksnap_executable is not None
+            else "ITK-SNAP was not found. Set ITKSNAP_PATH to its executable."
+        ),
+    )
+    return itksnap_executable, open_itksnap
 
 
 @app.cell(hide_code=True)
 def _(
+    itksnap_executable,
+    launch_itksnap,
     mo,
-    predicted_mask_opacity,
+    open_itksnap,
     prediction_bundle,
-    prediction_bundle_error,
-    prediction_case_selector,
-    prediction_mask_selector,
-    prediction_refresh_button,
-    prediction_run_selector,
-    prediction_runs_available,
-    prediction_set_selector,
-    prediction_view_height_slider,
-    prediction_view_mode,
-    show_gt_confidence,
-    show_missed_truth_mask,
-    show_predicted_mask,
-    show_prediction_lung_mask,
-    show_true_prediction_mask,
 ):
-    # Compact, full-width control strip that sits ABOVE the (full-width) viewer.
-    # The run summary is returned separately so it can go beside the table below.
-    prediction_summary = mo.md("")
-    if not prediction_runs_available:
-        prediction_controls = mo.vstack(
-            [
-                mo.md(
-                    "## Saved Prediction Viewer\n\n"
-                    "No run folders with saved predictions were found under `runs/`. "
-                    "Export nnU-Net predictions with `scripts.export_nnunet_viewer_run` first."
-                ),
-                prediction_refresh_button,
-            ],
-            gap=0.75,
+    if itksnap_executable is None:
+        itksnap_status = mo.callout(
+            mo.md(
+                "ITK-SNAP was not found. Install it or set `ITKSNAP_PATH` to the "
+                "ITK-SNAP executable, then restart the app."
+            ),
+            kind="warn",
         )
-    elif prediction_bundle_error is not None:
-        prediction_controls = mo.vstack(
+    elif prediction_bundle is None:
+        itksnap_status = mo.callout(
+            f"ITK-SNAP is ready at `{itksnap_executable}`. Select a usable case.",
+            kind="neutral",
+        )
+    elif open_itksnap.value:
+        try:
+            _process = launch_itksnap(
+                itksnap_executable,
+                prediction_bundle.ct_path,
+                prediction_bundle.prediction_path,
+                prediction_bundle.ground_truth_path,
+            )
+            itksnap_status = mo.callout(
+                (
+                    f"Opened case `{prediction_bundle.case_id}` in ITK-SNAP "
+                    f"(process `{_process.pid}`). GT and prediction are separate "
+                    "segmentation layers."
+                ),
+                kind="success",
+            )
+        except Exception as _error:
+            itksnap_status = mo.callout(
+                mo.md(f"**ITK-SNAP did not open**\n\n`{_error}`"), kind="danger"
+            )
+    else:
+        itksnap_status = mo.callout(
+            (
+                f"Ready: `{itksnap_executable}`. The button opens the selected CT "
+                "with ground truth first and prediction second in the segmentation list."
+            ),
+            kind="info",
+        )
+    return (itksnap_status,)
+
+
+@app.cell(hide_code=True)
+def _(
+    case_selector,
+    comparison_mode,
+    hu_window_selector,
+    itksnap_status,
+    mask_selector,
+    mesh_detail,
+    mesh_height,
+    mesh_view,
+    mo,
+    open_itksnap,
+    plane_selector,
+    prediction_sources,
+    prediction_opacity,
+    refresh_sources,
+    slice_height,
+    slice_slider,
+    slice_view,
+    source_selector,
+    summary_panel,
+    truth_opacity,
+):
+    if source_selector is None:
+        main_panel = mo.vstack(
             [
-                mo.md("## Saved Prediction Viewer"),
-                mo.hstack(
+                mo.callout(
+                    mo.md(
+                        "No prediction masks were found. Expected either "
+                        "`runs/**/predictions*/<case>/*.nii.gz` or "
+                        "`data/nnunet/predict_out/<collection>/*.nii.gz`."
+                    ),
+                    kind="warn",
+                ),
+                refresh_sources,
+            ],
+            gap=1.0,
+        )
+    else:
+        _primary_controls = [
+            source_selector,
+            case_selector,
+            mask_selector,
+            refresh_sources,
+        ]
+        _primary_controls = [item for item in _primary_controls if item is not None]
+        _viewer_controls = [
+            comparison_mode,
+            mesh_detail,
+            prediction_opacity,
+            truth_opacity,
+            mesh_height,
+        ]
+        _slice_controls = [
+            plane_selector,
+            slice_slider,
+            hu_window_selector,
+            slice_height,
+        ]
+        _tabs = mo.ui.tabs(
+            {
+                "3D surface": mo.vstack(
                     [
-                        prediction_run_selector,
-                        prediction_set_selector,
-                        prediction_case_selector,
-                        prediction_refresh_button,
+                        mo.hstack(
+                            _viewer_controls,
+                            gap=0.8,
+                            wrap=True,
+                            align="end",
+                        ),
+                        mesh_view,
                     ],
+                    gap=0.7,
+                ),
+                "CT slice": mo.vstack(
+                    [
+                        mo.hstack(
+                            _slice_controls,
+                            gap=0.8,
+                            wrap=True,
+                            align="end",
+                        ),
+                        slice_view,
+                    ],
+                    gap=0.7,
+                ),
+            },
+            value="3D surface",
+        )
+        main_panel = mo.vstack(
+            [
+                mo.hstack(
+                    _primary_controls,
+                    widths=[2.5, 0.7, 1.2, 0.7],
                     gap=0.8,
                     wrap=True,
                     align="end",
                 ),
-                mo.md(f"Prediction bundle error: `{prediction_bundle_error}`"),
-            ],
-            gap=0.75,
-        )
-    else:
-        selectors_row = mo.hstack(
-            [
-                prediction_run_selector,
-                prediction_set_selector,
-                prediction_case_selector,
-                prediction_mask_selector,
-                prediction_view_mode,
-                prediction_view_height_slider,
-                prediction_refresh_button,
-            ],
-            gap=0.8,
-            wrap=True,
-            align="end",
-        )
-        toggles_row = mo.hstack(
-            [
-                show_prediction_lung_mask,
-                show_true_prediction_mask,
-                show_predicted_mask,
-                show_missed_truth_mask,
-                show_gt_confidence,
-                predicted_mask_opacity,
-            ],
-            gap=1.2,
-            justify="start",
-            wrap=True,
-            align="center",
-        )
-        prediction_controls = mo.vstack(
-            [mo.md("## Saved Prediction Viewer"), selectors_row, toggles_row],
-            gap=0.6,
-        )
-
-        prediction_notes = [
-            f"- **Study**: `{prediction_bundle['study_name']}`" if prediction_bundle["study_name"] else "- **Study**: legacy run",
-            f"- **Variant**: `{prediction_bundle['run_label']}`" if prediction_bundle["run_label"] else "- **Variant**: legacy run",
-            f"- **Experiment**: `{prediction_bundle['experiment_name']}`" if prediction_bundle["experiment_name"] else "- **Experiment**: unavailable",
-            f"- **Run**: {prediction_bundle['run_name']}",
-            f"- **Dataset**: `{prediction_bundle['dataset_name']}`",
-            f"- **Prediction set**: `{prediction_bundle['prediction_set_name']}`",
-            f"- **Prediction mask**: `{prediction_bundle['prediction_mask_filename']}`",
-            f"- **Case**: `{prediction_bundle['case_id']}`",
-            f"- **Best validation Dice**: `{float(prediction_bundle['best_val_dice']):.4f}`" if prediction_bundle["best_val_dice"] is not None else "- **Best validation Dice**: unavailable",
-            f"- **Checkpoint epoch**: `{int(prediction_bundle['checkpoint_epoch'])}`" if prediction_bundle["checkpoint_epoch"] is not None else "- **Checkpoint epoch**: unavailable",
-            f"- **Threshold**: `{float(prediction_bundle['threshold']):.2f}`" if prediction_bundle["threshold"] is not None else "- **Threshold**: unavailable",
-        ]
-        prediction_summary_blocks = [mo.md("### Run Summary"), mo.md("\n".join(prediction_notes))]
-
-        last_epoch_metrics = prediction_bundle["last_epoch_metrics"]
-        if last_epoch_metrics is not None:
-            last_epoch_lines = []
-            epoch_value = last_epoch_metrics.get("epoch")
-            if epoch_value is not None:
-                last_epoch_lines.append(f"- **Epoch**: `{int(epoch_value)}`")
-            train_loss = last_epoch_metrics.get("train_loss")
-            if train_loss is not None:
-                last_epoch_lines.append(f"- **Train loss**: `{float(train_loss):.4f}`")
-            train_dice = last_epoch_metrics.get("train_dice")
-            if train_dice is not None:
-                last_epoch_lines.append(f"- **Train Dice**: `{float(train_dice):.4f}`")
-            val_dice = last_epoch_metrics.get("val_dice")
-            if val_dice is not None:
-                last_epoch_lines.append(f"- **Validation Dice**: `{float(val_dice):.4f}`")
-            if last_epoch_lines:
-                prediction_summary_blocks.extend(
-                    [mo.md("### Last Epoch"), mo.md("\n".join(last_epoch_lines))]
-                )
-
-        prediction_summary = mo.vstack(prediction_summary_blocks, gap=0.4)
-    return prediction_controls, prediction_summary
-
-
-@app.cell(hide_code=True)
-def _(
-    distal_analysis_panel,
-    gt_confidence_curve_view,
-    mo,
-    prediction_controls,
-    prediction_summary,
-    prediction_viewer,
-):
-    # Full-width layout: control strip, then the viewer spanning the page (so its
-    # canvas has real width), then the analysis table beside the run summary, then
-    # the GT-confidence curve (empty unless that toggle is on).
-    prediction_panel = mo.vstack(
-        [
-            prediction_controls,
-            prediction_viewer,
-            mo.hstack(
-                [distal_analysis_panel, prediction_summary],
-                widths=[1.6, 1.0],
-                gap=1.5,
-                align="start",
-                wrap=True,
-            ),
-            gt_confidence_curve_view,
-        ],
-        gap=0.9,
-    )
-    return (prediction_panel,)
-
-
-@app.cell(hide_code=True)
-def _(SLICE_TYPES, mo):
-    dataset_selector = mo.ui.dropdown(
-        {"ATM'22": "atm22", "AeroPath": "aeropath"},
-        value="ATM'22",
-        label="Dataset",
-    )
-    labelled_view_mode = mo.ui.dropdown(
-        list(SLICE_TYPES.keys()), value="Multiplanar", label="View"
-    )
-    labelled_height_slider = mo.ui.slider(
-        320, 900, value=520, step=20, label="Viewer height"
-    )
-    show_labelled_lung = mo.ui.switch(value=False, label="Lung")
-    show_labelled_airway = mo.ui.switch(value=True, label="Airway")
-    return (
-        dataset_selector,
-        labelled_height_slider,
-        labelled_view_mode,
-        show_labelled_airway,
-        show_labelled_lung,
-    )
-
-
-@app.cell(hide_code=True)
-def _(
-    RAW_AEROPATH_ROOT,
-    RAW_ATM22_ROOT,
-    dataset_selector,
-    list_atm22_case_ids,
-    list_case_ids,
-    mo,
-):
-    if dataset_selector.value == "atm22":
-        labelled_root = RAW_ATM22_ROOT
-        labelled_case_ids = list_atm22_case_ids(labelled_root)
-    else:
-        labelled_root = RAW_AEROPATH_ROOT
-        labelled_case_ids = list_case_ids(labelled_root)
-
-    labelled_case_selector = mo.ui.dropdown(
-        labelled_case_ids,
-        value=labelled_case_ids[0],
-        label="Case",
-        searchable=True,
-    )
-    return labelled_case_selector, labelled_root
-
-
-@app.cell(hide_code=True)
-def _(
-    dataset_selector,
-    labelled_case_selector,
-    labelled_root,
-    resolve_atm22_case_paths,
-    resolve_case_paths,
-):
-    if dataset_selector.value == "atm22":
-        labelled_paths = resolve_atm22_case_paths(
-            labelled_case_selector.value, batch_root=labelled_root
-        )
-    else:
-        labelled_paths = resolve_case_paths(
-            labelled_case_selector.value, data_root=labelled_root
-        )
-    return (labelled_paths,)
-
-
-@app.cell(hide_code=True)
-def _(
-    SLICE_TYPES,
-    labelled_height_slider,
-    labelled_layer_index,
-    labelled_layer_shown,
-    labelled_view_mode,
-    nv_labelled,
-    show_labelled_airway,
-    show_labelled_lung,
-):
-    if nv_labelled is not None:
-        _toggles = {"lung": show_labelled_lung.value, "airway": show_labelled_airway.value}
-        for _name, _idx in labelled_layer_index.items():
-            if _idx < len(nv_labelled.volumes):
-                _on = _toggles.get(_name, True)
-                nv_labelled.volumes[_idx].opacity = (
-                    labelled_layer_shown.get(_name, 0.7) if _on else 0.0
-                )
-        nv_labelled.height = int(labelled_height_slider.value)
-        nv_labelled.set_slice_type(SLICE_TYPES[labelled_view_mode.value])
-    return
-
-
-@app.cell(hide_code=True)
-def _(
-    active_viewer,
-    dataset_selector,
-    labelled_case_selector,
-    labelled_height_slider,
-    labelled_paths,
-    labelled_view_mode,
-    mo,
-    nib,
-    nv_labelled,
-    show_labelled_airway,
-    show_labelled_lung,
-):
-    _dataset_label = "ATM'22" if dataset_selector.value == "atm22" else "AeroPath"
-    if active_viewer.value != "labelled":
-        labelled_body = mo.md(
-            "The labelled-data canvas is not loaded. Select **Labelled data** "
-            "from the NIfTI canvas control above to load it."
-        )
-    elif nv_labelled is None:
-        labelled_body = mo.md(
-            f"Case `{labelled_case_selector.value}` has no airway label to display."
-        )
-    else:
-        _zooms = nib.load(str(labelled_paths["ct"])).header.get_zooms()[:3]
-        _spacing = " x ".join(f"{float(v):.3f}" for v in _zooms)
-        _note_line = (
-            f"**{_dataset_label}** · case `{labelled_case_selector.value}` · "
-            f"spacing `{_spacing} mm` · lung mask "
-            f"`{'available' if labelled_paths.get('lung') else 'none'}`"
-        )
-        labelled_body = mo.vstack(
-            [
+                mo.md(
+                    f"Found **{len(prediction_sources)}** prediction collections. "
+                    "Click legend entries in the 3D view to hide individual surfaces."
+                ),
+                _tabs,
+                summary_panel,
+                mo.md("### Full-resolution ITK-SNAP"),
                 mo.hstack(
-                    [mo.md(_note_line), show_labelled_lung, show_labelled_airway],
-                    gap=1.2,
-                    justify="start",
+                    [open_itksnap, itksnap_status],
+                    widths=[0.8, 2.2],
+                    gap=1.0,
                     align="center",
                     wrap=True,
                 ),
-                mo.md("The active labelled-data canvas is shown above."),
             ],
-            gap=0.6,
+            gap=1.0,
         )
-
-    labelled_panel = mo.vstack(
-        [
-            mo.md("## Labelled-Data Inspector"),
-            mo.hstack(
-                [dataset_selector, labelled_case_selector, labelled_view_mode, labelled_height_slider],
-                widths=[1.0, 1.2, 1.0, 1.4],
-                gap=0.8,
-                wrap=True,
-                align="end",
-            ),
-            labelled_body,
-        ],
-        gap=0.8,
-    )
-    return (labelled_panel,)
+    main_panel
+    return
 
 
 if __name__ == "__main__":
