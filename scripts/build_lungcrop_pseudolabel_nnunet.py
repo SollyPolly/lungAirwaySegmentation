@@ -29,9 +29,16 @@ from pathlib import Path
 import nibabel as nib
 import numpy as np
 
+from lung_airway_segmentation.config import load_yaml_config, resolve_project_path
+from lung_airway_segmentation.datasets.splits import create_semisupervised_split
 from lung_airway_segmentation.inference.postprocess import keep_component_containing_trachea
+from lung_airway_segmentation.io.atm22_layout import list_case_ids, resolve_lung_mask_path
 from lung_airway_segmentation.io.nnunet_export import _place, nnunet_dataset_json
-from lung_airway_segmentation.io.nnunet_lungcrop import assert_same_nifti_grid, bbox_from_json
+from lung_airway_segmentation.io.nnunet_lungcrop import (
+    assert_same_nifti_grid,
+    bbox_from_json,
+    write_lung_roi_ct,
+)
 
 EXPECTED_GT = 20
 EXPECTED_PSEUDO = 90
@@ -150,6 +157,68 @@ def emit_predict_input(source_dir: Path, out_dir: Path, mode: str) -> list[str]:
         f"(mode={mode})."
     )
     return pseudo_cases
+
+
+def emit_predict_input_from_atm(
+    data_config_path: Path,
+    training_config_path: Path,
+    out_dir: Path,
+    *,
+    lung_root: Path | None = None,
+    margin_voxels: int = 8,
+    superior_margin_voxels: int = 120,
+) -> list[str]:
+    """Rebuild the same 90 lung-crop inputs directly from local ATM data.
+
+    This is the local-prediction fallback when Dataset124 raw files have not
+    been downloaded. It uses the same split and ``write_lung_roi_ct`` function
+    as the Dataset123/124 builder and never resolves or reads withheld GT.
+    """
+    if out_dir.exists() and any(out_dir.iterdir()):
+        raise FileExistsError(
+            f"Prediction input directory is not empty: {out_dir}. "
+            "Use a fresh directory to prevent stale-case mixing."
+        )
+    data_config = load_yaml_config(data_config_path)
+    training_config = load_yaml_config(training_config_path)
+    batch_root = resolve_project_path(data_config["batch_root"])
+    counts = training_config["labelled_split"]
+    split = create_semisupervised_split(
+        list_case_ids(batch_root),
+        test_count=int(counts["test_count"]),
+        val_count=int(counts["val_count"]),
+        labelled_count=int(counts["labelled_count"]),
+        seed=int(training_config.get("seed", 15)),
+    )
+    unlabelled = sorted(_normalise_key(case_id) for case_id in split["unlabelled_train"])
+    if len(unlabelled) != EXPECTED_PSEUDO:
+        raise ValueError(f"Expected {EXPECTED_PSEUDO} unlabelled cases, got {len(unlabelled)}.")
+
+    for key in unlabelled:
+        case_id = key[4:]
+        image_path = batch_root / "imagesTr" / f"{key}_0000.nii.gz"
+        if not image_path.is_file():
+            raise FileNotFoundError(f"ATM CT is missing: {image_path}")
+        lung_path = resolve_lung_mask_path(
+            case_id,
+            batch_root=batch_root,
+            lung_root=lung_root,
+        )
+        if not lung_path.is_file():
+            raise FileNotFoundError(f"Precomputed lung mask is missing: {lung_path}")
+        record = write_lung_roi_ct(
+            image_path,
+            lung_path,
+            out_dir / f"{key}_0000.nii.gz",
+            margin_voxels=margin_voxels,
+            superior_margin_voxels=superior_margin_voxels,
+        )
+        print(
+            f"INPUT  {key}: ROI {record['roi_shape']} ({record['roi_fraction']:.1%})",
+            flush=True,
+        )
+    print(f"Built {len(unlabelled)} local m{margin_voxels}/s{superior_margin_voxels} inputs -> {out_dir}")
+    return unlabelled
 
 
 def _save_mask_like(
@@ -353,9 +422,23 @@ def main() -> None:
         type=Path,
         help="Stage 1: place the 90 exact Dataset124 cropped CTs here and exit.",
     )
+    stage.add_argument(
+        "--emit-predict-input-from-atm",
+        type=Path,
+        help="Local fallback: rebuild the same 90 crops from configured ATM CT/lung files.",
+    )
     stage.add_argument("--assemble", action="store_true", help="Stage 2: assemble Dataset125.")
     parser.add_argument("--nnunet-raw", type=Path, default=os.environ.get("nnUNet_raw"))
     parser.add_argument("--source-dataset-dir", type=Path, default=None)
+    parser.add_argument("--data-config", type=Path, default=Path("configs/data/atm22.yaml"))
+    parser.add_argument(
+        "--training-config",
+        type=Path,
+        default=Path("configs/nnunet/atm22_split_l20.yaml"),
+    )
+    parser.add_argument("--lung-root", type=Path, default=None)
+    parser.add_argument("--margin-voxels", type=int, default=8)
+    parser.add_argument("--superior-margin-voxels", type=int, default=120)
     parser.add_argument("--pseudo-dir", type=Path)
     parser.add_argument("--seed-checkpoint", type=Path)
     parser.add_argument(
@@ -372,6 +455,17 @@ def main() -> None:
     )
     parser.add_argument("--reuse-mode", choices=("symlink", "hardlink", "copy"), default="hardlink")
     args = parser.parse_args()
+
+    if args.emit_predict_input_from_atm is not None:
+        emit_predict_input_from_atm(
+            args.data_config,
+            args.training_config,
+            args.emit_predict_input_from_atm,
+            lung_root=args.lung_root,
+            margin_voxels=args.margin_voxels,
+            superior_margin_voxels=args.superior_margin_voxels,
+        )
+        return
 
     if args.nnunet_raw is None:
         raise SystemExit("Set --nnunet-raw or export nnUNet_raw.")
