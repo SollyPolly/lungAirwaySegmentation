@@ -1,17 +1,8 @@
-# Test Layout
+# Tests
 
-The tests folder should mirror the package layout at a smaller scale.
+The active suite covers the nnU-Net dataset builders and trainers, ATM'22 split
+and path handling, lung-ROI geometry, external-mask topology scoring, report
+merging, and the nnU-Net prediction viewer.
 
-Rules:
-
-- start with deterministic utility tests before large training tests
-- test geometry and intensity helpers before models
-- keep heavy integration tests separate from fast unit tests
-- use tiny synthetic arrays for most preprocessing checks
-
-Early priorities:
-
-1. path resolution and missing-file validation
-2. crop boxes and affine updates
-3. intensity clipping and normalization
-4. metric sanity checks on toy masks
+Retired MONAI model, loss, preprocessing, and training tests are kept locally
+under `legacy/tests/` and are intentionally ignored by Git.

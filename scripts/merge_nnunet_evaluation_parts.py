@@ -16,9 +16,12 @@ import numpy as np
 
 
 _MEAN_KEYS = (
-    "dice_raw", "td_raw", "prec_raw",
+    "dice_raw", "td_raw", "prec_raw", "tprec_raw", "cldice_raw",
     "dice_lcc", "td_lcc", "prec_lcc", "tprec_lcc", "cldice_lcc",
-    "lcc_retained_fraction", "bd_lcc", "cldice_atm", "td_atm",
+    "lcc_retained_fraction",
+    "bd_raw", "cldice_atm_raw", "td_atm_raw",
+    "bd_lcc", "cldice_atm_lcc", "td_atm_lcc",
+    "cldice_atm", "td_atm",
 )
 
 

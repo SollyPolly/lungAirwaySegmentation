@@ -10,7 +10,7 @@ Develop on val, seal test: default ``--report-split val``.
 
 Usage:
     python -u -m scripts.make_nnunet_predict_input \
-      --split-run-dir runs/atm-l110-supervised/2026-06-26__06-12-47__cldice-w1-cbdice-w2-p96-l110__baseline_unet \
+      --split-config configs/nnunet/atm22_split_l20.yaml \
       --report-split val --out-dir data/nnunet/predict_in/val
 """
 
@@ -20,12 +20,14 @@ import os
 import shutil
 from pathlib import Path
 
-from lung_airway_segmentation.io.atm22_layout import resolve_case_paths, resolve_lung_mask_path
+from lung_airway_segmentation.config import load_yaml_config, resolve_project_path
+from lung_airway_segmentation.datasets.splits import cases_for_split, create_split_from_config
+from lung_airway_segmentation.io.atm22_layout import (
+    list_case_ids,
+    resolve_case_paths,
+    resolve_lung_mask_path,
+)
 from lung_airway_segmentation.io.nnunet_lungcrop import write_lung_roi_ct
-from lung_airway_segmentation.training.config import load_yaml_config, resolve_project_path
-
-_SPLIT_KEYS = {"val": "val_case_ids", "test": "test_case_ids", "train": "train_case_ids"}
-
 
 def _place(src: str, dst: Path, mode: str) -> None:
     """Symlink (default) or copy src -> dst, replacing any existing dst; copy fallback."""
@@ -46,11 +48,15 @@ def main() -> None:
     ap.add_argument("--out-dir", type=Path, required=True, help="nnU-Net predict-input folder to create.")
     ap.add_argument("--data-config", type=Path, default=Path("configs/data/atm22.yaml"),
                     help="ATM'22 data YAML (batch_root). Default: configs/data/atm22.yaml.")
-    ap.add_argument("--split-run-dir", type=Path, default=None,
-                    help="A run dir whose run_metadata.json holds the split (val/test/train ids).")
+    ap.add_argument(
+        "--split-config",
+        type=Path,
+        default=Path("configs/nnunet/atm22_split_l20.yaml"),
+        help="Canonical ATM'22 split YAML.",
+    )
     ap.add_argument("--report-split", choices=("val", "test", "train"), default="val",
                     help="Which split to build (default val — develop on val, seal test).")
-    ap.add_argument("--cases", type=str, default=None, help="Comma-separated ids (overrides --split-run-dir).")
+    ap.add_argument("--cases", type=str, default=None, help="Comma-separated ids (overrides --split-config).")
     ap.add_argument("--prefix", type=str, default="ATM_", help="Filename prefix (default 'ATM_').")
     ap.add_argument("--mode", choices=("symlink", "copy"), default="symlink",
                     help="Link (default, saves space) or copy the CTs.")
@@ -67,11 +73,12 @@ def main() -> None:
     batch_root = resolve_project_path(load_yaml_config(args.data_config)["batch_root"])
     if args.cases:
         cases = [c.strip() for c in args.cases.split(",") if c.strip()]
-    elif args.split_run_dir:
-        meta = json.loads((args.split_run_dir / "run_metadata.json").read_text())
-        cases = [str(c) for c in meta.get("splits", {}).get(_SPLIT_KEYS[args.report_split], [])]
     else:
-        raise SystemExit("Provide --cases or --split-run-dir (to read the split from run_metadata.json).")
+        split = create_split_from_config(
+            list_case_ids(batch_root),
+            load_yaml_config(args.split_config),
+        )
+        cases = cases_for_split(split, args.report_split)
     if not cases:
         raise SystemExit(f"No {args.report_split} case ids resolved.")
 

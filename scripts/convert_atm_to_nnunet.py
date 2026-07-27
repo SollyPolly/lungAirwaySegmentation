@@ -15,7 +15,7 @@ Case pool (default = every labelled case except our val+test = the strong contro
 Example (HPC, with nnUNet_raw exported):
   python -u -m scripts.convert_atm_to_nnunet \
     --data-config configs/data/atm22.yaml \
-    --training-config configs/training/supervised_atm_topoloss_cldice_w1_cbdice_w2.yaml \
+    --training-config configs/nnunet/atm22_split_l20.yaml \
     --nnunet-raw "$nnUNet_raw" --dataset-id 111 --mode symlink
 Then:
   nnUNetv2_plan_and_preprocess -d 111 --verify_dataset_integrity
@@ -26,10 +26,10 @@ import argparse
 import os
 from pathlib import Path
 
+from lung_airway_segmentation.config import load_yaml_config, resolve_project_path
 from lung_airway_segmentation.datasets.splits import create_semisupervised_split
 from lung_airway_segmentation.io.atm22_layout import list_case_ids
 from lung_airway_segmentation.io.nnunet_export import export_atm_to_nnunet
-from lung_airway_segmentation.training.config import load_yaml_config, resolve_project_path
 
 
 def main() -> None:

@@ -23,7 +23,7 @@ the ignore index (2), matched to the CT geometry.
 
 Usage (same split/seed as the @20 floor so the arms are paired):
     python -u -m scripts.build_meanteacher_nnunet_dataset \
-      --training-config configs/training/supervised_atm.yaml \
+      --training-config configs/nnunet/atm22_split_l20.yaml \
       --nnunet-raw "$nnUNet_raw" --dataset-id 122 --dataset-name ATM22MT
 
 Then (plans MOVED from 111, not re-planned — see PROJECT_STATE / hpc-nnunet-new-dataset-recipe):
@@ -41,10 +41,10 @@ from pathlib import Path
 import nibabel as nib
 import numpy as np
 
+from lung_airway_segmentation.config import load_yaml_config, resolve_project_path
 from lung_airway_segmentation.datasets.splits import create_semisupervised_split
 from lung_airway_segmentation.io.atm22_layout import list_case_ids, resolve_case_paths
 from lung_airway_segmentation.io.nnunet_export import _place, nnunet_dataset_json
-from lung_airway_segmentation.training.config import load_yaml_config, resolve_project_path
 
 # nnU-Net convention: the ignore label is the highest integer value. background=0, airway=1.
 IGNORE_INDEX = 2

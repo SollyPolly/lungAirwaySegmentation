@@ -101,7 +101,7 @@ def main() -> None:
     args = parser.parse_args()
 
     # Lazy (keeps the module import light): training.config pulls torch.
-    from lung_airway_segmentation.training.config import resolve_project_path
+    from lung_airway_segmentation.config import resolve_project_path
 
     batch_root = resolve_project_path(args.batch_root)
     lung_root = resolve_project_path(args.lung_root) if args.lung_root else None

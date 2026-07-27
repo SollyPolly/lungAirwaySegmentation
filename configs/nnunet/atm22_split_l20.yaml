@@ -1,0 +1,6 @@
+# Shared sealed split for the 20-labelled nnU-Net, Mean Teacher, and SSL arms.
+seed: 15
+labelled_split:
+  test_count: 20
+  val_count: 20
+  labelled_count: 20

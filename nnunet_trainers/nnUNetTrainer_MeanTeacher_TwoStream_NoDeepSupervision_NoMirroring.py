@@ -1,4 +1,4 @@
-"""Provenance-aware two-stream Mean-Teacher trainers for Dataset124.
+"""Provenance-aware two-stream trainers for Dataset124 and Dataset125.
 
 The raw dataset still gives every unlabelled case an all-ignore segmentation so
 that it can pass through stock nnU-Net preprocessing without ever exposing its
@@ -6,6 +6,11 @@ withheld ground truth.  Training decisions do *not* infer provenance from that
 target.  Instead, the dataset's ``semi_supervised`` contract supplies explicit
 case lists and this loader draws exactly one labelled and one unlabelled patch
 per batch.
+
+Dataset125 reuses the same loader and training envelope for conventional
+offline self-training: one real-GT patch plus one fixed-pseudo patch, real-GT
+only validation, 500-epoch low-LR warm start, strong intensity perturbation,
+and final EMA deployment. It does not run an online teacher forward pass.
 
 Deploy this file together with:
 
@@ -59,13 +64,15 @@ def _normalise_case_key(value: str) -> str:
     return f"ATM_{int(suffix):03d}"
 
 
-def _normalise_provenance(mapping: dict) -> dict[str, str]:
+def _normalise_provenance(mapping: dict, secondary_value: str = "ignore") -> dict[str, str]:
+    allowed = {"gt", str(secondary_value).lower()}
     result: dict[str, str] = {}
     for raw_key, raw_value in mapping.items():
         key = _normalise_case_key(raw_key)
         value = str(raw_value).lower()
-        if value not in {"gt", "ignore"}:
-            raise ValueError(f"Provenance for {key} must be 'gt' or 'ignore', got {raw_value!r}.")
+        if value not in allowed:
+            choices = " or ".join(repr(item) for item in sorted(allowed))
+            raise ValueError(f"Provenance for {key} must be {choices}, got {raw_value!r}.")
         if key in result and result[key] != value:
             raise ValueError(f"Conflicting provenance entries for {key}.")
         result[key] = value
@@ -128,6 +135,12 @@ class nnUNetTrainer_MeanTeacher_WarmStart_TwoStream_NoDeepSupervision_NoMirrorin
     second, independent guard against accidental supervised GT use.
     """
 
+    experiment_contract_key = "semi_supervised"
+    secondary_provenance = "ignore"
+    secondary_stream_name = "unlabelled"
+    secondary_loss_scope = "consistency_scope=unlabelled-only"
+    requires_ignore_label = True
+
     def __init__(
         self,
         plans: dict,
@@ -143,9 +156,14 @@ class nnUNetTrainer_MeanTeacher_WarmStart_TwoStream_NoDeepSupervision_NoMirrorin
         self._stream_unlabelled_samples = 0
 
     def _load_experiment_contract(self) -> tuple[dict[str, str], dict]:
-        contract = self.dataset_json.get("semi_supervised")
+        contract = self.dataset_json.get(self.experiment_contract_key)
         if not isinstance(contract, dict):
             # Backward-compatible audit path for an explicitly copied sidecar.
+            if self.experiment_contract_key != "semi_supervised":
+                raise RuntimeError(
+                    f"Dataset is missing dataset.json[{self.experiment_contract_key!r}]; "
+                    "refusing to infer fixed-pseudo provenance from target contents."
+                )
             sidecar = os.path.join(self.preprocessed_dataset_folder_base, "label_provenance.json")
             if not os.path.isfile(sidecar):
                 raise RuntimeError(
@@ -154,12 +172,20 @@ class nnUNetTrainer_MeanTeacher_WarmStart_TwoStream_NoDeepSupervision_NoMirrorin
                 )
             with open(sidecar, encoding="utf-8") as handle:
                 legacy = json.load(handle)
-            provenance = _normalise_provenance(legacy.get("labels", {}))
+            provenance = _normalise_provenance(
+                legacy.get("labels", {}),
+                secondary_value=self.secondary_provenance,
+            )
             return provenance, {}
 
-        provenance = _normalise_provenance(contract.get("case_provenance", {}))
+        provenance = _normalise_provenance(
+            contract.get("case_provenance", {}),
+            secondary_value=self.secondary_provenance,
+        )
         if not provenance:
-            raise RuntimeError("The semi_supervised contract has no case_provenance entries.")
+            raise RuntimeError(
+                f"The {self.experiment_contract_key} contract has no case_provenance entries."
+            )
         return provenance, contract
 
     @staticmethod
@@ -214,15 +240,20 @@ class nnUNetTrainer_MeanTeacher_WarmStart_TwoStream_NoDeepSupervision_NoMirrorin
         if unknown:
             raise RuntimeError(f"Missing provenance for cases: {sorted(unknown)}")
         if any(provenance[k] != "gt" for k in val_keys):
-            raise RuntimeError("Validation must contain real-GT cases only; ignore-labelled validation is invalid.")
-        labelled = [k for k in tr_keys if provenance[k] == "gt"]
-        unlabelled = [k for k in tr_keys if provenance[k] == "ignore"]
-        if not labelled or not unlabelled:
             raise RuntimeError(
-                f"Two-stream training needs both streams, got {len(labelled)} GT and {len(unlabelled)} unlabelled."
+                "Validation must contain real-GT cases only; secondary-stream validation is invalid."
             )
-        if not self.label_manager.has_ignore_label:
+        labelled = [k for k in tr_keys if provenance[k] == "gt"]
+        secondary = [k for k in tr_keys if provenance[k] == self.secondary_provenance]
+        if not labelled or not secondary:
+            raise RuntimeError(
+                f"Two-stream training needs both streams, got {len(labelled)} GT and "
+                f"{len(secondary)} {self.secondary_stream_name}."
+            )
+        if self.requires_ignore_label and not self.label_manager.has_ignore_label:
             raise RuntimeError("Two-stream MT requires an nnU-Net ignore label in dataset.json.")
+        if not self.requires_ignore_label and self.label_manager.has_ignore_label:
+            raise RuntimeError("Offline pseudo-label training must use ordinary binary 0/1 targets.")
         self._case_provenance = provenance
 
         dataset_tr = self.dataset_class(
@@ -247,7 +278,7 @@ class nnUNetTrainer_MeanTeacher_WarmStart_TwoStream_NoDeepSupervision_NoMirrorin
             transforms=tr_transforms,
             probabilistic_oversampling=self.probabilistic_oversampling,
             labelled_identifiers=labelled,
-            unlabelled_identifiers=unlabelled,
+            unlabelled_identifiers=secondary,
         )
         dl_val = nnUNetDataLoader(
             dataset_val,
@@ -288,8 +319,8 @@ class nnUNetTrainer_MeanTeacher_WarmStart_TwoStream_NoDeepSupervision_NoMirrorin
         _ = next(train_gen)
         _ = next(val_gen)
         self.print_to_log_file(
-            f"[TwoStream] fold={self.fold}: {len(labelled)} GT train + {len(unlabelled)} "
-            f"unlabelled train; {len(val_keys)} GT-only validation; batch=1+1."
+            f"[TwoStream] fold={self.fold}: {len(labelled)} GT train + {len(secondary)} "
+            f"{self.secondary_stream_name} train; {len(val_keys)} GT-only validation; batch=1+1."
         )
         return train_gen, val_gen
 
@@ -297,13 +328,17 @@ class nnUNetTrainer_MeanTeacher_WarmStart_TwoStream_NoDeepSupervision_NoMirrorin
         normalised = [_normalise_case_key(k) for k in keys]
         try:
             labelled = [i for i, key in enumerate(normalised) if self._case_provenance[key] == "gt"]
-            unlabelled = [i for i, key in enumerate(normalised) if self._case_provenance[key] == "ignore"]
+            unlabelled = [
+                i
+                for i, key in enumerate(normalised)
+                if self._case_provenance[key] == self.secondary_provenance
+            ]
         except KeyError as exc:
             raise RuntimeError(f"Batch contains a case with no provenance: {exc.args[0]}") from exc
         if len(labelled) != 1 or len(unlabelled) != 1:
             raise RuntimeError(
-                f"Expected one GT and one unlabelled sample, got keys={normalised}, "
-                f"GT indices={labelled}, unlabelled indices={unlabelled}."
+                f"Expected one GT and one {self.secondary_stream_name} sample, got keys={normalised}, "
+                f"GT indices={labelled}, {self.secondary_stream_name} indices={unlabelled}."
             )
         return (
             torch.as_tensor(labelled, device=self.device, dtype=torch.long),
@@ -378,7 +413,8 @@ class nnUNetTrainer_MeanTeacher_WarmStart_TwoStream_NoDeepSupervision_NoMirrorin
         super().on_train_epoch_end(train_outputs)
         self.print_to_log_file(
             f"[TwoStream] steps={self._stream_steps} GT samples={self._stream_labelled_samples} "
-            f"unlabelled samples={self._stream_unlabelled_samples} consistency_scope=unlabelled-only"
+            f"{self.secondary_stream_name} samples={self._stream_unlabelled_samples} "
+            f"{self.secondary_loss_scope}"
         )
         self._stream_steps = 0
         self._stream_labelled_samples = 0
@@ -417,6 +453,119 @@ class nnUNetTrainer_MeanTeacher_WarmStart_TwoStream_Control_NoDeepSupervision_No
     ):
         super().__init__(plans, configuration, fold, dataset_json, device)
         self.consistency_max = 0.0
+
+
+class nnUNetTrainer_OfflinePseudo_WarmStart_TwoStream_NoDeepSupervision_NoMirroring(
+    nnUNetTrainer_MeanTeacher_WarmStart_TwoStream_NoDeepSupervision_NoMirroring
+):
+    """Conventional fixed-pseudo self-training matched to Dataset124's envelope.
+
+    Dataset125 supplies ordinary binary targets for both streams. Each step
+    contains one real-GT patch and one fixed-pseudo patch; Dice+CE is evaluated
+    separately on each and averaged with equal stream weight. The network is
+    warm-started from the same Dataset123 seed, receives the same strong
+    intensity perturbation from epoch 5, runs for 500 epochs at LR 1e-3, and
+    deploys the same EMA weight average in ``checkpoint_final``.
+
+    The inherited ``teacher`` is used only as a weight-averaging accumulator.
+    It is never evaluated to create an online target, and there is no
+    consistency gradient.
+    """
+
+    experiment_contract_key = "offline_self_training"
+    secondary_provenance = "pseudo"
+    secondary_stream_name = "pseudo"
+    secondary_loss_scope = "supervised_scope=gt-plus-fixed-pseudo"
+    requires_ignore_label = False
+
+    def __init__(
+        self,
+        plans: dict,
+        configuration: str,
+        fold: int,
+        dataset_json: dict,
+        device: torch.device = torch.device("cuda"),
+    ):
+        super().__init__(plans, configuration, fold, dataset_json, device)
+        self.consistency_max = 0.0
+        self.pseudo_loss_weight = 1.0
+        self._offline_log_gt = 0.0
+        self._offline_log_pseudo = 0.0
+        self._offline_log_n = 0
+
+    def on_train_start(self) -> None:
+        super().on_train_start()
+        self.print_to_log_file(
+            "[OfflinePseudo] fixed Dataset123 argmax targets; no online teacher forward; "
+            f"Dice+CE stream weights GT=1.0 pseudo={self.pseudo_loss_weight}; "
+            f"strong-view start={self.consistency_warmup_epochs}; "
+            "EMA is used only for final weight averaging."
+        )
+
+    def train_step(self, batch: dict) -> dict:
+        data = batch["data"].to(self.device, non_blocking=True)
+        target = batch["target"]
+        if isinstance(target, list):
+            raise RuntimeError("Two-stream offline pseudo training requires NoDeepSupervision.")
+        target = target.to(self.device, non_blocking=True)
+        labelled_idx, pseudo_idx = self._batch_stream_indices(list(batch["keys"]))
+
+        if self.teacher is None:
+            self._build_teacher()
+
+        use_strong_view = self.current_epoch >= self.consistency_warmup_epochs
+        student_in = (
+            self._perturb(data, self.student_noise_std, self.student_scale, self.student_shift)
+            if use_strong_view
+            else data
+        )
+
+        self.optimizer.zero_grad(set_to_none=True)
+        with autocast(self.device.type, enabled=True) if self.device.type == "cuda" else dummy_context():
+            output = self.network(student_in)
+            gt_loss = self.loss(
+                output.index_select(0, labelled_idx),
+                target.index_select(0, labelled_idx),
+            )
+            pseudo_loss = self.loss(
+                output.index_select(0, pseudo_idx),
+                target.index_select(0, pseudo_idx),
+            )
+            normaliser = 1.0 + self.pseudo_loss_weight
+            loss = (gt_loss + self.pseudo_loss_weight * pseudo_loss) / normaliser
+
+        if self.grad_scaler is not None:
+            self.grad_scaler.scale(loss).backward()
+            self.grad_scaler.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(self.network.parameters(), 12)
+            self.grad_scaler.step(self.optimizer)
+            self.grad_scaler.update()
+        else:
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.network.parameters(), 12)
+            self.optimizer.step()
+
+        self._mt_step += 1
+        self._update_ema()
+        self._offline_log_gt += float(gt_loss.detach())
+        self._offline_log_pseudo += float(pseudo_loss.detach())
+        self._offline_log_n += 1
+        self._stream_steps += 1
+        self._stream_labelled_samples += int(labelled_idx.numel())
+        self._stream_unlabelled_samples += int(pseudo_idx.numel())
+        return {"loss": loss.detach().cpu().numpy()}
+
+    def on_train_epoch_end(self, train_outputs) -> None:
+        super().on_train_epoch_end(train_outputs)
+        if self._offline_log_n > 0:
+            self.print_to_log_file(
+                f"[OfflinePseudo] gt_loss={self._offline_log_gt / self._offline_log_n:.4f} "
+                f"pseudo_loss={self._offline_log_pseudo / self._offline_log_n:.4f} "
+                f"pseudo_weight={self.pseudo_loss_weight:.2f}"
+            )
+        self._offline_log_gt = 0.0
+        self._offline_log_pseudo = 0.0
+        self._offline_log_n = 0
 
 
 class nnUNetTrainer_MeanTeacher_WarmStart_TwoStream_LRMirroring(

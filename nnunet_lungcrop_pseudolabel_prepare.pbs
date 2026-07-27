@@ -1,0 +1,75 @@
+#!/bin/bash
+#PBS -N nnLCPseudoPrep
+#PBS -l select=1:ncpus=6:mem=96gb
+#PBS -l walltime=06:00:00
+#PBS -j oe
+#PBS -o /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation/logs/nnLCPseudoPrep.out
+
+set -euo pipefail
+
+PROJECT=/rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation
+cd "$PROJECT"
+
+module load miniforge/3
+source "$HOME/miniforge3/etc/profile.d/conda.sh"
+conda activate ctfm
+
+export nnUNet_raw="$PROJECT/data/nnunet/nnUNet_raw"
+export nnUNet_preprocessed="$PROJECT/data/nnunet/nnUNet_preprocessed"
+export nnUNet_results="$PROJECT/data/nnunet/nnUNet_results"
+
+SEED_TRAINER=nnUNetTrainer_NoDeepSupervision_NoMirroring
+SEED_CHECKPOINT="$nnUNet_results/Dataset123_ATM22L20LungCrop/${SEED_TRAINER}__nnUNetPlans__3d_fullres/fold_0/checkpoint_final.pth"
+PSEUDO_DIR="$PROJECT/data/nnunet/predict_out/Dataset123_unlabelled90_lungcrop_raw"
+RAW_DATASET="$nnUNet_raw/Dataset125_ATM22SSLLungCrop"
+PREPROCESSED_DATASET="$nnUNet_preprocessed/Dataset125_ATM22SSLLungCrop"
+
+test -f "$SEED_CHECKPOINT" || {
+    echo "Missing Dataset123 seed checkpoint: $SEED_CHECKPOINT"
+    exit 1
+}
+
+test ! -e "$RAW_DATASET" || {
+    echo "Dataset125 raw directory already exists: $RAW_DATASET"
+    echo "Move an incomplete build aside, or skip this job if preparation already completed."
+    exit 1
+}
+
+test ! -e "$PREPROCESSED_DATASET" || {
+    echo "Dataset125 preprocessed directory already exists: $PREPROCESSED_DATASET"
+    echo "Move an incomplete build aside, or skip this job if preparation already completed."
+    exit 1
+}
+
+python -u -m scripts.build_lungcrop_pseudolabel_nnunet \
+    --assemble \
+    --nnunet-raw "$nnUNet_raw" \
+    --pseudo-dir "$PSEUDO_DIR" \
+    --seed-checkpoint "$SEED_CHECKPOINT" \
+    --pseudo-postprocessing raw
+
+nnUNetv2_extract_fingerprint -d 125 -np 6
+
+cp "$RAW_DATASET/dataset.json" "$PREPROCESSED_DATASET/dataset.json"
+
+nnUNetv2_move_plans_between_datasets \
+    -s 124 \
+    -t 125 \
+    -sp nnUNetPlans \
+    -tp nnUNetPlans
+
+nnUNetv2_preprocess \
+    -d 125 \
+    -plans_name nnUNetPlans \
+    -c 3d_fullres \
+    -np 6
+
+cp "$RAW_DATASET/splits_final.json" "$PREPROCESSED_DATASET/splits_final.json"
+cp "$RAW_DATASET/label_provenance.json" "$PREPROCESSED_DATASET/label_provenance.json"
+
+test -d "$PREPROCESSED_DATASET/nnUNetPlans_3d_fullres" || {
+    echo "Dataset125 preprocessing did not produce nnUNetPlans_3d_fullres"
+    exit 1
+}
+
+echo "Dataset125 is assembled and preprocessed with its pinned GT-only validation split"

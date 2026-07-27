@@ -14,23 +14,15 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
+from lung_airway_segmentation.config import load_yaml_config, resolve_project_path
+from lung_airway_segmentation.datasets.splits import cases_for_split, create_split_from_config
+from lung_airway_segmentation.io.atm22_layout import list_case_ids
 
-DEFAULT_SPLIT_RUN = Path(
-    "runs/atm-l110-supervised/"
-    "2026-06-26__06-12-47__cldice-w1-cbdice-w2-p96-l110__baseline_unet"
-)
 DEFAULT_PRED_DIR = Path("data/nnunet/predict_out/Dataset111_val")
 DEFAULT_OUT_RUN = Path(
     "runs/nnunet-track-a/"
     "2026-07-03__dataset111-3d-fullres-5fold-final__nnunetv2"
 )
-
-SPLIT_KEYS = {
-    "val": "val_case_ids",
-    "test": "test_case_ids",
-    "train": "train_case_ids",
-}
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -41,16 +33,27 @@ def parse_args() -> argparse.Namespace:
         help="Flat nnU-Net prediction output folder containing ATM_XXX.nii.gz.",
     )
     parser.add_argument(
-        "--split-run-dir",
+        "--data-config",
         type=Path,
-        default=DEFAULT_SPLIT_RUN,
-        help="Run dir whose run_metadata.json provides the held-out split IDs.",
+        default=Path("configs/data/atm22.yaml"),
+        help="ATM'22 data YAML.",
+    )
+    parser.add_argument(
+        "--split-config",
+        type=Path,
+        default=Path("configs/nnunet/atm22_split_l20.yaml"),
+        help="Canonical ATM'22 split YAML.",
     )
     parser.add_argument(
         "--report-split",
-        choices=tuple(SPLIT_KEYS),
+        choices=("val", "test", "train"),
         default="val",
         help="Split represented by --pred-dir.",
+    )
+    parser.add_argument(
+        "--cases",
+        default=None,
+        help="Comma-separated case IDs; overrides --split-config.",
     )
     parser.add_argument(
         "--out-run-dir",
@@ -127,17 +130,23 @@ def load_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def resolve_cases(split_run_dir: Path, report_split: str, score_json: Path | None) -> list[str]:
+def resolve_cases(
+    split: dict[str, list[str]],
+    report_split: str,
+    score_json: Path | None,
+    cases_override: str | None,
+) -> list[str]:
+    if cases_override:
+        return [value.strip().zfill(3) for value in cases_override.split(",") if value.strip()]
     if score_json is not None and score_json.is_file():
         score = load_json(score_json)
         cases = [str(case_id).zfill(3) for case_id in score.get("report_cases", [])]
         if cases:
             return cases
 
-    metadata = load_json(split_run_dir / "run_metadata.json")
-    cases = metadata.get("splits", {}).get(SPLIT_KEYS[report_split], [])
+    cases = cases_for_split(split, report_split)
     if not cases:
-        raise ValueError(f"No {report_split} cases found in {split_run_dir / 'run_metadata.json'}")
+        raise ValueError(f"No {report_split} cases found in the split configuration.")
     return [str(case_id).zfill(3) for case_id in cases]
 
 
@@ -157,7 +166,7 @@ def copy_file(src: Path, dst: Path, *, overwrite: bool) -> None:
     shutil.copy2(src, dst)
 
 
-def build_run_metadata(args: argparse.Namespace, source_metadata: dict, cases: list[str]) -> dict:
+def build_run_metadata(args: argparse.Namespace, split: dict[str, list[str]], cases: list[str]) -> dict:
     folds = [int(value.strip()) for value in args.folds.split(",") if value.strip()]
     run_name = args.out_run_dir.name
     return {
@@ -169,7 +178,8 @@ def build_run_metadata(args: argparse.Namespace, source_metadata: dict, cases: l
         "run_name": run_name,
         "run_dir": str(args.out_run_dir),
         "config_files": {
-            "source_split_run": str(args.split_run_dir),
+            "data": str(args.data_config),
+            "split": str(args.split_config),
             "nnunet_prediction_dir": str(args.pred_dir),
         },
         "data_root": "data/ATM22",
@@ -185,12 +195,12 @@ def build_run_metadata(args: argparse.Namespace, source_metadata: dict, cases: l
             "source_pred_dir": str(args.pred_dir),
         },
         "splits": {
-            "train_count": source_metadata.get("splits", {}).get("train_count"),
-            "val_count": source_metadata.get("splits", {}).get("val_count"),
-            "test_count": source_metadata.get("splits", {}).get("test_count"),
-            "train_case_ids": source_metadata.get("splits", {}).get("train_case_ids", []),
-            "val_case_ids": source_metadata.get("splits", {}).get("val_case_ids", []),
-            "test_case_ids": source_metadata.get("splits", {}).get("test_case_ids", []),
+            "train_count": len(split["labelled_train"]) + len(split["unlabelled_train"]),
+            "val_count": len(split["val"]),
+            "test_count": len(split["test"]),
+            "train_case_ids": cases_for_split(split, "train"),
+            "val_case_ids": split["val"],
+            "test_case_ids": split["test"],
             "exported_case_ids": cases,
         },
     }
@@ -228,13 +238,18 @@ def main() -> None:
         candidate = args.pred_dir / f"nnunet{args.dataset_id}_{args.report_split}_topology.json"
         score_json = candidate if candidate.is_file() else None
 
-    source_metadata = load_json(args.split_run_dir / "run_metadata.json")
-    cases = resolve_cases(args.split_run_dir, args.report_split, score_json)
+    data_config = load_yaml_config(args.data_config)
+    batch_root = resolve_project_path(data_config["batch_root"])
+    split = create_split_from_config(
+        list_case_ids(batch_root),
+        load_yaml_config(args.split_config),
+    )
+    cases = resolve_cases(split, args.report_split, score_json, args.cases)
 
     args.out_run_dir.mkdir(parents=True, exist_ok=True)
     write_json(
         args.out_run_dir / "run_metadata.json",
-        build_run_metadata(args, source_metadata, cases),
+        build_run_metadata(args, split, cases),
         overwrite=args.overwrite,
     )
     write_json(

@@ -15,12 +15,12 @@ The sealed TEST and the held-out VAL are never exported (asserted, not just inte
 
 Stage 1 — CTs of the 90 unlabelled cases, to predict pseudo-labels from:
     python -u -m scripts.build_selftraining_nnunet_dataset \
-      --training-config configs/training/supervised_atm.yaml \
+      --training-config configs/nnunet/atm22_split_l20.yaml \
       --emit-predict-input data/nnunet/predict_in/unlabelled90
 
 Stage 2 — assemble the dataset once those predictions exist:
     python -u -m scripts.build_selftraining_nnunet_dataset \
-      --training-config configs/training/supervised_atm.yaml \
+      --training-config configs/nnunet/atm22_split_l20.yaml \
       --assemble --pseudo-dir data/nnunet/predict_out/Dataset120_unlabelled90_dice \
       --nnunet-raw "$nnUNet_raw" --dataset-id 121 --dataset-name ATM22SSL
 """
@@ -33,11 +33,11 @@ from pathlib import Path
 import nibabel as nib
 import numpy as np
 
+from lung_airway_segmentation.config import load_yaml_config, resolve_project_path
 from lung_airway_segmentation.datasets.splits import create_semisupervised_split
 from lung_airway_segmentation.inference.postprocess import keep_component_containing_trachea
 from lung_airway_segmentation.io.atm22_layout import list_case_ids, resolve_case_paths
 from lung_airway_segmentation.io.nnunet_export import _place, nnunet_dataset_json
-from lung_airway_segmentation.training.config import load_yaml_config, resolve_project_path
 
 
 def _resolve_split(data_config, training_config):

@@ -1,0 +1,86 @@
+#!/bin/bash
+#PBS -N nnLCPseudoTrain
+#PBS -l select=1:ncpus=6:mem=40gb:ngpus=1
+#PBS -l walltime=10:00:00
+#PBS -j oe
+#PBS -o /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation/logs/nnLCPseudoTrain.out
+
+set -euo pipefail
+
+PROJECT=/rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation
+cd "$PROJECT"
+
+module load miniforge/3
+source "$HOME/miniforge3/etc/profile.d/conda.sh"
+conda activate ctfm
+
+export nnUNet_raw="$PROJECT/data/nnunet/nnUNet_raw"
+export nnUNet_preprocessed="$PROJECT/data/nnunet/nnUNet_preprocessed"
+export nnUNet_results="$PROJECT/data/nnunet/nnUNet_results"
+export TORCH_HOME="$HOME/.torchcache"
+export nnUNet_n_proc_DA=4
+
+SEED_TRAINER=nnUNetTrainer_NoDeepSupervision_NoMirroring
+TRAINER=nnUNetTrainer_OfflinePseudo_WarmStart_TwoStream_NoDeepSupervision_NoMirroring
+SEED_CHECKPOINT="$nnUNet_results/Dataset123_ATM22L20LungCrop/${SEED_TRAINER}__nnUNetPlans__3d_fullres/fold_0/checkpoint_final.pth"
+RESULT_DIR="$nnUNet_results/Dataset125_ATM22SSLLungCrop/${TRAINER}__nnUNetPlans__3d_fullres/fold_0"
+
+# nnU-Net discovers custom trainers from its installed package, not from the
+# repository. Keep the three linked files current on every launch/resume.
+NNUNET_PACKAGE=$(python -c 'from pathlib import Path; import nnunetv2; print(Path(nnunetv2.__file__).resolve().parent)')
+TRAINER_DIR="$NNUNET_PACKAGE/training/nnUNetTrainer/variants/network_architecture"
+test -d "$TRAINER_DIR" || {
+    echo "Cannot find nnU-Net trainer directory: $TRAINER_DIR"
+    exit 1
+}
+
+for TRAINER_FILE in \
+    nnUNetTrainer_NoDeepSupervision_NoMirroring.py \
+    nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring.py \
+    nnUNetTrainer_MeanTeacher_TwoStream_NoDeepSupervision_NoMirroring.py
+do
+    test -f "$PROJECT/nnunet_trainers/$TRAINER_FILE" || {
+        echo "Missing repository trainer: $PROJECT/nnunet_trainers/$TRAINER_FILE"
+        exit 1
+    }
+    ln -sfn "$PROJECT/nnunet_trainers/$TRAINER_FILE" "$TRAINER_DIR/$TRAINER_FILE"
+done
+
+python -c "
+from nnunetv2.training.nnUNetTrainer.variants.network_architecture.nnUNetTrainer_MeanTeacher_TwoStream_NoDeepSupervision_NoMirroring import $TRAINER
+print('Trainer discovery preflight OK: $TRAINER')
+"
+
+test -f "$SEED_CHECKPOINT" || {
+    echo "Missing Dataset123 seed checkpoint: $SEED_CHECKPOINT"
+    exit 1
+}
+
+test -d "$nnUNet_preprocessed/Dataset125_ATM22SSLLungCrop/nnUNetPlans_3d_fullres" || {
+    echo "Dataset125 preprocessing is missing"
+    exit 1
+}
+
+if test -f "$RESULT_DIR/checkpoint_final.pth"; then
+    echo "Dataset125 offline pseudo-label run is already complete"
+    exit 0
+fi
+
+if test -f "$RESULT_DIR/checkpoint_latest.pth"; then
+    test -f "$RESULT_DIR/checkpoint_latest.pth.mt" || {
+        echo "Cannot resume: checkpoint_latest.pth.mt is missing"
+        exit 1
+    }
+
+    nnUNetv2_train 125 3d_fullres 0 \
+        -tr "$TRAINER" \
+        -p nnUNetPlans \
+        -c
+else
+    nnUNetv2_train 125 3d_fullres 0 \
+        -tr "$TRAINER" \
+        -p nnUNetPlans \
+        -pretrained_weights "$SEED_CHECKPOINT"
+fi
+
+echo "Dataset125 offline pseudo-label training completed"

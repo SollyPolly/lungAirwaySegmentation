@@ -1,13 +1,4 @@
 dataset_name: atm22
-# batch_root is the directory that contains imagesTr/ and labelsTr/.
-# Locally:  data/ATM22               (imagesTr sits directly inside)
-# HPC:      data/ATM22/TrainBatch1   (extracted from TrainBatch1.rar)
+# Directory containing imagesTr/, labelsTr/, and optionally lungTr/.
+# Local default: data/ATM22
 batch_root: data/ATM22
-
-preprocessing:
-  # Match the labelled AeroPath preprocessing so teacher confidence is
-  # comparable across labelled and unlabelled CT patches.
-  hu_window: [-1024, 2048]
-
-# ATM'22 has no lung masks — CropForegroundd uses CT intensity to find the body extent.
-# Labels exist but are intentionally ignored during semi-supervised training.

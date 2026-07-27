@@ -18,12 +18,12 @@ Design (grounded in the literature — UA-MT / Yu et al. MICCAI 2019, Tarvainen 
     is the original Mean-Teacher "fast-early / slow-later" schedule.
   - Consistency: plain MSE on softmax probabilities over the WHOLE batch (UA-MT). Whole-batch (not
     unlabelled-only) means nnU-Net's foreground oversampling on the 20 labelled cases feeds
-    airway-rich patches into the consistency term — the fix for the MONAI starved-signal null. A
-    MONAI-style hard confidence mask is available as an ablation (off by default).
+    airway-rich patches into the consistency term. An optional hard confidence mask is available
+    as an ablation (off by default).
   - SUPERVISED WARM-UP: hold consistency at 0 until the supervised task plateaus (~epoch 300), THEN
     sigmoid-ramp w = 0.1 * exp(-5 (1-x)^2) over the next 200 epochs. From scratch the early EMA
     teacher is unreliable; engaging consistency only once the teacher is a good, high-precision
-    model is what avoids the from-scratch confirmation-bias window that sank the original MONAI MT.
+    model reduces the confirmation-bias risk during early training.
   - Views: student = strong intensity perturbation, teacher = clean; both share nnU-Net's spatial
     augmentation upstream, so voxel correspondence (required for consistency) is exact. During the
     warm-up the student trains on the clean patch (identical to a standard supervised run).
@@ -397,7 +397,7 @@ class nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring(_Base):
         )
 
     def on_train_end(self) -> None:
-        # Deploy the EMA teacher as the inference model (UA-MT / MONAI convention): checkpoint_final
+        # Deploy the EMA teacher as the inference model (UA-MT convention): checkpoint_final
         # and the in-memory network (used by perform_actual_validation) become the teacher.
         if self.teacher is not None:
             self.network.load_state_dict(self.teacher.state_dict())

@@ -77,23 +77,3 @@ def resolve_lung_mask_path(
     padded = str(case_id).zfill(3)
     root = Path(lung_root) if lung_root is not None else Path(batch_root) / "lungTr"
     return root / f"ATM_{padded}_lung.nii.gz"
-
-
-def resolve_distal_classes_path(
-    case_id: str,
-    *,
-    batch_root: Path,
-    radius: float,
-    classes_root: Path | None = None,
-) -> Path:
-    """Path to the precomputed distal crop-class map for a case + EDT radius.
-
-    Written by ``scripts/precompute_distal_classes.py`` and loaded at train time
-    (see ``build_atm22_labelled_transforms``) instead of skeletonising every epoch.
-    Keyed by ``radius`` because the distal class (2) depends on the EDT cutoff, so
-    different radii must not collide. Defaults to a ``distalTr/`` sibling of the
-    images/labels dirs (must be writable; override with ``classes_root``).
-    """
-    padded = str(case_id).zfill(3)
-    root = Path(classes_root) if classes_root is not None else Path(batch_root) / "distalTr"
-    return root / f"ATM_{padded}_distal_r{radius:g}.nii.gz"

@@ -1,33 +1,11 @@
-# Config Layout
+# Active configuration
 
-Use this folder to keep experiment settings separate from implementation.
+Only configuration used by the nnU-Net workflows remains here:
 
-Rules:
+- `data/atm22.yaml`: local/HPC ATM'22 dataset root.
+- `nnunet/atm22_split_l20.yaml`: the sealed seed-15 split shared by the
+  20-label nnU-Net, Mean Teacher, and pseudo-label/self-training arms.
 
-- `configs/data/`: dataset roots, splits, preprocessing defaults
-- `configs/model/`: architecture and channel/depth choices
-- `configs/training/`: optimizer, scheduler, batch size, epochs, losses
-- keep each config focused on one concern
-- prefer composing small configs over one huge file
-
-The main reason for this folder is repeatability: you should be able to rerun
-an experiment from a saved config without editing Python code.
-
-`scripts/train_baseline.py` now reads one YAML from each of these groups:
-
-- `configs/data/` for dataset roots
-- `configs/model/` for the shared model definition
-- `configs/training/` for the training regime and optimizer settings
-
-The CLI is intentionally small and should only be used for explicit runtime
-overrides such as device selection, experiment naming, or short smoke-test
-changes.
-
-Example controlled architecture ablation:
-
-```powershell
-python scripts/train_baseline.py `
-  --data-config configs/data/atm22.yaml `
-  --model-config configs/model/baseline_unet_stride8.yaml `
-  --training-config configs/training/supervised_atm_topoloss_cldice_w2_stride8.yaml
-```
+Model architecture, augmentation, optimisation, and plans are owned by nnU-Net
+and its trainer classes under `nnunet_trainers/`; they do not use the retired
+MONAI model/training YAMLs.

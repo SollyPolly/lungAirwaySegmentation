@@ -56,8 +56,8 @@ def _():
     }
     return (
         PROJECT_ROOT,
-        REPORT_CAMERA,
         Path,
+        REPORT_CAMERA,
         build_mask_mesh,
         combine_cropped_masks,
         default_slice_index,
@@ -75,8 +75,128 @@ def _():
 
 
 @app.cell(hide_code=True)
+def _(
+    case_selector,
+    comparison_mode,
+    hu_window_selector,
+    introduction,
+    itksnap_status,
+    mask_selector,
+    mesh_detail,
+    mesh_height,
+    mesh_view,
+    mo,
+    open_itksnap,
+    plane_selector,
+    prediction_opacity,
+    prediction_sources,
+    refresh_sources,
+    slice_height,
+    slice_slider,
+    slice_view,
+    source_selector,
+    summary_panel,
+    truth_opacity,
+    viewer_tabs,
+):
+    if source_selector is None:
+        main_panel = mo.vstack(
+            [
+                introduction,
+                mo.callout(
+                    mo.md(
+                        "No prediction masks were found. Expected either "
+                        "`runs/**/predictions*/<case>/*.nii.gz` or "
+                        "`data/nnunet/predict_out/<collection>/*.nii.gz`."
+                    ),
+                    kind="warn",
+                ),
+                refresh_sources,
+            ],
+            gap=1.0,
+        )
+    else:
+        _primary_controls = [
+            source_selector,
+            case_selector,
+            mask_selector,
+            refresh_sources,
+        ]
+        _primary_controls = [item for item in _primary_controls if item is not None]
+        _viewer_controls = [
+            comparison_mode,
+            mesh_detail,
+            prediction_opacity,
+            truth_opacity,
+            mesh_height,
+        ]
+        _slice_controls = [
+            plane_selector,
+            slice_slider,
+            hu_window_selector,
+            slice_height,
+        ]
+        if viewer_tabs.value == "CT slice":
+            _active_view = mo.vstack(
+                [
+                    mo.hstack(
+                        _slice_controls,
+                        gap=0.8,
+                        wrap=True,
+                        align="end",
+                    ),
+                    slice_view,
+                ],
+                gap=0.7,
+            )
+        else:
+            _active_view = mo.vstack(
+                [
+                    mo.hstack(
+                        _viewer_controls,
+                        gap=0.8,
+                        wrap=True,
+                        align="end",
+                    ),
+                    mesh_view,
+                ],
+                gap=0.7,
+            )
+        main_panel = mo.vstack(
+            [
+                introduction,
+                mo.hstack(
+                    _primary_controls,
+                    widths=[2.5, 0.7, 1.2, 0.7],
+                    gap=0.8,
+                    wrap=True,
+                    align="end",
+                ),
+                mo.md(
+                    f"Found **{len(prediction_sources)}** prediction collections. "
+                    "Click legend entries in the 3D view to hide individual surfaces."
+                ),
+                viewer_tabs,
+                _active_view,
+                summary_panel,
+                mo.md("### Full-resolution ITK-SNAP"),
+                mo.hstack(
+                    [open_itksnap, itksnap_status],
+                    widths=[0.8, 2.2],
+                    gap=1.0,
+                    align="center",
+                    wrap=True,
+                ),
+            ],
+            gap=1.0,
+        )
+    main_panel
+    return
+
+
+@app.cell(hide_code=True)
 def _(mo):
-    _introduction = (
+    introduction = mo.md(
         "# Airway Prediction Viewer\n\n"
         "A local, dependency-light viewer for saved airway segmentations. It "
         "discovers both **viewer exports under `runs/`** and **native nnU-Net "
@@ -84,8 +204,7 @@ def _(mo):
         "Plotly-based; use the ITK-SNAP button for full-resolution clinical "
         "navigation with CT, ground truth, and prediction loaded together."
     )
-    mo.md(_introduction)
-    return
+    return (introduction,)
 
 
 @app.cell(hide_code=True)
@@ -142,7 +261,7 @@ def _(list_prediction_cases, mo, prediction_sources_by_key, source_selector):
         if _case_options
         else None
     )
-    return case_selector, prediction_cases, prediction_cases_by_id, selected_source
+    return case_selector, prediction_cases_by_id, selected_source
 
 
 @app.cell(hide_code=True)
@@ -247,6 +366,10 @@ def _(mo):
         value="Lung (-1000 to 400 HU)",
         label="CT window",
     )
+    viewer_tabs = mo.ui.tabs(
+        {"3D surface": "", "CT slice": ""},
+        value="3D surface",
+    )
     return (
         comparison_mode,
         hu_window_selector,
@@ -256,6 +379,7 @@ def _(mo):
         prediction_opacity,
         slice_height,
         truth_opacity,
+        viewer_tabs,
     )
 
 
@@ -290,7 +414,13 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(build_mask_mesh, combine_cropped_masks, comparison_mode, mesh_detail, prediction_bundle):
+def _(
+    build_mask_mesh,
+    combine_cropped_masks,
+    comparison_mode,
+    mesh_detail,
+    prediction_bundle,
+):
     scene_meshes = []
     if prediction_bundle is not None:
         _stride = int(mesh_detail.value)
@@ -725,13 +855,7 @@ def _(find_itksnap_executable, mo, prediction_bundle):
 
 
 @app.cell(hide_code=True)
-def _(
-    itksnap_executable,
-    launch_itksnap,
-    mo,
-    open_itksnap,
-    prediction_bundle,
-):
+def _(itksnap_executable, launch_itksnap, mo, open_itksnap, prediction_bundle):
     if itksnap_executable is None:
         itksnap_status = mo.callout(
             mo.md(
@@ -774,124 +898,6 @@ def _(
             kind="info",
         )
     return (itksnap_status,)
-
-
-@app.cell(hide_code=True)
-def _(
-    case_selector,
-    comparison_mode,
-    hu_window_selector,
-    itksnap_status,
-    mask_selector,
-    mesh_detail,
-    mesh_height,
-    mesh_view,
-    mo,
-    open_itksnap,
-    plane_selector,
-    prediction_sources,
-    prediction_opacity,
-    refresh_sources,
-    slice_height,
-    slice_slider,
-    slice_view,
-    source_selector,
-    summary_panel,
-    truth_opacity,
-):
-    if source_selector is None:
-        main_panel = mo.vstack(
-            [
-                mo.callout(
-                    mo.md(
-                        "No prediction masks were found. Expected either "
-                        "`runs/**/predictions*/<case>/*.nii.gz` or "
-                        "`data/nnunet/predict_out/<collection>/*.nii.gz`."
-                    ),
-                    kind="warn",
-                ),
-                refresh_sources,
-            ],
-            gap=1.0,
-        )
-    else:
-        _primary_controls = [
-            source_selector,
-            case_selector,
-            mask_selector,
-            refresh_sources,
-        ]
-        _primary_controls = [item for item in _primary_controls if item is not None]
-        _viewer_controls = [
-            comparison_mode,
-            mesh_detail,
-            prediction_opacity,
-            truth_opacity,
-            mesh_height,
-        ]
-        _slice_controls = [
-            plane_selector,
-            slice_slider,
-            hu_window_selector,
-            slice_height,
-        ]
-        _tabs = mo.ui.tabs(
-            {
-                "3D surface": mo.vstack(
-                    [
-                        mo.hstack(
-                            _viewer_controls,
-                            gap=0.8,
-                            wrap=True,
-                            align="end",
-                        ),
-                        mesh_view,
-                    ],
-                    gap=0.7,
-                ),
-                "CT slice": mo.vstack(
-                    [
-                        mo.hstack(
-                            _slice_controls,
-                            gap=0.8,
-                            wrap=True,
-                            align="end",
-                        ),
-                        slice_view,
-                    ],
-                    gap=0.7,
-                ),
-            },
-            value="3D surface",
-        )
-        main_panel = mo.vstack(
-            [
-                mo.hstack(
-                    _primary_controls,
-                    widths=[2.5, 0.7, 1.2, 0.7],
-                    gap=0.8,
-                    wrap=True,
-                    align="end",
-                ),
-                mo.md(
-                    f"Found **{len(prediction_sources)}** prediction collections. "
-                    "Click legend entries in the 3D view to hide individual surfaces."
-                ),
-                _tabs,
-                summary_panel,
-                mo.md("### Full-resolution ITK-SNAP"),
-                mo.hstack(
-                    [open_itksnap, itksnap_status],
-                    widths=[0.8, 2.2],
-                    gap=1.0,
-                    align="center",
-                    wrap=True,
-                ),
-            ],
-            gap=1.0,
-        )
-    main_panel
-    return
 
 
 if __name__ == "__main__":

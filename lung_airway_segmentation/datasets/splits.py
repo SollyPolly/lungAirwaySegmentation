@@ -1,50 +1,6 @@
-"""Deterministic helpers for train, validation, and test case splits.
-
-This module keeps experiment split logic in one place so case allocation stays
-reproducible across training runs. It provides the original three-way
-train/validation/test split (used by AeroPath) and a four-way semi-supervised
-split (used by ATM'22) that additionally partitions the train pool into a
-labelled subset and an unlabelled subset.
-"""
+"""Deterministic ATM'22 split helper for nnU-Net and SSL experiments."""
 
 import random
-
-from sklearn.model_selection import train_test_split
-
-def create_train_val_test_split(
-    case_ids,
-    *,
-    train_split=0.7,
-    val_split=0.15,
-    test_split=0.15,
-    seed=15
-):
-    """Split case IDs into non-overlapping train, validation, and test lists."""
-    if abs((train_split + val_split + test_split) - 1.0 ) > 1e-8:
-        raise ValueError("Splits must sum to 1.0")
-    
-    if train_split < 0 or val_split < 0 or test_split < 0:
-        raise ValueError("Split fractions must be non-negative")
-    
-    case_ids = [str(case_id) for case_id in case_ids]
-
-    train_ids, temp_ids = train_test_split(
-        case_ids,
-        train_size=train_split,
-        random_state=seed,
-        shuffle=True
-    )
-
-    relative_val_split = val_split / (val_split + test_split)
-
-    val_ids, test_ids = train_test_split(
-        temp_ids,
-        train_size=relative_val_split,
-        random_state=seed,
-        shuffle=True
-    )
-
-    return train_ids, val_ids, test_ids
 
 
 def create_semisupervised_split(
@@ -96,3 +52,24 @@ def create_semisupervised_split(
         "val": sorted(val_ids),
         "test": sorted(test_ids),
     }
+
+
+def create_split_from_config(case_ids, split_config: dict) -> dict[str, list[str]]:
+    """Build the canonical split from the compact nnU-Net split YAML."""
+    counts = split_config["labelled_split"]
+    return create_semisupervised_split(
+        case_ids,
+        test_count=int(counts["test_count"]),
+        val_count=int(counts["val_count"]),
+        labelled_count=int(counts["labelled_count"]),
+        seed=int(split_config.get("seed", 15)),
+    )
+
+
+def cases_for_split(split: dict[str, list[str]], name: str) -> list[str]:
+    """Return val, test, or the combined train pool from a canonical split."""
+    if name == "train":
+        return sorted(split["labelled_train"] + split["unlabelled_train"])
+    if name not in {"val", "test"}:
+        raise ValueError(f"Unsupported split: {name}")
+    return list(split[name])

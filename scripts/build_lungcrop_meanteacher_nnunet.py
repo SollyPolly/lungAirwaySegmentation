@@ -23,6 +23,7 @@ import json
 import os
 from pathlib import Path
 
+from lung_airway_segmentation.config import load_yaml_config, resolve_project_path
 from lung_airway_segmentation.datasets.splits import create_semisupervised_split
 from lung_airway_segmentation.io.atm22_layout import list_case_ids, resolve_lung_mask_path
 from lung_airway_segmentation.io.nnunet_export import _place, nnunet_dataset_json
@@ -32,7 +33,6 @@ from lung_airway_segmentation.io.nnunet_lungcrop import (
     write_lung_roi_ct,
     write_roi_ground_truth,
 )
-from lung_airway_segmentation.training.config import load_yaml_config, resolve_project_path
 
 IGNORE_INDEX = 2
 MT_LABELS = {"background": 0, "airway": 1, "ignore": IGNORE_INDEX}
@@ -103,14 +103,17 @@ def assemble(args) -> tuple[Path, Path]:
         labelled_count=int(counts["labelled_count"]),
         seed=int(training_config.get("seed", 15)),
     )
+
     labelled = [_padded(case) for case in split["labelled_train"]]
     unlabelled = [_padded(case) for case in split["unlabelled_train"]]
     fold0_val = [_padded(case.strip()) for case in args.fold0_val.split(",") if case.strip()]
+
     if len(fold0_val) != 4 or not set(fold0_val).issubset(labelled):
         raise ValueError(
             f"Fold-0 validation must be four members of the labelled-20 pool; got {fold0_val}, "
             f"labelled pool={labelled}."
         )
+    
     labelled_train = sorted(set(labelled) - set(fold0_val))
     if len(labelled) != 20 or len(labelled_train) != 16 or len(unlabelled) != 90:
         raise ValueError(
@@ -121,10 +124,13 @@ def assemble(args) -> tuple[Path, Path]:
     raw_root = Path(args.nnunet_raw)
     seed_dir = raw_root / f"Dataset{args.seed_dataset_id:03d}_{args.seed_dataset_name}"
     mt_dir = raw_root / f"Dataset{args.mt_dataset_id:03d}_{args.mt_dataset_name}"
+
     if seed_dir == mt_dir:
         raise ValueError("Seed and MT dataset directories must differ.")
+    
     _require_fresh_dataset(seed_dir)
     _require_fresh_dataset(mt_dir)
+    
     for dataset_dir in (seed_dir, mt_dir):
         (dataset_dir / "imagesTr").mkdir(parents=True, exist_ok=True)
         (dataset_dir / "labelsTr").mkdir(parents=True, exist_ok=True)
@@ -249,7 +255,12 @@ def assemble(args) -> tuple[Path, Path]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--data-config", type=Path, default=Path("configs/data/atm22.yaml"))
-    parser.add_argument("--training-config", type=Path, default=Path("configs/training/supervised_atm.yaml"))
+    parser.add_argument(
+        "--training-config",
+        type=Path,
+        default=Path("configs/nnunet/atm22_split_l20.yaml"),
+        help="Shared sealed ATM'22 split definition.",
+    )
     parser.add_argument("--nnunet-raw", type=Path, default=os.environ.get("nnUNet_raw"))
     parser.add_argument("--lung-root", type=Path, default=None, help="Defaults to <batch_root>/lungTr.")
     parser.add_argument("--seed-dataset-id", type=int, default=123)
