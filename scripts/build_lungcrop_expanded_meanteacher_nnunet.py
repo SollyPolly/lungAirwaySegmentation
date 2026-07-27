@@ -21,11 +21,19 @@ import json
 import os
 from pathlib import Path
 
+import nibabel as nib
+import numpy as np
+
 from lung_airway_segmentation.config import load_yaml_config, resolve_project_path
 from lung_airway_segmentation.datasets.splits import create_split_from_config
 from lung_airway_segmentation.io.atm22_layout import list_case_ids, resolve_lung_mask_path
 from lung_airway_segmentation.io.nnunet_export import _place, nnunet_dataset_json
-from lung_airway_segmentation.io.nnunet_lungcrop import write_ignore_target, write_lung_roi_ct
+from lung_airway_segmentation.io.nnunet_lungcrop import (
+    parse_case_intensity_overrides,
+    resolve_lung_roi,
+    write_ignore_target,
+    write_lung_roi_ct,
+)
 from scripts.build_lungcrop_meanteacher_nnunet import (
     IGNORE_INDEX,
     MT_LABELS,
@@ -44,6 +52,7 @@ EXPECTED_EXPANDED_UNLABELLED = 240
 EXPECTED_EXTERNAL_VAL = 20
 EXPECTED_TEST = 20
 EXPECTED_FOLD0_VAL = {"008", "050", "135", "158"}
+EXPECTED_UINT16_OVERRIDES = 10
 
 
 def _read_json(path: Path):
@@ -54,6 +63,69 @@ def _read_json(path: Path):
 
 def _normalised_keys(values) -> set[str]:
     return {_case_key(value) for value in values}
+
+
+def _preflight_added_inputs(
+    batch_root: Path,
+    added: set[str],
+    lung_root: Path | None,
+    intensity_overrides: dict[str, dict],
+    *,
+    margin_voxels: int,
+    superior_margin_voxels: int,
+) -> dict[str, dict]:
+    """Validate all new CTs/masks and their dtype contract before writing output."""
+    inputs: dict[str, dict] = {}
+    actual_uint16: set[str] = set()
+    for case_id in sorted(added):
+        ct_path = _ct_path(batch_root, case_id)
+        lung_path = resolve_lung_mask_path(
+            case_id,
+            batch_root=batch_root,
+            lung_root=lung_root,
+        )
+        if not lung_path.is_file():
+            raise FileNotFoundError(f"Precomputed Batch-2 lung mask not found: {lung_path}")
+
+        ct_image = nib.load(str(ct_path))
+        lung_image = nib.load(str(lung_path))
+        bounds, _ = resolve_lung_roi(
+            ct_image,
+            lung_image,
+            margin_voxels=margin_voxels,
+            superior_margin_voxels=superior_margin_voxels,
+        )
+        storage_dtype = np.dtype(ct_image.get_data_dtype())
+        is_uint16 = storage_dtype.kind == "u" and storage_dtype.itemsize == 2
+        if is_uint16:
+            actual_uint16.add(case_id)
+        if case_id in intensity_overrides:
+            proxy = ct_image.dataobj
+            proxy_slope = getattr(proxy, "slope", 1.0)
+            proxy_intercept = getattr(proxy, "inter", 0.0)
+            proxy_slope = 1.0 if proxy_slope is None else float(proxy_slope)
+            proxy_intercept = 0.0 if proxy_intercept is None else float(proxy_intercept)
+            if not np.isclose(proxy_slope, 1.0) or not np.isclose(proxy_intercept, 0.0):
+                raise ValueError(
+                    f"ATM_{case_id} has both a custom intensity override and non-identity "
+                    f"NIfTI scaling ({proxy_slope:g}, {proxy_intercept:g})."
+                )
+        inputs[case_id] = {
+            "ct_path": ct_path,
+            "lung_path": lung_path,
+            "storage_dtype": str(storage_dtype),
+            "bbox": [[int(axis.start), int(axis.stop)] for axis in bounds],
+        }
+
+    declared = set(intensity_overrides)
+    if actual_uint16 != declared:
+        unexpected = sorted(actual_uint16 - declared)
+        stale = sorted(declared - actual_uint16)
+        raise ValueError(
+            "The frozen uint16 intensity manifest does not match Batch-2 CT storage "
+            f"dtypes: undeclared_uint16={unexpected}, declared_but_not_uint16={stale}."
+        )
+    return inputs
 
 
 def _source_contract(source_dir: Path) -> tuple[dict, dict[str, str], dict, dict]:
@@ -116,6 +188,15 @@ def assemble(args) -> Path:
         raise ValueError(
             f"added_unlabelled_case_ids must contain {EXPECTED_ADDED_UNLABELLED} unlabelled cases."
         )
+    intensity_overrides = parse_case_intensity_overrides(
+        split_config,
+        allowed_case_ids=added,
+    )
+    if len(intensity_overrides) != EXPECTED_UINT16_OVERRIDES:
+        raise ValueError(
+            f"Expected {EXPECTED_UINT16_OVERRIDES} frozen uint16 intensity overrides, "
+            f"got {len(intensity_overrides)}."
+        )
 
     raw_root = Path(args.nnunet_raw)
     source_dir = (
@@ -152,6 +233,25 @@ def assemble(args) -> Path:
     if crop_metadata != _dataset_metadata(margin, superior_margin):
         raise ValueError("Dataset124 lung_roi metadata is incomplete or unsupported.")
 
+    source_cases = source_manifest["cases"]
+    for key in sorted(source_provenance):
+        image_path = source_dir / "imagesTr" / f"{key}_0000.nii.gz"
+        target_path = source_dir / "labelsTr" / f"{key}.nii.gz"
+        if not image_path.is_file() or not target_path.is_file():
+            raise FileNotFoundError(f"Dataset124 source pair is incomplete for {key}.")
+    added_inputs = _preflight_added_inputs(
+        batch_root,
+        added,
+        args.lung_root,
+        intensity_overrides,
+        margin_voxels=margin,
+        superior_margin_voxels=superior_margin,
+    )
+    intensity_contract = {
+        _case_key(case_id): dict(intensity_overrides[case_id])
+        for case_id in sorted(intensity_overrides)
+    }
+
     output_dir = raw_root / f"Dataset{args.dataset_id:03d}_{args.dataset_name}"
     _require_fresh_dataset(output_dir)
     images_dir = output_dir / "imagesTr"
@@ -161,12 +261,9 @@ def assemble(args) -> Path:
 
     output_provenance: dict[str, str] = {}
     case_records: dict[str, dict] = {}
-    source_cases = source_manifest["cases"]
     for key in sorted(source_provenance):
         image_path = source_dir / "imagesTr" / f"{key}_0000.nii.gz"
         target_path = source_dir / "labelsTr" / f"{key}.nii.gz"
-        if not image_path.is_file() or not target_path.is_file():
-            raise FileNotFoundError(f"Dataset124 source pair is incomplete for {key}.")
         _place(image_path, images_dir / image_path.name, args.reuse_mode)
         _place(target_path, labels_dir / target_path.name, args.reuse_mode)
         output_provenance[key] = source_provenance[key]
@@ -176,17 +273,29 @@ def assemble(args) -> Path:
     # cases. Their available labelsTr files are intentionally never resolved.
     for case_id in sorted(added):
         key = _case_key(case_id)
-        ct_path = _ct_path(batch_root, case_id)
-        lung_path = resolve_lung_mask_path(case_id, batch_root=batch_root, lung_root=args.lung_root)
-        if not lung_path.is_file():
-            raise FileNotFoundError(f"Precomputed Batch-2 lung mask not found: {lung_path}")
+        ct_path = added_inputs[case_id]["ct_path"]
+        lung_path = added_inputs[case_id]["lung_path"]
+        intensity_transform = intensity_overrides.get(case_id)
         roi_record = write_lung_roi_ct(
             ct_path,
             lung_path,
             images_dir / f"{key}_0000.nii.gz",
             margin_voxels=margin,
             superior_margin_voxels=superior_margin,
+            intensity_scale=(
+                intensity_transform["scale"] if intensity_transform is not None else None
+            ),
+            intensity_offset=(
+                intensity_transform["offset"] if intensity_transform is not None else 0.0
+            ),
         )
+        if intensity_transform is not None:
+            roi_record["intensity_transform"] = {
+                **intensity_transform,
+                **roi_record["intensity_transform"],
+            }
+        if roi_record["bbox"] != added_inputs[case_id]["bbox"]:
+            raise RuntimeError(f"ATM_{case_id} lung ROI changed after successful preflight.")
         ignore_record = write_ignore_target(
             ct_path,
             labels_dir / f"{key}.nii.gz",
@@ -199,7 +308,12 @@ def assemble(args) -> Path:
             "provenance": "ignore",
             "source_batch": "TrainBatch2.rar",
         }
-        print(f"ADD    {key}: ROI {roi_record['roi_shape']} ({roi_record['roi_fraction']:.1%})", flush=True)
+        transform_note = " [uint16 -> HU]" if intensity_transform is not None else ""
+        print(
+            f"ADD    {key}: ROI {roi_record['roi_shape']} "
+            f"({roi_record['roi_fraction']:.1%}){transform_note}",
+            flush=True,
+        )
 
     labelled_train = labelled - fold0_val
     fold0 = {
@@ -207,7 +321,7 @@ def assemble(args) -> Path:
         "val": sorted(_normalised_keys(fold0_val)),
     }
     contract = {
-        "version": 2,
+        "version": 3,
         "ignore_index": IGNORE_INDEX,
         "case_provenance": output_provenance,
         "folds": {"0": fold0},
@@ -215,6 +329,7 @@ def assemble(args) -> Path:
         "consistency_loss_scope": "unlabelled_only",
         "source_dataset": source_dir.name,
         "added_unlabelled": sorted(_normalised_keys(added)),
+        "ct_intensity_overrides": intensity_contract,
     }
     dataset_json = nnunet_dataset_json(
         EXPECTED_GT + EXPECTED_EXPANDED_UNLABELLED,
@@ -246,6 +361,7 @@ def assemble(args) -> Path:
             "excluded_external_val": sorted(_normalised_keys(external_val)),
             "excluded_sealed_test": sorted(_normalised_keys(sealed_test)),
             "withheld_gt_read": False,
+            "ct_intensity_overrides": intensity_contract,
             "cases": case_records,
         },
     )

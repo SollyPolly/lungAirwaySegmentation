@@ -35,6 +35,12 @@ from lung_airway_segmentation.io.atm22_layout import (
     resolve_case_paths,
     resolve_lung_mask_path,
 )
+from lung_airway_segmentation.io.nnunet_lungcrop import parse_case_intensity_overrides
+
+
+UINT16_HU_SCALE = 1.0 / 16.0
+UINT16_HU_OFFSET = -1024.0
+UINT16_ENCODED_MINIMUM_MAX = 60_000.0
 
 
 def build_inferer(force_cpu: bool):
@@ -60,30 +66,109 @@ def segment_lungs(inferer, ct_image: sitk.Image) -> np.ndarray:
     return (np.asarray(labels) > 0).astype(np.uint8)
 
 
+def prepare_ct_for_lungmask(
+    ct_image: sitk.Image,
+    *,
+    intensity_transform: dict | None = None,
+    strict_manifest: bool = False,
+) -> tuple[sitk.Image, dict | None]:
+    """Return the inference CT, decoding the audited uint16 encoding if needed."""
+    is_uint16 = ct_image.GetPixelID() == sitk.sitkUInt16
+    if intensity_transform is None and not is_uint16:
+        return ct_image, None
+
+    statistics = sitk.StatisticsImageFilter()
+    statistics.Execute(ct_image)
+    source_min = float(statistics.GetMinimum())
+    source_max = float(statistics.GetMaximum())
+
+    if intensity_transform is None:
+        if strict_manifest:
+            raise ValueError(
+                "Found an undeclared uint16 CT while using a frozen intensity manifest."
+            )
+        if source_max < UINT16_ENCODED_MINIMUM_MAX:
+            return ct_image, None
+        intensity_transform = {
+            "group": "auto_detected_uint16_scaled_hu",
+            "scale": UINT16_HU_SCALE,
+            "offset": UINT16_HU_OFFSET,
+        }
+    elif not is_uint16:
+        raise ValueError(
+            "A stored-value intensity override was declared for a CT that is not uint16."
+        )
+
+    scale = float(intensity_transform["scale"])
+    offset = float(intensity_transform.get("offset", 0.0))
+    if not np.isfinite(scale) or scale <= 0 or not np.isfinite(offset):
+        raise ValueError(f"Invalid intensity transform: {intensity_transform!r}.")
+    if source_max < UINT16_ENCODED_MINIMUM_MAX:
+        raise ValueError(
+            "Declared uint16 CT does not match the audited stored-value range: "
+            f"maximum={source_max:g}."
+        )
+
+    decoded = sitk.Cast(ct_image, sitk.sitkFloat32) * scale + offset
+    decoded.CopyInformation(ct_image)
+    record = {
+        **intensity_transform,
+        "source_dtype": "uint16",
+        "output_dtype": "float32",
+        "source_range": [source_min, source_max],
+        "decoded_range": [
+            source_min * scale + offset,
+            source_max * scale + offset,
+        ],
+    }
+    return decoded, record
+
+
 def process_case(
     case_id: str,
     batch_root: Path,
     lung_root: Path | None,
     inferer,
     overwrite: bool,
+    intensity_transform: dict | None = None,
+    strict_intensity_manifest: bool = False,
 ) -> tuple[str, str, str | None]:
     """Segment + save one case's lung mask. Returns (case_id, status, info)."""
     paths = resolve_case_paths(case_id, batch_root=batch_root)
     padded = paths["case_id"]
     out_path = resolve_lung_mask_path(padded, batch_root=batch_root, lung_root=lung_root)
-    if out_path.is_file() and not overwrite:
+    # Manifest-declared intensity exceptions are always regenerated. Without a
+    # versioned sidecar, an existing file could have come from the old,
+    # undecoded uint16 inference and cannot be trusted merely by its filename.
+    if out_path.is_file() and not overwrite and intensity_transform is None:
         return (padded, "skipped", str(out_path))
 
     ct_image = sitk.ReadImage(str(paths["ct"]))
-    lung = segment_lungs(inferer, ct_image)
+    inference_image, transform_record = prepare_ct_for_lungmask(
+        ct_image,
+        intensity_transform=intensity_transform,
+        strict_manifest=strict_intensity_manifest,
+    )
+    lung = segment_lungs(inferer, inference_image)
     if int(lung.sum()) == 0:
-        return (padded, "empty", None)  # lungmask found no lung — inspect this case
+        detail = f"transform={transform_record}" if transform_record else None
+        return (padded, "empty", detail)
 
     lung_image = sitk.GetImageFromArray(lung)
     lung_image.CopyInformation(ct_image)  # identical geometry to the CT -> aligns with airway
     out_path.parent.mkdir(parents=True, exist_ok=True)
     sitk.WriteImage(lung_image, str(out_path))
-    return (padded, "written", f"{out_path.name}  lung_voxels={int(lung.sum()):,}")
+    transform_info = (
+        f"  transform=stored*{transform_record['scale']:g}"
+        f"{transform_record['offset']:+g}"
+        if transform_record
+        else ""
+    )
+    return (
+        padded,
+        "written",
+        f"{out_path.name}  lung_voxels={int(lung.sum()):,}{transform_info}",
+    )
 
 
 def main() -> None:
@@ -124,8 +209,13 @@ def main() -> None:
             raise SystemExit(
                 f"{args.case_list_config} has no non-empty list at {args.case_list_key!r}."
             )
+        intensity_overrides = parse_case_intensity_overrides(
+            case_config,
+            allowed_case_ids=case_ids,
+        )
     else:
         case_ids = args.case_ids if args.case_ids else list_case_ids(batch_root)
+        intensity_overrides = {}
 
     print(f"Loading lungmask (force_cpu={args.force_cpu}) ...", flush=True)
     inferer = build_inferer(args.force_cpu)
@@ -133,7 +223,16 @@ def main() -> None:
     counts = {"written": 0, "skipped": 0, "empty": 0}
     print(f"Precomputing lung masks for {len(case_ids)} case(s) ...", flush=True)
     for case_id in case_ids:
-        padded, status, info = process_case(case_id, batch_root, lung_root, inferer, args.overwrite)
+        padded_case_id = f"{int(str(case_id).strip().removeprefix('ATM_')):03d}"
+        padded, status, info = process_case(
+            case_id,
+            batch_root,
+            lung_root,
+            inferer,
+            args.overwrite,
+            intensity_transform=intensity_overrides.get(padded_case_id),
+            strict_intensity_manifest=bool(args.case_list_config),
+        )
         counts[status] = counts.get(status, 0) + 1
         if status in ("written", "empty"):
             print(f"  {padded}: {info if info else 'NO LUNG FOUND — inspect'}", flush=True)
@@ -144,6 +243,10 @@ def main() -> None:
         f"-> {resolved_root}",
         flush=True,
     )
+    if counts.get("empty", 0):
+        raise SystemExit(
+            f"{counts['empty']} case(s) produced empty lung masks; refusing to continue."
+        )
 
 
 if __name__ == "__main__":

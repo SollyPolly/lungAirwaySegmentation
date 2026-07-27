@@ -62,3 +62,14 @@ added_unlabelled_case_ids:
    "642", "644", "645", "646", "647", "648", "651", "652", "679", "680",
    "682", "683", "684", "685", "686", "687", "688", "689", "690", "691",
    "692", "695", "696", "697", "698", "699", "700", "701", "702", "703"]
+
+# These ten Batch-2 NIfTIs are stored as unsigned 16-bit values without a
+# usable NIfTI scale/intercept. Their encoding maps 0 -> -1024 HU and
+# 65535 -> 3071.94 HU, so derived CTs must apply stored / 16 - 1024.
+ct_intensity_overrides:
+  uint16_scaled_hu:
+    case_ids:
+      ["242", "243", "244", "249", "250",
+       "501", "502", "503", "508", "511"]
+    scale: 0.0625
+    offset: -1024.0

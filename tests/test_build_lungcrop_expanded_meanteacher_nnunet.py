@@ -29,6 +29,9 @@ def test_expanded_builder_reuses_dataset124_and_never_needs_batch2_gt(tmp_path: 
     labelled = set(config["splits"]["labelled_train"])
     unlabelled = set(config["splits"]["unlabelled_train"])
     added = set(config["added_unlabelled_case_ids"])
+    uint16_overrides = set(
+        config["ct_intensity_overrides"]["uint16_scaled_hu"]["case_ids"]
+    )
     old_unlabelled = unlabelled - added
     fold_val = set(config["internal_fold0_val"])
     all_ids = set().union(*(set(values) for values in config["splits"].values()))
@@ -38,7 +41,12 @@ def test_expanded_builder_reuses_dataset124_and_never_needs_batch2_gt(tmp_path: 
     lung = np.zeros_like(image, dtype=np.uint8)
     lung[1:3, 1:4, 1:5] = 1
     for case_id in all_ids:
-        _save(batch_root / "imagesTr" / f"{_key(case_id)}_0000.nii.gz", image)
+        case_image = (
+            np.full(image.shape, 16_400, dtype=np.uint16)
+            if case_id in uint16_overrides
+            else image
+        )
+        _save(batch_root / "imagesTr" / f"{_key(case_id)}_0000.nii.gz", case_image)
     # No labelsTr is created at all. New unlabelled GT therefore cannot leak.
     for case_id in added:
         _save(batch_root / "lungTr" / f"{_key(case_id)}_lung.nii.gz", lung)
@@ -108,6 +116,9 @@ def test_expanded_builder_reuses_dataset124_and_never_needs_batch2_gt(tmp_path: 
     result_provenance = result_json["semi_supervised"]["case_provenance"]
     assert list(result_provenance.values()).count("gt") == 20
     assert list(result_provenance.values()).count("ignore") == 240
+    assert set(result_json["semi_supervised"]["ct_intensity_overrides"]) == {
+        _key(case_id) for case_id in uint16_overrides
+    }
     fold = json.loads((output / "splits_final.json").read_text(encoding="utf-8"))[0]
     assert len(fold["train"]) == 256
     assert set(fold["val"]) == {_key(case_id) for case_id in fold_val}
@@ -115,3 +126,19 @@ def test_expanded_builder_reuses_dataset124_and_never_needs_batch2_gt(tmp_path: 
     first_added = _key(sorted(added)[0])
     added_target = nib.load(str(output / "labelsTr" / f"{first_added}.nii.gz"))
     assert np.unique(np.asarray(added_target.dataobj)).tolist() == [2]
+
+    encoded_key = _key(sorted(uint16_overrides)[0])
+    encoded_output = nib.load(str(output / "imagesTr" / f"{encoded_key}_0000.nii.gz"))
+    assert encoded_output.get_data_dtype() == np.dtype(np.float32)
+    np.testing.assert_allclose(np.asarray(encoded_output.dataobj), 1.0)
+
+    ordinary_key = _key(sorted(added - uint16_overrides)[0])
+    ordinary_output = nib.load(str(output / "imagesTr" / f"{ordinary_key}_0000.nii.gz"))
+    assert ordinary_output.get_data_dtype() == np.dtype(np.int16)
+    np.testing.assert_array_equal(np.asarray(ordinary_output.dataobj), image)
+
+    manifest = json.loads((output / "lung_crop_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["cases"][encoded_key]["intensity_transform"]["group"] == "uint16_scaled_hu"
+    assert manifest["cases"][encoded_key]["intensity_transform"]["scale"] == 0.0625
+    assert manifest["cases"][encoded_key]["intensity_transform"]["offset"] == -1024.0
+    assert manifest["cases"][ordinary_key]["intensity_transform"] is None

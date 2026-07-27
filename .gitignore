@@ -37,6 +37,7 @@ tests/*
 !tests/test_metrics_topology.py
 !tests/test_splits.py
 !tests/test_build_lungcrop_expanded_meanteacher_nnunet.py
+!tests/test_ct_intensity_overrides.py
 logs/
 
 writeup.md
