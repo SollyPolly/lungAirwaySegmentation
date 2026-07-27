@@ -13,6 +13,9 @@ __marimo__/
 !nnunet_lungcrop_pseudolabel_predict.pbs
 !nnunet_lungcrop_pseudolabel_prepare.pbs
 !nnunet_lungcrop_pseudolabel_train.pbs
+!nnunet_lungcrop_mt240_masks.pbs
+!nnunet_lungcrop_mt240_prepare.pbs
+!nnunet_lungcrop_mt240_train.pbs
 
 /data/
 
@@ -28,6 +31,12 @@ docs/*
 plot_scripts/
 presentation_scripts/
 tests/
+!tests/
+tests/*
+!tests/README.md
+!tests/test_metrics_topology.py
+!tests/test_splits.py
+!tests/test_build_lungcrop_expanded_meanteacher_nnunet.py
 logs/
 
 writeup.md

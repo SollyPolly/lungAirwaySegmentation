@@ -24,7 +24,7 @@ import os
 from pathlib import Path
 
 from lung_airway_segmentation.config import load_yaml_config, resolve_project_path
-from lung_airway_segmentation.datasets.splits import create_semisupervised_split
+from lung_airway_segmentation.datasets.splits import create_split_from_config
 from lung_airway_segmentation.io.atm22_layout import list_case_ids, resolve_lung_mask_path
 from lung_airway_segmentation.io.nnunet_export import _place, nnunet_dataset_json
 from lung_airway_segmentation.io.nnunet_lungcrop import (
@@ -95,14 +95,7 @@ def assemble(args) -> tuple[Path, Path]:
     data_config = load_yaml_config(args.data_config)
     training_config = load_yaml_config(args.training_config)
     batch_root = resolve_project_path(data_config["batch_root"])
-    counts = training_config["labelled_split"]
-    split = create_semisupervised_split(
-        list_case_ids(batch_root),
-        test_count=int(counts["test_count"]),
-        val_count=int(counts["val_count"]),
-        labelled_count=int(counts["labelled_count"]),
-        seed=int(training_config.get("seed", 15)),
-    )
+    split = create_split_from_config(list_case_ids(batch_root), training_config)
 
     labelled = [_padded(case) for case in split["labelled_train"]]
     unlabelled = [_padded(case) for case in split["unlabelled_train"]]

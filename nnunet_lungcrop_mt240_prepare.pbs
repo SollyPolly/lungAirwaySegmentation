@@ -1,0 +1,70 @@
+#!/bin/bash
+#PBS -N nnLCMT240Prep
+#PBS -l select=1:ncpus=6:mem=96gb
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -o /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation/logs/nnLCMT240Prep.out
+
+set -euo pipefail
+
+PROJECT=/rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation
+cd "$PROJECT"
+
+module load miniforge/3
+source "$HOME/miniforge3/etc/profile.d/conda.sh"
+conda activate ctfm
+
+export nnUNet_raw="$PROJECT/data/nnunet/nnUNet_raw"
+export nnUNet_preprocessed="$PROJECT/data/nnunet/nnUNet_preprocessed"
+export nnUNet_results="$PROJECT/data/nnunet/nnUNet_results"
+
+SOURCE_DATASET="$nnUNet_raw/Dataset124_ATM22MTLungCrop"
+RAW_DATASET="$nnUNet_raw/Dataset126_ATM22MT240LungCrop"
+PREPROCESSED_DATASET="$nnUNet_preprocessed/Dataset126_ATM22MT240LungCrop"
+
+test -f "$SOURCE_DATASET/dataset.json" || {
+    echo "Missing source Dataset124 raw dataset: $SOURCE_DATASET"
+    exit 1
+}
+
+test ! -e "$RAW_DATASET" || {
+    echo "Dataset126 raw directory already exists: $RAW_DATASET"
+    echo "Move an incomplete build aside, or skip preparation if it already completed."
+    exit 1
+}
+
+test ! -e "$PREPROCESSED_DATASET" || {
+    echo "Dataset126 preprocessed directory already exists: $PREPROCESSED_DATASET"
+    echo "Move an incomplete build aside, or skip preparation if it already completed."
+    exit 1
+}
+
+python -u -m scripts.build_lungcrop_expanded_meanteacher_nnunet \
+    --nnunet-raw "$nnUNet_raw"
+
+nnUNetv2_extract_fingerprint -d 126 -np 6
+
+cp "$RAW_DATASET/dataset.json" "$PREPROCESSED_DATASET/dataset.json"
+
+nnUNetv2_move_plans_between_datasets \
+    -s 124 \
+    -t 126 \
+    -sp nnUNetPlans \
+    -tp nnUNetPlans
+
+nnUNetv2_preprocess \
+    -d 126 \
+    -plans_name nnUNetPlans \
+    -c 3d_fullres \
+    -np 6
+
+cp "$RAW_DATASET/splits_final.json" "$PREPROCESSED_DATASET/splits_final.json"
+cp "$RAW_DATASET/label_provenance.json" "$PREPROCESSED_DATASET/label_provenance.json"
+cp "$RAW_DATASET/lung_crop_manifest.json" "$PREPROCESSED_DATASET/lung_crop_manifest.json"
+
+test -d "$PREPROCESSED_DATASET/nnUNetPlans_3d_fullres" || {
+    echo "Dataset126 preprocessing did not produce nnUNetPlans_3d_fullres"
+    exit 1
+}
+
+echo "Dataset126 ready: fold 0 has 16 GT + 240 unlabelled train / 4 GT validation"

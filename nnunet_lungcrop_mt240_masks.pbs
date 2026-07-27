@@ -1,0 +1,37 @@
+#!/bin/bash
+#PBS -N nnLCMT240Mask
+#PBS -l select=1:ncpus=4:mem=32gb:ngpus=1
+#PBS -l walltime=04:00:00
+#PBS -j oe
+#PBS -o /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation/logs/nnLCMT240Mask.out
+
+set -euo pipefail
+
+PROJECT=/rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation
+cd "$PROJECT"
+
+module load miniforge/3
+source "$HOME/miniforge3/etc/profile.d/conda.sh"
+conda activate ctfm
+
+export TORCH_HOME="$HOME/.torchcache"
+
+IMAGE_COUNT=$(find data/ATM22/imagesTr -maxdepth 1 -type f -name 'ATM_*_0000.nii.gz' | wc -l)
+test "$IMAGE_COUNT" -eq 300 || {
+    echo "Expected 300 merged ATM CTs on HPC, found $IMAGE_COUNT"
+    echo "Upload the 150 TrainBatch2 images before submitting this job."
+    exit 1
+}
+
+python -u -m scripts.precompute_lung_masks \
+    --batch-root data/ATM22 \
+    --case-list-config configs/nnunet/atm22_split_l20_u240.yaml \
+    --case-list-key added_unlabelled_case_ids
+
+MASK_COUNT=$(find data/ATM22/lungTr -maxdepth 1 -type f -name 'ATM_*_lung.nii.gz' | wc -l)
+test "$MASK_COUNT" -eq 300 || {
+    echo "Expected 300 lung masks after Batch-2 precompute, found $MASK_COUNT"
+    exit 1
+}
+
+echo "All 150 Batch-2 lung masks are ready; total lung-mask inventory is 300"

@@ -94,6 +94,16 @@ def main() -> None:
                         help="Output directory (default: <batch-root>/lungTr). Must be writable.")
     parser.add_argument("--case-ids", nargs="*", default=None,
                         help="Specific case ids (e.g. 016 027); default = every case under batch-root.")
+    parser.add_argument(
+        "--case-list-config",
+        default=None,
+        help="YAML containing an explicit case list (mutually exclusive with --case-ids).",
+    )
+    parser.add_argument(
+        "--case-list-key",
+        default="added_unlabelled_case_ids",
+        help="Top-level list to read from --case-list-config.",
+    )
     parser.add_argument("--force-cpu", action="store_true",
                         help="Run lungmask on CPU (default: GPU if available).")
     parser.add_argument("--overwrite", action="store_true",
@@ -101,11 +111,21 @@ def main() -> None:
     args = parser.parse_args()
 
     # Lazy (keeps the module import light): training.config pulls torch.
-    from lung_airway_segmentation.config import resolve_project_path
+    from lung_airway_segmentation.config import load_yaml_config, resolve_project_path
 
     batch_root = resolve_project_path(args.batch_root)
     lung_root = resolve_project_path(args.lung_root) if args.lung_root else None
-    case_ids = args.case_ids if args.case_ids else list_case_ids(batch_root)
+    if args.case_ids and args.case_list_config:
+        raise SystemExit("Use either --case-ids or --case-list-config, not both.")
+    if args.case_list_config:
+        case_config = load_yaml_config(args.case_list_config)
+        case_ids = case_config.get(args.case_list_key)
+        if not isinstance(case_ids, list) or not case_ids:
+            raise SystemExit(
+                f"{args.case_list_config} has no non-empty list at {args.case_list_key!r}."
+            )
+    else:
+        case_ids = args.case_ids if args.case_ids else list_case_ids(batch_root)
 
     print(f"Loading lungmask (force_cpu={args.force_cpu}) ...", flush=True)
     inferer = build_inferer(args.force_cpu)

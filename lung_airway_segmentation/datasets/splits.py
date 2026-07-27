@@ -1,6 +1,24 @@
-"""Deterministic ATM'22 split helper for nnU-Net and SSL experiments."""
+"""Deterministic and frozen ATM'22 split helpers.
+
+Count-based splitting is useful while designing a new experiment, but it is
+unsafe once files are added to the dataset root: the same seed shuffles a
+different population and silently changes every role. Reportable experiments
+therefore use explicit ``splits`` lists in their YAML configuration.
+"""
 
 import random
+
+
+SPLIT_KEYS = ("labelled_train", "unlabelled_train", "val", "test")
+
+
+def _normalise_case_id(case_id) -> str:
+    value = str(case_id).strip()
+    if value.upper().startswith("ATM_"):
+        value = value[4:]
+    if not value.isdigit():
+        raise ValueError(f"Invalid ATM case identifier: {case_id!r}")
+    return f"{int(value):03d}"
 
 
 def create_semisupervised_split(
@@ -54,8 +72,86 @@ def create_semisupervised_split(
     }
 
 
+def _frozen_split_from_config(case_ids, split_config: dict) -> dict[str, list[str]]:
+    raw_split = split_config["splits"]
+    if not isinstance(raw_split, dict):
+        raise ValueError("split config 'splits' must be a mapping.")
+
+    split: dict[str, list[str]] = {}
+    for key in SPLIT_KEYS:
+        raw_values = raw_split.get(key)
+        if not isinstance(raw_values, list):
+            raise ValueError(f"split config splits.{key} must be a list.")
+        values = [_normalise_case_id(value) for value in raw_values]
+        if len(values) != len(set(values)):
+            raise ValueError(f"split config splits.{key} contains duplicate case IDs.")
+        split[key] = sorted(values)
+
+    groups = {key: set(values) for key, values in split.items()}
+    for index, left in enumerate(SPLIT_KEYS):
+        for right in SPLIT_KEYS[index + 1:]:
+            overlap = groups[left] & groups[right]
+            if overlap:
+                raise ValueError(
+                    f"Frozen split groups {left} and {right} overlap: {sorted(overlap)}"
+                )
+
+    expected_counts = split_config.get("expected_counts", {})
+    if not isinstance(expected_counts, dict):
+        raise ValueError("split config expected_counts must be a mapping.")
+    for key in SPLIT_KEYS:
+        if key in expected_counts and len(split[key]) != int(expected_counts[key]):
+            raise ValueError(
+                f"Frozen split expected {expected_counts[key]} {key} cases, "
+                f"got {len(split[key])}."
+            )
+
+    available_values = [_normalise_case_id(value) for value in case_ids]
+    if len(available_values) != len(set(available_values)):
+        raise ValueError("Dataset inventory contains duplicate ATM case IDs.")
+    available = set(available_values)
+    configured = set().union(*(groups[key] for key in SPLIT_KEYS))
+    missing = configured - available
+    if missing:
+        raise ValueError(f"Frozen split cases are missing from the dataset: {sorted(missing)}")
+
+    raw_allowed = split_config.get("allowed_additional_case_ids", [])
+    if not isinstance(raw_allowed, list):
+        raise ValueError("split config allowed_additional_case_ids must be a list.")
+    allowed_additional = {_normalise_case_id(value) for value in raw_allowed}
+    unknown_extra = (available - configured) - allowed_additional
+    if unknown_extra:
+        raise ValueError(
+            "Dataset has cases not declared by the frozen split or its allowed additions: "
+            f"{sorted(unknown_extra)}"
+        )
+    return split
+
+
 def create_split_from_config(case_ids, split_config: dict) -> dict[str, list[str]]:
-    """Build the canonical split from the compact nnU-Net split YAML."""
+    """Resolve a frozen split, or a size-pinned count split for new experiments.
+
+    A count-only configuration must declare ``expected_total_cases``. This
+    makes adding a second archive fail loudly instead of silently reshuffling
+    labelled, validation, and test membership.
+    """
+    if "splits" in split_config:
+        return _frozen_split_from_config(case_ids, split_config)
+
+    if "labelled_split" not in split_config:
+        raise ValueError("Split config must define explicit 'splits' or 'labelled_split'.")
+    if "expected_total_cases" not in split_config:
+        raise ValueError(
+            "Count-based split configs must set expected_total_cases; use explicit "
+            "'splits' lists for reportable experiments."
+        )
+    case_ids = list(case_ids)
+    expected_total = int(split_config["expected_total_cases"])
+    if len(case_ids) != expected_total:
+        raise ValueError(
+            f"Count-based split expected {expected_total} cases, found {len(case_ids)}. "
+            "Refusing to reshuffle a changed dataset inventory."
+        )
     counts = split_config["labelled_split"]
     return create_semisupervised_split(
         case_ids,

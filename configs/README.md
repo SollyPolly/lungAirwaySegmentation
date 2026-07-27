@@ -3,8 +3,12 @@
 Only configuration used by the nnU-Net workflows remains here:
 
 - `data/atm22.yaml`: local/HPC ATM'22 dataset root.
-- `nnunet/atm22_split_l20.yaml`: the sealed seed-15 split shared by the
-  20-label nnU-Net, Mean Teacher, and pseudo-label/self-training arms.
+- `nnunet/atm22_split_l20.yaml`: explicit frozen Batch-1 membership for the
+  existing 20-label + 90-unlabelled experiments. Batch-2 files may coexist in
+  `data/ATM22`, but this manifest deliberately excludes them.
+- `nnunet/atm22_split_l20_u240.yaml`: expanded, still-frozen membership for
+  20 labelled + 240 unlabelled cases while preserving the same external
+  validation, sealed test, and four-case nnU-Net fold-0 validation.
 
 Model architecture, augmentation, optimisation, and plans are owned by nnU-Net
 and its trainer classes under `nnunet_trainers/`; they do not use the retired

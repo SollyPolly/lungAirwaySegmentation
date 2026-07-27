@@ -81,6 +81,11 @@ def main() -> None:
         cases = cases_for_split(split, args.report_split)
     if not cases:
         raise SystemExit(f"No {args.report_split} case ids resolved.")
+    if args.out_dir.exists() and any(args.out_dir.iterdir()):
+        raise FileExistsError(
+            f"Prediction input directory is not empty: {args.out_dir}. "
+            "Use a fresh directory so cases from different frozen splits cannot mix."
+        )
 
     roi_records = {}
     for cid in cases:

@@ -42,7 +42,7 @@ import nibabel as nib
 import numpy as np
 
 from lung_airway_segmentation.config import load_yaml_config, resolve_project_path
-from lung_airway_segmentation.datasets.splits import create_semisupervised_split
+from lung_airway_segmentation.datasets.splits import create_split_from_config
 from lung_airway_segmentation.io.atm22_layout import list_case_ids, resolve_case_paths
 from lung_airway_segmentation.io.nnunet_export import _place, nnunet_dataset_json
 
@@ -51,16 +51,17 @@ IGNORE_INDEX = 2
 MT_LABELS = {"background": 0, "airway": 1, "ignore": IGNORE_INDEX}
 
 
+def _require_fresh_directory(path: Path) -> None:
+    if path.exists() and any(path.iterdir()):
+        raise FileExistsError(
+            f"Refusing to merge into non-empty dataset directory: {path}. "
+            "Move the old directory aside or use a new dataset ID."
+        )
+
+
 def _resolve_split(data_config, training_config):
     batch_root = resolve_project_path(data_config["batch_root"])
-    counts = training_config["labelled_split"]
-    split = create_semisupervised_split(
-        list_case_ids(batch_root),
-        test_count=int(counts["test_count"]),
-        val_count=int(counts["val_count"]),
-        labelled_count=int(counts["labelled_count"]),
-        seed=int(training_config.get("seed", 15)),
-    )
+    split = create_split_from_config(list_case_ids(batch_root), training_config)
     return batch_root, split
 
 
@@ -88,6 +89,7 @@ def assemble(args, batch_root, split) -> None:
         raise SystemExit(f"REFUSING: val/test cases in the training pool: {sorted(leaked)}")
 
     out_dir = Path(args.nnunet_raw) / f"Dataset{args.dataset_id:03d}_{args.dataset_name}"
+    _require_fresh_directory(out_dir)
     images_dir, labels_dir = out_dir / "imagesTr", out_dir / "labelsTr"
     images_dir.mkdir(parents=True, exist_ok=True)
     labels_dir.mkdir(parents=True, exist_ok=True)
@@ -145,7 +147,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--data-config", type=Path, default=Path("configs/data/atm22.yaml"))
     ap.add_argument("--training-config", type=Path, required=True,
-                    help="Provides labelled_split counts + seed (use the same one as the @20 floor).")
+                    help="Frozen split manifest shared with the @20 floor.")
     ap.add_argument("--nnunet-raw", default=os.environ.get("nnUNet_raw"))
     ap.add_argument("--dataset-id", type=int, default=122)
     ap.add_argument("--dataset-name", default="ATM22MT")
