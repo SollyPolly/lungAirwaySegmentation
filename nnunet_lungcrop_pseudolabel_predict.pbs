@@ -1,0 +1,65 @@
+#!/bin/bash
+#PBS -N nnLCPseudoPred
+#PBS -l select=1:ncpus=4:mem=32gb:ngpus=1
+#PBS -l walltime=04:00:00
+#PBS -j oe
+#PBS -o /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation/logs/nnLCPseudoPred.out
+
+set -euo pipefail
+
+PROJECT=/rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation
+cd "$PROJECT"
+
+module load miniforge/3
+source "$HOME/miniforge3/etc/profile.d/conda.sh"
+conda activate ctfm
+
+export nnUNet_raw="$PROJECT/data/nnunet/nnUNet_raw"
+export nnUNet_preprocessed="$PROJECT/data/nnunet/nnUNet_preprocessed"
+export nnUNet_results="$PROJECT/data/nnunet/nnUNet_results"
+export TORCH_HOME="$HOME/.torchcache"
+
+SEED_TRAINER=nnUNetTrainer_NoDeepSupervision_NoMirroring
+SEED_CHECKPOINT="$nnUNet_results/Dataset123_ATM22L20LungCrop/${SEED_TRAINER}__nnUNetPlans__3d_fullres/fold_0/checkpoint_final.pth"
+PREDICT_INPUT="$PROJECT/data/nnunet/predict_in/Dataset125_unlabelled90_lungcrop"
+PSEUDO_DIR="$PROJECT/data/nnunet/predict_out/Dataset123_unlabelled90_lungcrop_raw"
+
+test -f "$SEED_CHECKPOINT" || {
+    echo "Missing Dataset123 seed checkpoint: $SEED_CHECKPOINT"
+    exit 1
+}
+
+test ! -e "$PREDICT_INPUT" || {
+    echo "Prediction input already exists: $PREDICT_INPUT"
+    echo "Move a stale or incomplete directory aside before resubmitting."
+    exit 1
+}
+
+test ! -e "$PSEUDO_DIR" || {
+    echo "Pseudo-label output already exists: $PSEUDO_DIR"
+    echo "Move a stale or incomplete directory aside before resubmitting."
+    exit 1
+}
+
+python -u -m scripts.build_lungcrop_pseudolabel_nnunet \
+    --emit-predict-input "$PREDICT_INPUT" \
+    --nnunet-raw "$nnUNet_raw"
+
+nnUNetv2_predict \
+    -i "$PREDICT_INPUT" \
+    -o "$PSEUDO_DIR" \
+    -d 123 \
+    -c 3d_fullres \
+    -f 0 \
+    -p nnUNetPlans \
+    -tr "$SEED_TRAINER" \
+    -chk checkpoint_final.pth \
+    --disable_tta
+
+PREDICTION_COUNT=$(find "$PSEUDO_DIR" -maxdepth 1 -type f -name 'ATM_*.nii.gz' | wc -l)
+test "$PREDICTION_COUNT" -eq 90 || {
+    echo "Expected 90 pseudo-label masks, found $PREDICTION_COUNT"
+    exit 1
+}
+
+echo "Dataset123 produced all 90 raw fixed pseudo-labels in $PSEUDO_DIR"
