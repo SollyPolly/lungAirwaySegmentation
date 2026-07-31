@@ -1,0 +1,172 @@
+#!/bin/bash
+#PBS -N nnLCMT240K3
+#PBS -l select=1:ncpus=6:mem=64gb:ngpus=1
+#PBS -l walltime=36:00:00
+#PBS -j oe
+#PBS -o /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation/logs/nnLCMT240K3.out
+
+set -euo pipefail
+
+PROJECT=/rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation
+cd "$PROJECT"
+
+module load miniforge/3
+source "$HOME/miniforge3/etc/profile.d/conda.sh"
+conda activate ctfm
+
+export nnUNet_raw="$PROJECT/data/nnunet/nnUNet_raw"
+export nnUNet_preprocessed="$PROJECT/data/nnunet/nnUNet_preprocessed"
+export nnUNet_results="$PROJECT/data/nnunet/nnUNet_results"
+export TORCH_HOME="$HOME/.torchcache"
+export nnUNet_n_proc_DA=4
+
+SEED_TRAINER=nnUNetTrainer_NoDeepSupervision_NoMirroring
+TRAINER=nnUNetTrainer_MeanTeacher_WarmStart_TwoStream_K3_NoDeepSupervision_NoMirroring
+SEED_CHECKPOINT="$nnUNet_results/Dataset123_ATM22L20LungCrop/${SEED_TRAINER}__nnUNetPlans__3d_fullres/fold_0/checkpoint_final.pth"
+RESULT_DIR="$nnUNet_results/Dataset126_ATM22MT240LungCrop/${TRAINER}__nnUNetPlans__3d_fullres/fold_0"
+
+NNUNET_PACKAGE=$(python -c 'from pathlib import Path; import nnunetv2; print(Path(nnunetv2.__file__).resolve().parent)')
+TRAINER_DIR="$NNUNET_PACKAGE/training/nnUNetTrainer/variants/network_architecture"
+test -d "$TRAINER_DIR" || {
+    echo "Cannot find nnU-Net trainer directory: $TRAINER_DIR"
+    exit 1
+}
+
+# These are the exact, already-run K1 parent modules. Pinning their Git blobs
+# makes the K3 job fail closed if any shared K1 behaviour has been edited while
+# the five-fold K1 jobs are queued.
+verify_parent_blob() {
+    local source_file=$1
+    local expected_blob=$2
+    local actual_blob
+    actual_blob=$(git hash-object "$source_file")
+    test "$actual_blob" = "$expected_blob" || {
+        echo "Refusing K3 launch: shared parent changed: $source_file"
+        echo "expected Git blob $expected_blob, found $actual_blob"
+        exit 1
+    }
+}
+
+verify_parent_blob nnunet_trainers/nnUNetTrainer_NoDeepSupervision_NoMirroring.py \
+    23af9756e44a5f63d7e136b2177276c8a9299ae0
+verify_parent_blob nnunet_trainers/nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring.py \
+    1e401b0f421b595d7c579cd062747f63c138ed88
+verify_parent_blob nnunet_trainers/nnUNetTrainer_MeanTeacher_TwoStream_NoDeepSupervision_NoMirroring.py \
+    c80fe415da7823bc491333c4e70fb4ae94d5f8cc
+
+# Never replace an existing, different installed trainer. Existing identical
+# copies and links to the repository are accepted; absent modules are linked.
+ensure_same_trainer() {
+    local source_file="$PROJECT/nnunet_trainers/$1"
+    local target_file="$TRAINER_DIR/$1"
+    test -f "$source_file" || {
+        echo "Missing repository trainer: $source_file"
+        exit 1
+    }
+    if test -L "$target_file"; then
+        test "$(readlink -f "$target_file")" = "$(readlink -f "$source_file")" || {
+            echo "Refusing to replace different trainer symlink: $target_file"
+            exit 1
+        }
+    elif test -e "$target_file"; then
+        cmp -s "$source_file" "$target_file" || {
+            echo "Refusing to replace different installed trainer: $target_file"
+            exit 1
+        }
+    else
+        ln -s "$source_file" "$target_file"
+    fi
+}
+
+for TRAINER_FILE in \
+    nnUNetTrainer_NoDeepSupervision_NoMirroring.py \
+    nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring.py \
+    nnUNetTrainer_MeanTeacher_TwoStream_NoDeepSupervision_NoMirroring.py \
+    nnUNetTrainer_MeanTeacher_K3_NoDeepSupervision_NoMirroring.py
+do
+    ensure_same_trainer "$TRAINER_FILE"
+done
+
+python - <<'PY'
+from nnunetv2.training.nnUNetTrainer.variants.network_architecture.nnUNetTrainer_MeanTeacher_K3_NoDeepSupervision_NoMirroring import (
+    nnUNetTrainer_MeanTeacher_WarmStart_TwoStream_K3_NoDeepSupervision_NoMirroring as Trainer,
+)
+
+assert Trainer.labelled_crops_per_step == 1
+assert Trainer.unlabelled_crops_per_step == 3
+assert Trainer.transport_batch_size == 4
+assert Trainer.consistency_reduction == "mean"
+print(f"Trainer discovery/protocol preflight OK: {Trainer.__name__}")
+PY
+
+test -f "$SEED_CHECKPOINT" || {
+    echo "Missing Dataset123 fold-0 seed checkpoint: $SEED_CHECKPOINT"
+    exit 1
+}
+
+test -d "$nnUNet_preprocessed/Dataset126_ATM22MT240LungCrop/nnUNetPlans_3d_fullres" || {
+    echo "Dataset126 preprocessing is missing; do not launch K3"
+    exit 1
+}
+
+python - <<'PY'
+import json
+import os
+from pathlib import Path
+
+root = Path(os.environ["nnUNet_preprocessed"]) / "Dataset126_ATM22MT240LungCrop"
+dataset = json.loads((root / "dataset.json").read_text())
+splits = json.loads((root / "splits_final.json").read_text())
+provenance = {
+    str(key): str(value).lower()
+    for key, value in dataset["semi_supervised"]["case_provenance"].items()
+}
+assert list(provenance.values()).count("gt") == 20
+assert list(provenance.values()).count("ignore") == 240
+assert len(splits) >= 1
+assert len(splits[0]["train"]) == 256
+assert len(splits[0]["val"]) == 4
+assert sum(provenance[key] == "gt" for key in splits[0]["train"]) == 16
+assert sum(provenance[key] == "ignore" for key in splits[0]["train"]) == 240
+assert all(provenance[key] == "gt" for key in splits[0]["val"])
+print("Dataset126 fold-0 contract preflight OK: 16 GT + 240 U train, 4 GT val")
+PY
+
+if test -f "$RESULT_DIR/checkpoint_final.pth"; then
+    test -f "$RESULT_DIR/checkpoint_final.pth.mt" || {
+        echo "K3 final checkpoint exists but its Mean-Teacher sidecar is missing"
+        exit 1
+    }
+    test -f "$RESULT_DIR/checkpoint_final.pth.k3" || {
+        echo "K3 final checkpoint exists but its protocol sidecar is missing"
+        exit 1
+    }
+    echo "Dataset126 MT240_K3 fold-0 run is already complete"
+    exit 0
+fi
+
+if test -f "$RESULT_DIR/checkpoint_latest.pth"; then
+    test -f "$RESULT_DIR/checkpoint_latest.pth.mt" || {
+        echo "Cannot resume: checkpoint_latest.pth.mt is missing"
+        exit 1
+    }
+    test -f "$RESULT_DIR/checkpoint_latest.pth.k3" || {
+        echo "Cannot resume: checkpoint_latest.pth.k3 is missing"
+        exit 1
+    }
+    nnUNetv2_train 126 3d_fullres 0 \
+        -tr "$TRAINER" \
+        -p nnUNetPlans \
+        -c
+else
+    if test -d "$RESULT_DIR" && test -n "$(find "$RESULT_DIR" -mindepth 1 -print -quit)"; then
+        echo "Refusing a fresh start in non-empty incomplete K3 result directory: $RESULT_DIR"
+        exit 1
+    fi
+    nnUNetv2_train 126 3d_fullres 0 \
+        -tr "$TRAINER" \
+        -p nnUNetPlans \
+        -pretrained_weights "$SEED_CHECKPOINT"
+fi
+
+echo "Dataset126 MT240_K3 fold-0 training completed"
