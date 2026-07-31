@@ -46,6 +46,15 @@ splits:
     ["002", "012", "014", "021", "024", "036", "037", "040", "049", "077",
      "085", "089", "091", "098", "100", "120", "124", "160", "163", "170"]
 internal_fold0_val: ["008", "050", "135", "158"]
+# Canonical nnU-Net five-fold partition (KFold shuffle=True, random_state=12345)
+# over the frozen, sorted labelled-20 cohort. Fold 0 is exactly the historical
+# Dataset120/123/124/126 fold and must never change.
+internal_fivefold_val:
+  - ["008", "050", "135", "158"]
+  - ["001", "083", "121", "146"]
+  - ["025", "032", "099", "159"]
+  - ["072", "145", "162", "166"]
+  - ["004", "006", "017", "019"]
 added_unlabelled_case_ids:
   ["173", "174", "175", "176", "177", "178", "179", "180", "181", "182",
    "183", "184", "185", "186", "187", "188", "189", "190", "191", "192",

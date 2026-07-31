@@ -1,0 +1,85 @@
+#!/bin/bash
+#PBS -N nnLCMT2405F
+#PBS -J 1-4
+#PBS -l select=1:ncpus=6:mem=64gb:ngpus=1
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -o /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation/logs/nnLCMT2405F.o^array_index^
+
+set -euo pipefail
+
+PROJECT=/rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation
+cd "$PROJECT"
+
+module load miniforge/3
+source "$HOME/miniforge3/etc/profile.d/conda.sh"
+conda activate ctfm
+
+export nnUNet_raw="$PROJECT/data/nnunet/nnUNet_raw"
+export nnUNet_preprocessed="$PROJECT/data/nnunet/nnUNet_preprocessed"
+export nnUNet_results="$PROJECT/data/nnunet/nnUNet_results"
+export TORCH_HOME="$HOME/.torchcache"
+export nnUNet_n_proc_DA=4
+
+FOLD="$PBS_ARRAY_INDEX"
+SEED_TRAINER=nnUNetTrainer_NoDeepSupervision_NoMirroring
+TRAINER=nnUNetTrainer_MeanTeacher_WarmStart_TwoStream_NoDeepSupervision_NoMirroring
+SEED_CHECKPOINT="$nnUNet_results/Dataset123_ATM22L20LungCrop/${SEED_TRAINER}__nnUNetPlans__3d_fullres/fold_${FOLD}/checkpoint_final.pth"
+RESULT_DIR="$nnUNet_results/Dataset126_ATM22MT240LungCrop/${TRAINER}__nnUNetPlans__3d_fullres/fold_${FOLD}"
+
+NNUNET_PACKAGE=$(python -c 'from pathlib import Path; import nnunetv2; print(Path(nnunetv2.__file__).resolve().parent)')
+TRAINER_DIR="$NNUNET_PACKAGE/training/nnUNetTrainer/variants/network_architecture"
+test -d "$TRAINER_DIR" || {
+    echo "Cannot find nnU-Net trainer directory: $TRAINER_DIR"
+    exit 1
+}
+
+for TRAINER_FILE in \
+    nnUNetTrainer_NoDeepSupervision_NoMirroring.py \
+    nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring.py \
+    nnUNetTrainer_MeanTeacher_TwoStream_NoDeepSupervision_NoMirroring.py
+do
+    test -f "$PROJECT/nnunet_trainers/$TRAINER_FILE" || {
+        echo "Missing repository trainer: $PROJECT/nnunet_trainers/$TRAINER_FILE"
+        exit 1
+    }
+    ln -sfn "$PROJECT/nnunet_trainers/$TRAINER_FILE" "$TRAINER_DIR/$TRAINER_FILE"
+done
+
+python -c "
+import json
+from pathlib import Path
+p = Path('$nnUNet_preprocessed/Dataset126_ATM22MT240LungCrop/splits_final.json')
+folds = json.loads(p.read_text())
+assert len(folds) == 5, f'Expected five Dataset126 folds, got {len(folds)}'
+assert len(folds[$FOLD]['train']) == 256 and len(folds[$FOLD]['val']) == 4
+print('Dataset126 fold $FOLD split preflight OK:', folds[$FOLD]['val'])
+"
+
+test -f "$SEED_CHECKPOINT" || {
+    echo "Missing fold-matched Dataset123 seed checkpoint: $SEED_CHECKPOINT"
+    exit 1
+}
+
+if test -f "$RESULT_DIR/checkpoint_final.pth"; then
+    echo "Dataset126 MT240 fold $FOLD is already complete"
+    exit 0
+fi
+
+if test -f "$RESULT_DIR/checkpoint_latest.pth"; then
+    test -f "$RESULT_DIR/checkpoint_latest.pth.mt" || {
+        echo "Cannot resume fold $FOLD: checkpoint_latest.pth.mt is missing"
+        exit 1
+    }
+    nnUNetv2_train 126 3d_fullres "$FOLD" \
+        -tr "$TRAINER" \
+        -p nnUNetPlans \
+        -c
+else
+    nnUNetv2_train 126 3d_fullres "$FOLD" \
+        -tr "$TRAINER" \
+        -p nnUNetPlans \
+        -pretrained_weights "$SEED_CHECKPOINT"
+fi
+
+echo "Dataset126 MT240 fold $FOLD completed"
