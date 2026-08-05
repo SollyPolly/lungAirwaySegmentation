@@ -20,6 +20,8 @@ __marimo__/
 !nnunet_lungcrop_seed_fivefold_train.pbs
 !nnunet_lungcrop_mt240_fivefold_train.pbs
 !nnunet_lungcrop_mt240_k3_train.pbs
+!nnunet_lungcrop_mt240_softcldice_diag_train.pbs
+!nnunet_lungcrop_mt240_control_diag_train.pbs
 
 /data/
 
@@ -44,6 +46,7 @@ tests/*
 !tests/test_ct_intensity_overrides.py
 !tests/test_prepare_lungcrop_mt240_fivefold.py
 !tests/test_nnunet_k3_trainer.py
+!tests/test_nnunet_soft_teacher_diagnostics.py
 logs/
 
 writeup.md
