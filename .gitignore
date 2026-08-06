@@ -22,6 +22,8 @@ __marimo__/
 !nnunet_lungcrop_mt240_k3_train.pbs
 !nnunet_lungcrop_mt240_softcldice_diag_train.pbs
 !nnunet_lungcrop_mt240_control_diag_train.pbs
+!nnunet_lungcrop_mt240_crosshaus_train.pbs
+!nnunet_lungcrop_mt240_crosshaus_control_train.pbs
 
 /data/
 
@@ -47,6 +49,7 @@ tests/*
 !tests/test_prepare_lungcrop_mt240_fivefold.py
 !tests/test_nnunet_k3_trainer.py
 !tests/test_nnunet_soft_teacher_diagnostics.py
+!tests/test_nnunet_crosshaus_trainer.py
 logs/
 
 writeup.md
