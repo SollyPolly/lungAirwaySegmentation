@@ -157,7 +157,7 @@ if test -f "$RESULT_DIR/checkpoint_latest.pth"; then
     nnUNetv2_train 126 3d_fullres 0 \
         -tr "$TRAINER" \
         -p nnUNetPlans \
-        -c
+        --c
 else
     if test -d "$RESULT_DIR" && test -n "$(find "$RESULT_DIR" -mindepth 1 -print -quit)"; then
         echo "Refusing a fresh start in non-empty incomplete K3 result directory: $RESULT_DIR"

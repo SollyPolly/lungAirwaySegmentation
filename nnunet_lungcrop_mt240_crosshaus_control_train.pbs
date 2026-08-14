@@ -194,7 +194,7 @@ if test -f "$RESULT_DIR/checkpoint_latest.pth"; then
         exit 1
     }
     nnUNetv2_train "$DATASET" 3d_fullres "$FOLD" \
-        -tr "$TRAINER" -p nnUNetPlans -c
+        -tr "$TRAINER" -p nnUNetPlans --c
 else
     if test -d "$RESULT_DIR" && test -n "$(find "$RESULT_DIR" -mindepth 1 -print -quit)"; then
         echo "Refusing a fresh start in non-empty incomplete CrossHaus-control result directory: $RESULT_DIR"

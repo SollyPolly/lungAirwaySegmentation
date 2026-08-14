@@ -36,6 +36,10 @@ learning/
 docs/
 !docs/
 docs/*
+!docs/figures/
+docs/figures/*
+!docs/figures/crosshaus_full_architecture.svg
+!docs/figures/crosshaus_full_architecture.png
 plot_scripts/
 presentation_scripts/
 tests/

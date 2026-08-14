@@ -75,7 +75,7 @@ if test -f "$RESULT_DIR/checkpoint_latest.pth"; then
     nnUNetv2_train 125 3d_fullres 0 \
         -tr "$TRAINER" \
         -p nnUNetPlans \
-        -c
+        --c
 else
     nnUNetv2_train 125 3d_fullres 0 \
         -tr "$TRAINER" \
