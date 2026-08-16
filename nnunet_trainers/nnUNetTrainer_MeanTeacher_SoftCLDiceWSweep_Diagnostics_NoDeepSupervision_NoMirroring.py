@@ -14,9 +14,9 @@ teacher collapses at higher weight belong to the class-balanced voxel-MSE
 ablation, which is on a different scale and therefore does NOT validate 0.1 here.
 Two runs bracketing a decade turn that assertion into a sensitivity analysis.
 
-    index 0 -> w_max = 0.03
+    index 1 -> w_max = 0.03
     (reference)  w_max = 0.10  == the reported arm, already trained, NOT re-run
-    index 1 -> w_max = 0.30
+    index 2 -> w_max = 0.30
 
 Everything else -- one-GT/one-U sampling, warm start, EMA schedule, augmentation,
 ramp (warm-up 5, ramp 20), 500 epochs, beta = 1, checkpoint sidecar -- is
@@ -83,7 +83,9 @@ class nnUNetTrainer_MeanTeacher_WarmStart_TwoStream_SoftCLDiceW030Diagnostics_No
 
 # Index -> trainer, mirroring the PBS array indices. Kept here rather than in the
 # job script so the mapping is versioned with the trainers it names.
+# One-based to match the PBS array indices (#PBS -J 1-2), which follow the
+# Imperial RCS documented convention rather than a zero-based range.
 SWEEP_TRAINERS = {
-    0: nnUNetTrainer_MeanTeacher_WarmStart_TwoStream_SoftCLDiceW003Diagnostics_NoDeepSupervision_NoMirroring,
-    1: nnUNetTrainer_MeanTeacher_WarmStart_TwoStream_SoftCLDiceW030Diagnostics_NoDeepSupervision_NoMirroring,
+    1: nnUNetTrainer_MeanTeacher_WarmStart_TwoStream_SoftCLDiceW003Diagnostics_NoDeepSupervision_NoMirroring,
+    2: nnUNetTrainer_MeanTeacher_WarmStart_TwoStream_SoftCLDiceW030Diagnostics_NoDeepSupervision_NoMirroring,
 }
