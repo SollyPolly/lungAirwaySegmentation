@@ -1,0 +1,172 @@
+"""Stage the AeroPath cases into an ATM'22-shaped root so the existing tooling works unchanged.
+
+Why an adapter rather than new evaluation code: `make_nnunet_predict_input` and
+`evaluate_nnunet_predictions` both resolve cases through `io/atm22_layout.py`, whose filename
+regex is `ATM_<3 digits>_0000.nii.gz`. Forking either script for AeroPath would put the
+out-of-distribution result on a different, untested metric path -- exactly what the
+dissertation's "one versioned metric policy" commitment forbids. Restaging the data instead
+means the OOD numbers come out of the *same* scorer, byte for byte, as the in-domain ones.
+
+Mapping: AeroPath case ``N`` -> ``ATM_9NN`` (901..927). The 900 block cannot collide with any
+real ATM'22 identifier in the frozen manifests.
+
+    <out-root>/imagesTr/ATM_901_0000.nii.gz     CT (linked or copied)
+    <out-root>/labelsTr/ATM_901.nii.gz          airway mask, binarised
+    <out-root>/lungTr/ATM_901_lung.nii.gz       lung mask, binarised
+
+Masks are rewritten rather than linked because AeroPath labels may be multi-valued (e.g.
+left/right lung) while the pipeline expects a binary foreground.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import shutil
+from datetime import datetime, timezone
+from pathlib import Path
+
+import nibabel as nib
+import numpy as np
+
+AEROPATH_ID_OFFSET = 900
+
+
+def _binarise(src: Path, dst: Path) -> dict:
+    img = nib.load(str(src))
+    data = np.asanyarray(img.dataobj)
+    binary = (data > 0).astype(np.uint8)
+    out = nib.Nifti1Image(binary, img.affine, header=img.header)
+    out.set_data_dtype(np.uint8)
+    nib.save(out, str(dst))
+    return dict(
+        source_dtype=str(data.dtype),
+        source_unique=int(np.unique(data).size),
+        foreground_voxels=int(binary.sum()),
+    )
+
+
+def _place_ct(src: Path, dst: Path, mode: str) -> None:
+    if dst.exists() or dst.is_symlink():
+        dst.unlink()
+    if mode == "symlink":
+        try:
+            dst.symlink_to(src.resolve())
+            return
+        except OSError:
+            # Windows needs Developer Mode or elevation for symlinks; copying is always safe.
+            pass
+    shutil.copy2(src, dst)
+
+
+def _ct_stats(path: Path) -> dict:
+    img = nib.load(str(path))
+    data = np.asanyarray(img.dataobj)
+    return dict(
+        dtype=str(data.dtype),
+        shape=[int(x) for x in data.shape],
+        hu_min=float(data.min()),
+        hu_max=float(data.max()),
+        spacing=[round(float(z), 5) for z in img.header.get_zooms()[:3]],
+    )
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--aeropath-root", type=Path, default=Path("data/AeroPath"))
+    ap.add_argument("--out-root", type=Path, default=Path("data/AeroPath_atm_layout"))
+    ap.add_argument("--data-config-out", type=Path, default=Path("configs/data/aeropath.yaml"))
+    ap.add_argument("--split-config-out", type=Path,
+                    default=Path("configs/nnunet/aeropath_split.yaml"))
+    ap.add_argument("--mode", choices=("symlink", "copy"), default="copy",
+                    help="How to place CTs. Default copy: symlinks need Developer Mode on Windows.")
+    args = ap.parse_args()
+
+    case_dirs = sorted(
+        (d for d in args.aeropath_root.iterdir() if d.is_dir() and d.name.isdigit()),
+        key=lambda d: int(d.name),
+    )
+    if not case_dirs:
+        raise SystemExit(f"no numeric AeroPath case directories under {args.aeropath_root}")
+
+    for sub in ("imagesTr", "labelsTr", "lungTr"):
+        (args.out_root / sub).mkdir(parents=True, exist_ok=True)
+
+    manifest, staged_ids = [], []
+    for case_dir in case_dirs:
+        n = int(case_dir.name)
+        atm_id = f"{AEROPATH_ID_OFFSET + n:03d}"
+        ct = case_dir / f"{n}_CT_HR.nii.gz"
+        airway = case_dir / f"{n}_CT_HR_label_airways.nii.gz"
+        lung = case_dir / f"{n}_CT_HR_label_lungs.nii.gz"
+        for required in (ct, airway, lung):
+            if not required.is_file():
+                raise SystemExit(f"missing expected file: {required}")
+
+        _place_ct(ct, args.out_root / "imagesTr" / f"ATM_{atm_id}_0000.nii.gz", args.mode)
+        airway_stats = _binarise(airway, args.out_root / "labelsTr" / f"ATM_{atm_id}.nii.gz")
+        lung_stats = _binarise(lung, args.out_root / "lungTr" / f"ATM_{atm_id}_lung.nii.gz")
+
+        entry = dict(aeropath_case=n, atm_layout_id=atm_id,
+                     ct=_ct_stats(ct), airway=airway_stats, lung=lung_stats)
+        manifest.append(entry)
+        staged_ids.append(atm_id)
+        print(f"AeroPath {n:>2} -> ATM_{atm_id}  "
+              f"HU [{entry['ct']['hu_min']:.0f}, {entry['ct']['hu_max']:.0f}]  "
+              f"{entry['ct']['dtype']}  airway {airway_stats['foreground_voxels']:,} vox")
+
+    args.data_config_out.parent.mkdir(parents=True, exist_ok=True)
+    args.data_config_out.write_text(
+        "# Generated by scripts/stage_aeropath_as_atm_layout.py -- do not hand-edit.\n"
+        "# AeroPath restaged in ATM'22 layout so the frozen scorer runs unmodified.\n"
+        "dataset_name: aeropath\n"
+        f"batch_root: {args.out_root.as_posix()}\n",
+        encoding="utf-8",
+    )
+
+    quoted = ", ".join(f'"{i}"' for i in staged_ids)
+    args.split_config_out.parent.mkdir(parents=True, exist_ok=True)
+    args.split_config_out.write_text(
+        "# Generated by scripts/stage_aeropath_as_atm_layout.py -- do not hand-edit.\n"
+        "# AeroPath is an EXTERNAL TEST SET ONLY. Every case is declared under 'val' purely\n"
+        "# because the scorer's --report-split vocabulary is val/test/train; nothing here may\n"
+        "# be used to select a model, threshold or post-processing rule.\n"
+        "version: 1\n"
+        "name: aeropath_external_ood_frozen\n"
+        "expected_counts:\n"
+        "  labelled_train: 0\n"
+        "  unlabelled_train: 0\n"
+        f"  val: {len(staged_ids)}\n"
+        "  test: 0\n"
+        "splits:\n"
+        "  labelled_train: []\n"
+        "  unlabelled_train: []\n"
+        f"  val: [{quoted}]\n"
+        "  test: []\n",
+        encoding="utf-8",
+    )
+
+    manifest_path = args.out_root / "aeropath_staging_manifest.json"
+    manifest_path.write_text(json.dumps(dict(
+        generated_utc=datetime.now(timezone.utc).isoformat(),
+        aeropath_root=str(args.aeropath_root),
+        id_offset=AEROPATH_ID_OFFSET,
+        n_cases=len(manifest),
+        cases=manifest,
+    ), indent=2), encoding="utf-8")
+
+    dtypes = sorted({e["ct"]["dtype"] for e in manifest})
+    hu_lo = min(e["ct"]["hu_min"] for e in manifest)
+    hu_hi = max(e["ct"]["hu_max"] for e in manifest)
+    print(f"\nStaged {len(manifest)} cases -> {args.out_root}")
+    print(f"  CT dtypes: {dtypes}   HU range across cohort: [{hu_lo:.0f}, {hu_hi:.0f}]")
+    print(f"  data config : {args.data_config_out}")
+    print(f"  split config: {args.split_config_out}")
+    print(f"  manifest    : {manifest_path}")
+    if hu_lo > -900:
+        print("  WARNING: minimum HU is unexpectedly high -- check for a scaled/unsigned encoding "
+              "before trusting any score (cf. the ATM'22 uint16 incident).")
+
+
+if __name__ == "__main__":
+    main()
