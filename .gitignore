@@ -24,6 +24,7 @@ __marimo__/
 !nnunet_lungcrop_mt240_control_diag_train.pbs
 !nnunet_lungcrop_mt240_crosshaus_train.pbs
 !nnunet_lungcrop_mt240_crosshaus_control_train.pbs
+!nnunet_lungcrop_mt240_softcldice_upsampled_train.pbs
 
 /data/
 
@@ -58,4 +59,10 @@ logs/
 
 writeup.md
 PROJECT_STATE.md
-dissertation/
+# Ignore the dissertation's *contents* rather than the directory itself. Git cannot
+# re-include anything beneath an excluded directory, so `dissertation/` would make
+# the exception below impossible. The prose, compiled PDFs and LaTeX build tree stay
+# ignored; the code that BUILDS the figures is still code, and is versioned --
+# without the exception a new figure script never even appears in `git status`.
+dissertation/*
+!dissertation/scripts/

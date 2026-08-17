@@ -1,0 +1,249 @@
+#!/bin/bash
+#PBS -N nnLCMT240Up2x
+#PBS -l select=1:ncpus=6:mem=64gb:ngpus=1
+#PBS -l walltime=18:00:00
+#PBS -j oe
+#PBS -o /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation/logs/nnLCMT240Up2x.out
+
+# Dataset126 fold-0 soft-probability clDice consistency with the soft skeleton taken at
+# 2x resolution (cldice_iters 10 -> 20, gradient-checkpointed). One changed training
+# variable against the reported soft arm: the skeletonisation resolution.
+#
+# WALLTIME 18:00, and this run is EXPECTED to need one resume.
+# Measured on an RTX 4060 the 2x/20 checkpointed skeleton costs 3.07-3.17 s per patch
+# against 0.16 s at 1x/10. Scaling by memory bandwidth (the loop is bandwidth-bound)
+# suggests ~0.55 s/patch on an A100, i.e. ~+140 s on top of 52.5 s/epoch at 250
+# unlabelled patches/epoch -> ~190 s/epoch -> ~26 h for 500 epochs. 18:00 matches the
+# allocation the nnLCMTSoft5F array already completes under and keeps the job in
+# backfill; 24:00 would still not clear 26 h, so it would buy queue delay for nothing.
+# The script is self-resuming: re-qsub and it continues from checkpoint_latest with --c.
+#
+# DO NOT shorten num_epochs to fit the walltime. nnU-Net's polynomial LR schedule is
+# parameterised by num_epochs, so a 300-epoch run is not "500 epochs, truncated" -- it
+# anneals differently and stops being comparable to every other Dataset126 arm.
+#
+# CHECK AFTER ~10 EPOCHS, do not trust the projection above:
+#     grep "Epoch time" logs/nnLCMT240Up2x.out    # only after the job ENDS
+#     grep "Epoch time" <RESULT_DIR>/training_log_*.txt | tail   # live
+# If s/epoch is far above ~190, the bandwidth scaling was wrong and the plan needs
+# revisiting before burning further walltime.
+#
+# GPU MEMORY. The checkpointed 2x skeleton peaks at 6.53 GiB measured, ON TOP OF the
+# ordinary nnU-Net graph. This needs a >=24 GB card and is comfortable at 40 GB. If it
+# dies with a CUDA OOM in the first minutes, the node's GPU is too small -- pin one:
+##PBS -l select=1:ncpus=6:mem=64gb:ngpus=1:gpu_type=A100
+
+set -euo pipefail
+
+PROJECT=/rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation
+cd "$PROJECT"
+
+module load miniforge/3
+source "$HOME/miniforge3/etc/profile.d/conda.sh"
+conda activate ctfm
+
+export nnUNet_raw="$PROJECT/data/nnunet/nnUNet_raw"
+export nnUNet_preprocessed="$PROJECT/data/nnunet/nnUNet_preprocessed"
+export nnUNet_results="$PROJECT/data/nnunet/nnUNet_results"
+export TORCH_HOME="$HOME/.torchcache"
+export nnUNet_n_proc_DA=4
+# Reduces allocator churn for the large transient 2x tensors. No-op on Windows, active
+# here; harmless if the local torch predates it.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+DATASET=126
+FOLD=0
+SEED_TRAINER=nnUNetTrainer_NoDeepSupervision_NoMirroring
+MODULE=nnUNetTrainer_MeanTeacher_SoftCLDiceUpsampled_Diagnostics_NoDeepSupervision_NoMirroring
+TRAINER=nnUNetTrainer_MeanTeacher_WarmStart_TwoStream_SoftCLDiceUpsampledDiagnostics_NoDeepSupervision_NoMirroring
+SEED_CHECKPOINT="$nnUNet_results/Dataset123_ATM22L20LungCrop/${SEED_TRAINER}__nnUNetPlans__3d_fullres/fold_${FOLD}/checkpoint_final.pth"
+RESULT_DIR="$nnUNet_results/Dataset126_ATM22MT240LungCrop/${TRAINER}__nnUNetPlans__3d_fullres/fold_${FOLD}"
+
+NNUNET_PACKAGE=$(python -c 'from pathlib import Path; import nnunetv2; print(Path(nnunetv2.__file__).resolve().parent)')
+TRAINER_DIR="$NNUNET_PACKAGE/training/nnUNetTrainer/variants/network_architecture"
+test -d "$TRAINER_DIR" || {
+    echo "Cannot find nnU-Net trainer directory: $TRAINER_DIR"
+    exit 1
+}
+
+# Fail closed if a shared parent or this module changes after review. The four parent
+# hashes are the same ones the soft/5-fold/sweep scripts pin, so a mismatch here means
+# a shared file moved and those runs are affected too.
+verify_blob() {
+    local source_file=$1
+    local expected_blob=$2
+    local actual_blob
+    test -f "$source_file" || {
+        echo "Missing repository file: $source_file"
+        exit 1
+    }
+    actual_blob=$(git hash-object "$source_file")
+    test "$actual_blob" = "$expected_blob" || {
+        echo "Refusing launch: file changed: $source_file"
+        echo "expected Git blob $expected_blob, found $actual_blob"
+        exit 1
+    }
+}
+
+verify_blob nnunet_trainers/nnUNetTrainer_NoDeepSupervision_NoMirroring.py \
+    23af9756e44a5f63d7e136b2177276c8a9299ae0
+verify_blob nnunet_trainers/nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring.py \
+    1e401b0f421b595d7c579cd062747f63c138ed88
+verify_blob nnunet_trainers/nnUNetTrainer_MeanTeacher_TwoStream_NoDeepSupervision_NoMirroring.py \
+    c80fe415da7823bc491333c4e70fb4ae94d5f8cc
+verify_blob nnunet_trainers/nnUNetTrainer_MeanTeacher_SoftCLDice_Diagnostics_NoDeepSupervision_NoMirroring.py \
+    34131e294f560a5b34d57298cf0ebe7e95eb1af1
+verify_blob "nnunet_trainers/${MODULE}.py" \
+    0567d8803065a3458f51b4cf60788b4c97154cd3
+
+# Never replace a different installed trainer. Existing identical files and symlinks to
+# this checkout are accepted; absent modules are linked once.
+ensure_same_trainer() {
+    local source_file="$PROJECT/nnunet_trainers/$1"
+    local target_file="$TRAINER_DIR/$1"
+    test -f "$source_file" || {
+        echo "Missing repository trainer: $source_file"
+        exit 1
+    }
+    if test -L "$target_file"; then
+        test "$(readlink -f "$target_file")" = "$(readlink -f "$source_file")" || {
+            echo "Refusing to replace different trainer symlink: $target_file"
+            exit 1
+        }
+    elif test -e "$target_file"; then
+        cmp -s "$source_file" "$target_file" || {
+            echo "Refusing to replace different installed trainer: $target_file"
+            exit 1
+        }
+    elif ! ln -s "$source_file" "$target_file" 2>/dev/null; then
+        # Concurrent jobs may race to create this same symlink. Accept only the
+        # reviewed source after re-checking.
+        if test -L "$target_file"; then
+            test "$(readlink -f "$target_file")" = "$(readlink -f "$source_file")" || {
+                echo "Concurrent install produced a different trainer symlink: $target_file"
+                exit 1
+            }
+        elif test -e "$target_file"; then
+            cmp -s "$source_file" "$target_file" || {
+                echo "Concurrent install produced a different trainer file: $target_file"
+                exit 1
+            }
+        else
+            echo "Could not install trainer module: $target_file"
+            exit 1
+        fi
+    fi
+}
+
+for TRAINER_FILE in \
+    nnUNetTrainer_NoDeepSupervision_NoMirroring.py \
+    nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring.py \
+    nnUNetTrainer_MeanTeacher_TwoStream_NoDeepSupervision_NoMirroring.py \
+    nnUNetTrainer_MeanTeacher_SoftCLDice_Diagnostics_NoDeepSupervision_NoMirroring.py \
+    "${MODULE}.py"
+do
+    ensure_same_trainer "$TRAINER_FILE"
+done
+
+# Protocol preflight: assert this arm differs from the reported soft arm in the skeleton
+# resolution ONLY, and that the checkpointed skeleton still reproduces the pinned one.
+python - <<PY
+import torch
+
+from nnunetv2.training.nnUNetTrainer.variants.network_architecture.nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring import (
+    _soft_skeleton3d,
+)
+from nnunetv2.training.nnUNetTrainer.variants.network_architecture.nnUNetTrainer_MeanTeacher_SoftCLDice_Diagnostics_NoDeepSupervision_NoMirroring import (
+    nnUNetTrainer_MeanTeacher_WarmStart_TwoStream_SoftCLDiceDiagnostics_NoDeepSupervision_NoMirroring as SoftBase,
+)
+from nnunetv2.training.nnUNetTrainer.variants.network_architecture.${MODULE} import (
+    BASE_CLDICE_ITERS,
+    _checkpointed_soft_skeleton3d,
+    ${TRAINER} as Trainer,
+)
+
+assert issubclass(Trainer, SoftBase)
+assert Trainer.protocol_exposure == "K1"
+assert Trainer.expected_labelled_per_step == 1
+assert Trainer.expected_unlabelled_per_step == 1
+assert Trainer.expected_local_batch_size == 2
+assert Trainer.enable_soft_probability_consistency is True
+assert Trainer.diagnostic_objective == "soft_probability_cldice_2x_skeleton"
+assert Trainer.skeleton_scale == 2
+# One changed variable: w_max must equal the reported arm's.
+assert Trainer.configured_consistency_max == SoftBase.configured_consistency_max == 0.1
+assert BASE_CLDICE_ITERS * Trainer.skeleton_scale == 20
+
+# The checkpointed skeleton must be bit-identical to the pinned implementation, or the
+# arm is not measuring what it claims. Cheap on CPU at this size.
+probe = torch.rand((1, 1, 12, 14, 10), generator=torch.Generator().manual_seed(0))
+with torch.no_grad():
+    assert torch.equal(_soft_skeleton3d(probe, 20), _checkpointed_soft_skeleton3d(probe, 20))
+
+print(f"Preflight OK: {Trainer.__name__} scale={Trainer.skeleton_scale} iters=20 w_max=0.1")
+PY
+
+test -s "$SEED_CHECKPOINT" || {
+    echo "Missing or empty Dataset123 fold-0 seed checkpoint: $SEED_CHECKPOINT"
+    exit 1
+}
+
+test -d "$nnUNet_preprocessed/Dataset126_ATM22MT240LungCrop/nnUNetPlans_3d_fullres" || {
+    echo "Dataset126 preprocessing is missing; do not launch"
+    exit 1
+}
+
+# Short form of the fold-0 contract. The full split verification is performed by the
+# established Dataset126 scripts and the dataset has not changed; this catches a
+# swapped or re-generated dataset.json rather than re-deriving the whole split.
+python - <<'PY'
+import json
+import os
+from pathlib import Path
+
+root = Path(os.environ["nnUNet_preprocessed"]) / "Dataset126_ATM22MT240LungCrop"
+dataset = json.loads((root / "dataset.json").read_text())
+provenance = [str(v).lower() for v in dataset["semi_supervised"]["case_provenance"].values()]
+splits = json.loads((root / "splits_final.json").read_text())[0]
+assert provenance.count("gt") == 20, provenance.count("gt")
+assert provenance.count("ignore") == 240, provenance.count("ignore")
+assert len(splits["train"]) == 256 and len(splits["val"]) == 4
+print("Dataset126 fold-0 contract OK: 20 GT / 240 U, 256 train / 4 val")
+PY
+
+if test -f "$RESULT_DIR/checkpoint_final.pth"; then
+    test -s "$RESULT_DIR/checkpoint_final.pth.mt" || {
+        echo "Final checkpoint exists but its Mean-Teacher sidecar is missing"
+        exit 1
+    }
+    echo "Dataset126 MT240 2x-skeleton fold-0 run is already complete"
+    exit 0
+fi
+
+if test -f "$RESULT_DIR/checkpoint_latest.pth"; then
+    test -s "$RESULT_DIR/checkpoint_latest.pth.mt" || {
+        echo "Cannot resume: checkpoint_latest.pth.mt is missing"
+        exit 1
+    }
+    echo "Resuming; the log MUST contain"
+    echo "  [MeanTeacher] restored EMA teacher from sidecar (.mt)"
+    nnUNetv2_train "$DATASET" 3d_fullres "$FOLD" \
+        -tr "$TRAINER" \
+        -p nnUNetPlans \
+        --c
+else
+    if test -d "$RESULT_DIR" && test -n "$(find "$RESULT_DIR" -mindepth 1 -print -quit)"; then
+        echo "Refusing a fresh start in non-empty incomplete result directory: $RESULT_DIR"
+        exit 1
+    fi
+    nnUNetv2_train "$DATASET" 3d_fullres "$FOLD" \
+        -tr "$TRAINER" \
+        -p nnUNetPlans \
+        -pretrained_weights "$SEED_CHECKPOINT"
+fi
+
+test -s "$RESULT_DIR/checkpoint_final.pth.mt" || {
+    echo "Training returned without a final Mean-Teacher sidecar"
+    exit 1
+}
+echo "Dataset126 MT240 2x-skeleton fold-0 training completed"
