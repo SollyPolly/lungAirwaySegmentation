@@ -44,6 +44,7 @@ def _():
         extract_mask_plane,
         find_itksnap_executable,
         launch_itksnap,
+        layer_vertex_budget,
         list_prediction_cases,
         load_prediction_bundle,
     )
@@ -67,6 +68,7 @@ def _():
         find_itksnap_executable,
         go,
         launch_itksnap,
+        layer_vertex_budget,
         list_prediction_cases,
         load_prediction_bundle,
         mo,
@@ -84,6 +86,7 @@ def _(
     mask_selector,
     mesh_detail,
     mesh_height,
+    mesh_notice,
     mesh_view,
     mo,
     open_itksnap,
@@ -158,6 +161,7 @@ def _(
                         wrap=True,
                         align="end",
                     ),
+                    mesh_notice,
                     mesh_view,
                 ],
                 gap=0.7,
@@ -313,11 +317,11 @@ def _(mo):
     )
     mesh_detail = mo.ui.dropdown(
         {
-            "Full detail": 1,
+            "Native resolution": 1,
             "Faster (stride 2)": 2,
             "Preview (stride 3)": 3,
         },
-        value="Full detail",
+        value="Native resolution",
         label="Mesh detail",
     )
     prediction_opacity = mo.ui.slider(
@@ -418,82 +422,87 @@ def _(
     build_mask_mesh,
     combine_cropped_masks,
     comparison_mode,
+    layer_vertex_budget,
     mesh_detail,
     prediction_bundle,
 ):
-    scene_meshes = []
+    # Layers are chosen first so the vertex budget can be split between them:
+    # marimo refuses a cell output over 8 MB, and a Plotly surface costs about
+    # 50 bytes per vertex.
+    _layers = []
     if prediction_bundle is not None:
-        _stride = int(mesh_detail.value)
         _prediction = prediction_bundle.prediction
         _truth = prediction_bundle.ground_truth
         _mode = comparison_mode.value
 
         if _mode == "errors" and _truth is not None:
-            _true_positive = combine_cropped_masks(_prediction, _truth, "and")
-            _false_positive = combine_cropped_masks(
-                _prediction, _truth, "first_only"
-            )
-            _missed = combine_cropped_masks(_truth, _prediction, "first_only")
-            scene_meshes = [
+            _layers = [
                 (
                     "True positive",
-                    build_mask_mesh(
-                        _true_positive,
-                        prediction_bundle.affine,
-                        preferred_stride=_stride,
-                    ),
+                    combine_cropped_masks(_prediction, _truth, "and"),
                     "#35d07f",
                     "error",
                 ),
                 (
                     "False positive",
-                    build_mask_mesh(
-                        _false_positive,
-                        prediction_bundle.affine,
-                        preferred_stride=_stride,
-                    ),
+                    combine_cropped_masks(_prediction, _truth, "first_only"),
                     "#ff4d5e",
                     "error",
                 ),
                 (
                     "Missed ground truth",
-                    build_mask_mesh(
-                        _missed,
-                        prediction_bundle.affine,
-                        preferred_stride=_stride,
-                    ),
+                    combine_cropped_masks(_truth, _prediction, "first_only"),
                     "#ffb020",
                     "error",
                 ),
             ]
         else:
             if _mode in {"overlay", "truth"} and _truth is not None:
-                scene_meshes.append(
-                    (
-                        "Ground truth",
-                        build_mask_mesh(
-                            _truth,
-                            prediction_bundle.affine,
-                            preferred_stride=_stride,
-                        ),
-                        "#19c3d8",
-                        "truth",
-                    )
-                )
+                _layers.append(("Ground truth", _truth, "#19c3d8", "truth"))
             if _mode in {"overlay", "prediction"} or _truth is None:
-                scene_meshes.append(
-                    (
-                        "Prediction",
-                        build_mask_mesh(
-                            _prediction,
-                            prediction_bundle.affine,
-                            preferred_stride=_stride,
-                        ),
-                        "#ff3b9d",
-                        "prediction",
-                    )
-                )
+                _layers.append(("Prediction", _prediction, "#ff3b9d", "prediction"))
+
+    scene_meshes = []
+    if prediction_bundle is not None and _layers:
+        _budget = layer_vertex_budget(len(_layers))
+        scene_meshes = [
+            (
+                _name,
+                build_mask_mesh(
+                    _mask,
+                    prediction_bundle.affine,
+                    preferred_stride=int(mesh_detail.value),
+                    max_vertices=_budget,
+                ),
+                _color,
+                _kind,
+            )
+            for _name, _mask, _color, _kind in _layers
+        ]
     return (scene_meshes,)
+
+
+@app.cell(hide_code=True)
+def _(mo, scene_meshes):
+    _coarse = sorted(
+        {mesh.stride for _, mesh, _, _ in scene_meshes if mesh is not None and mesh.stride > 1}
+    )
+    mesh_notice = (
+        mo.callout(
+            mo.md(
+                "Surfaces are drawn at "
+                + " and ".join(f"stride {value}" for value in _coarse)
+                + ", so the thinnest distal branches are thinned or broken "
+                "**in this view only** — the metrics above are computed on the "
+                "full-resolution masks. Set mesh detail to native resolution, "
+                "or unset `AIRWAY_VIEWER_VERTEX_BUDGET`, to draw the whole tree."
+            ),
+            kind="warn",
+        )
+        if _coarse
+        else mo.md("")
+    )
+    return (mesh_notice,)
 
 
 @app.cell(hide_code=True)
@@ -797,6 +806,7 @@ def _(bundle_error, mo, prediction_bundle):
             f"- **Shape**: `{prediction_bundle.shape}`",
         ]
         for _key, _label in (
+            ("aeropath_case", "AeroPath release case"),
             ("study_name", "Study"),
             ("run_label", "Run label"),
             ("experiment_name", "Experiment"),

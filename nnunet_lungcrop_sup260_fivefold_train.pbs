@@ -1,0 +1,91 @@
+#!/bin/bash
+#PBS -N nnLCSup2605F
+#PBS -J 0-4
+#PBS -l select=1:ncpus=6:mem=64gb:ngpus=1
+#PBS -l walltime=18:00:00
+#PBS -j oe
+#PBS -o /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation/logs/nnLCSup2605F.o^array_index^
+
+# Fully supervised 260-label ceiling, five folds, paired case-for-case with the
+# MT240 arms on Dataset126. From scratch and protocol-matched to the @20 seed
+# and the @110 rung: same trainer, same Dataset111-derived plans, stock 1000
+# epochs. Only the labelled pool differs across the curve.
+#
+# DO NOT shorten num_epochs to fit the walltime. nnU-Net's polynomial LR
+# schedule is parameterised by it, so a truncated run is a different recipe, not
+# a shorter one. The seed folds ran at ~35 s/epoch, so budget ~10-12 h; 18 h
+# leaves room for the larger unpack and the end-of-training validation. If a
+# fold is walltime-killed, re-qsub this array -- finished folds exit in seconds
+# and unfinished ones resume from checkpoint_latest.
+
+set -euo pipefail
+
+PROJECT=/rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation
+cd "$PROJECT"
+
+module load miniforge/3
+source "$HOME/miniforge3/etc/profile.d/conda.sh"
+conda activate ctfm
+
+export nnUNet_raw="$PROJECT/data/nnunet/nnUNet_raw"
+export nnUNet_preprocessed="$PROJECT/data/nnunet/nnUNet_preprocessed"
+export nnUNet_results="$PROJECT/data/nnunet/nnUNet_results"
+export TORCH_HOME="$HOME/.torchcache"
+export nnUNet_n_proc_DA=4
+
+FOLD="$PBS_ARRAY_INDEX"
+TRAINER=nnUNetTrainer_NoDeepSupervision_NoMirroring
+RESULT_DIR="$nnUNet_results/Dataset127_ATM22SUP260LungCrop/${TRAINER}__nnUNetPlans__3d_fullres/fold_${FOLD}"
+
+NNUNET_PACKAGE=$(python -c 'from pathlib import Path; import nnunetv2; print(Path(nnunetv2.__file__).resolve().parent)')
+TRAINER_DIR="$NNUNET_PACKAGE/training/nnUNetTrainer/variants/network_architecture"
+test -d "$TRAINER_DIR" || {
+    echo "Cannot find nnU-Net trainer directory: $TRAINER_DIR"
+    exit 1
+}
+test -f "$PROJECT/nnunet_trainers/${TRAINER}.py" || {
+    echo "Missing repository trainer: $PROJECT/nnunet_trainers/${TRAINER}.py"
+    exit 1
+}
+ln -sfn "$PROJECT/nnunet_trainers/${TRAINER}.py" "$TRAINER_DIR/${TRAINER}.py"
+
+test -d "$nnUNet_preprocessed/Dataset127_ATM22SUP260LungCrop/nnUNetPlans_3d_fullres" || {
+    echo "Dataset127 is not preprocessed; run nnunet_lungcrop_sup260_prepare.pbs first."
+    exit 1
+}
+
+python -c "
+import json
+from pathlib import Path
+root = Path('$nnUNet_preprocessed')
+folds = json.loads((root / 'Dataset127_ATM22SUP260LungCrop' / 'splits_final.json').read_text())
+assert len(folds) == 5, f'Expected five Dataset127 folds, got {len(folds)}'
+fold = folds[$FOLD]
+assert len(fold['train']) == 256 and len(fold['val']) == 4, (len(fold['train']), len(fold['val']))
+
+labels = json.loads((root / 'Dataset127_ATM22SUP260LungCrop' / 'dataset.json').read_text())['labels']
+assert labels == {'background': 0, 'airway': 1}, f'Dataset127 must be fully labelled, got {labels}'
+
+mt = json.loads((root / 'Dataset126_ATM22MT240LungCrop' / 'splits_final.json').read_text())[$FOLD]
+assert set(fold['train']) == set(mt['train']), 'fold $FOLD train differs from MT240'
+assert set(fold['val']) == set(mt['val']), 'fold $FOLD val differs from MT240'
+print('Dataset127 fold $FOLD preflight OK; paired with MT240, val:', fold['val'])
+"
+
+if test -f "$RESULT_DIR/checkpoint_final.pth"; then
+    echo "Dataset127 SUP260 fold $FOLD is already complete"
+    exit 0
+fi
+
+if test -f "$RESULT_DIR/checkpoint_latest.pth"; then
+    nnUNetv2_train 127 3d_fullres "$FOLD" \
+        -tr "$TRAINER" \
+        -p nnUNetPlans \
+        --c
+else
+    nnUNetv2_train 127 3d_fullres "$FOLD" \
+        -tr "$TRAINER" \
+        -p nnUNetPlans
+fi
+
+echo "Dataset127 SUP260 fold $FOLD completed"

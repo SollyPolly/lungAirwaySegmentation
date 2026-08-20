@@ -12,7 +12,7 @@ from pathlib import Path
 import shutil
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 DISSERTATION = ROOT / "dissertation"
 FIGURES = DISSERTATION / "Figures"
 

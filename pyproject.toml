@@ -1,2 +1,8 @@
 [tool.marimo.runtime]
-output_max_bytes = 300_000_000
+# mask_visualisation.py sends full-resolution airway surfaces to the browser: a
+# 0.5 mm AeroPath tree is ~170k mesh vertices per layer, ~8 MB, and the error
+# view triples that. Anything below ~100 MB starts silently refusing to draw
+# cases. marimo reads this at server start, and only when it can find this file
+# -- if the "output is too large" callout comes back, set the environment
+# variable MARIMO_OUTPUT_MAX_BYTES instead, which the kernel always sees.
+output_max_bytes = 1_073_741_824

@@ -7,6 +7,12 @@ scipy==1.15.3
 scikit-image==0.25.2
 pytest==9.0.3
 PyYAML==6.0.3
+# Dissertation figures. matplotlib and pandas were already imported by
+# dissertation/scripts/ without being declared here; seaborn joined them when the
+# statistical figures moved to a shared theme (dissertation/scripts/figure_theme.py).
+matplotlib==3.10.8
+pandas==2.3.3
+seaborn==0.13.2
 torch
 nnunetv2
 SimpleITK

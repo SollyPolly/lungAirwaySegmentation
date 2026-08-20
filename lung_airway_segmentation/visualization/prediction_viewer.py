@@ -10,6 +10,12 @@ Two on-disk layouts are supported:
 * native nnU-Net masks under ``data/nnunet/predict_out`` (and a project-level
   ``nnunet`` directory, when present).
 
+Reference CTs are then looked up per cohort: ATM'22 under ``data/ATM22``, and
+AeroPath under ``data/AeroPath_atm_layout`` (the restaged tree the OOD
+predictions were produced from) falling back to the ``data/AeroPath`` release
+layout.  Because AeroPath is staged with ATM filenames, the cohort is read from
+the collection name and from the 900-block case identifier.
+
 The functions in this module are UI-agnostic so discovery, alignment, mesh
 generation, and ITK-SNAP launching can be tested without starting Marimo.
 """
@@ -17,6 +23,7 @@ generation, and ITK-SNAP launching can be tested without starting Marimo.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shutil
@@ -37,6 +44,25 @@ from skimage.measure import marching_cubes
 
 
 SourceKind = Literal["run", "nnunet"]
+
+# scripts/stage_aeropath_as_atm_layout.py restages AeroPath case N as ATM_9NN so the
+# frozen ATM'22 scorer runs unmodified.  Predictions therefore arrive here wearing ATM
+# filenames, and the CT has to be looked up in the AeroPath tree instead.
+AEROPATH_ID_OFFSET = 900
+
+# Native resolution by default: striding a mesh thins exactly the distal
+# branches this project exists to measure, so the viewer never coarsens a
+# surface unless it is told to.  A Plotly Mesh3d costs about 50 bytes per vertex
+# once vertices and faces are base64 encoded, so this ceiling is roughly a
+# gigabyte of payload -- high enough that no real airway reaches it.
+#
+# Two limits sit downstream and must be raised to match: marimo refuses a cell
+# output above ``[runtime] output_max_bytes`` (see pyproject.toml, and
+# MARIMO_OUTPUT_MAX_BYTES for launches where that file is not picked up), and
+# the browser has to hold the mesh.  Set AIRWAY_VIEWER_VERTEX_BUDGET to a
+# smaller number to trade distal detail for a responsive view.
+SCENE_VERTEX_BUDGET = int(os.getenv("AIRWAY_VIEWER_VERTEX_BUDGET", "20000000"))
+_MIN_LAYER_VERTEX_BUDGET = 25_000
 
 _NIFTI_SUFFIXES = (".nii.gz", ".nii")
 _CASE_NUMBER = re.compile(r"(?:^|_)(\d+)(?:_0000)?$")
@@ -153,6 +179,26 @@ def _normalise_dataset_name(value: object) -> str | None:
     if "atm" in text:
         return "atm22"
     if "aeropath" in text or "aero_path" in text:
+        return "aeropath"
+    return None
+
+
+def _path_dataset_hint(path: Path) -> str | None:
+    """Name a dataset from a prediction directory, e.g. ``Dataset126_aeropath_...``."""
+
+    text = str(path).lower()
+    # AeroPath first: an AeroPath prediction usually also lives under an "atm"-shaped
+    # path, because its cases are staged with ATM filenames.
+    if "aeropath" in text or "aero_path" in text:
+        return "aeropath"
+    return "atm22" if "atm" in text else None
+
+
+def _case_dataset_hint(case_id: str) -> str | None:
+    """Recognise the 900-block identifiers reserved for restaged AeroPath cases."""
+
+    text = str(case_id).strip()
+    if text.isdigit() and AEROPATH_ID_OFFSET < int(text) <= AEROPATH_ID_OFFSET + 99:
         return "aeropath"
     return None
 
@@ -276,7 +322,7 @@ def discover_prediction_sources(project_root: Path) -> list[PredictionSource]:
             seen_directories.add(resolved)
             run_dir = prediction_dir.parent.resolve()
             relative = prediction_dir.relative_to(runs_root)
-            hint = _run_dataset_hint(run_dir)
+            hint = _run_dataset_hint(run_dir) or _path_dataset_hint(relative)
             prefix = "runs / nnU-Net" if "nnunet" in str(relative).lower() else "runs"
             sources.append(
                 PredictionSource(
@@ -311,7 +357,9 @@ def discover_prediction_sources(project_root: Path) -> list[PredictionSource]:
                     label=f"nnU-Net native · {relative}",
                     kind="nnunet",
                     prediction_dir=resolved,
-                    dataset_hint="atm22",
+                    # Native outputs carry ATM filenames whichever cohort they came
+                    # from, so the collection name is what separates the two.
+                    dataset_hint=_path_dataset_hint(relative) or "atm22",
                     modified_ns=prediction_dir.stat().st_mtime_ns,
                 )
             )
@@ -398,13 +446,50 @@ def _atm_paths(root: Path, case_id: str) -> tuple[Path, Path | None, Path | None
     return ct, ground_truth, lung if lung.is_file() else None
 
 
+def _aeropath_case_number(case_id: str) -> str | None:
+    """Map a case identifier onto an AeroPath release directory (``ATM_901`` -> ``1``)."""
+
+    text = str(case_id).strip()
+    if not text.isdigit():
+        return None
+    number = int(text)
+    if number > AEROPATH_ID_OFFSET:
+        number -= AEROPATH_ID_OFFSET
+    return str(number)
+
+
 def _aeropath_paths(root: Path, case_id: str) -> tuple[Path, Path | None, Path | None]:
-    text = str(case_id)
+    text = _aeropath_case_number(case_id)
+    if text is None:
+        return root / str(case_id), None, None
     case_dir = root / text
     ct = case_dir / f"{text}_CT_HR.nii.gz"
     gt = case_dir / f"{text}_CT_HR_label_airways.nii.gz"
     lung = case_dir / f"{text}_CT_HR_label_lungs.nii.gz"
     return ct, gt if gt.is_file() else None, lung if lung.is_file() else None
+
+
+def _dataset_roots(dataset: str, project_root: Path) -> list[Path]:
+    if dataset == "atm22":
+        return [project_root / "data" / "ATM22"]
+    # The restaged tree is preferred: it is what the predictions were produced from,
+    # its masks are already binarised, and it is laid out exactly like ATM'22.
+    return [
+        project_root / "data" / "AeroPath_atm_layout",
+        project_root / "data" / "AeroPath",
+    ]
+
+
+def _reference_paths_in_root(
+    dataset: str,
+    root: Path,
+    case_id: str,
+) -> tuple[Path, Path | None, Path | None]:
+    """Dispatch on the layout of ``root``, not on the cohort it holds."""
+
+    if dataset == "aeropath" and not (root / "imagesTr").is_dir():
+        return _aeropath_paths(root, case_id)
+    return _atm_paths(root, case_id)
 
 
 def resolve_reference_paths(
@@ -416,37 +501,34 @@ def resolve_reference_paths(
 
     project_root = Path(project_root).resolve()
     recorded = _run_data_candidates(source, project_root)
-    dataset_order = (
-        [source.dataset_hint]
-        if source.dataset_hint in {"atm22", "aeropath"}
-        else ["atm22", "aeropath"]
-    )
+    # A 900-block identifier is only ever minted by the AeroPath staging script, so it
+    # overrides a collection-level hint that says otherwise.
+    hint = _case_dataset_hint(case_id) or source.dataset_hint
+    dataset_order = [hint] if hint in {"atm22", "aeropath"} else ["atm22", "aeropath"]
     attempted: list[Path] = []
 
     for dataset in dataset_order:
-        defaults = (
-            [project_root / "data" / "ATM22"]
-            if dataset == "atm22"
-            else [project_root / "data" / "AeroPath"]
-        )
         roots = []
-        for root in [*recorded, *defaults]:
+        for root in [*recorded, *_dataset_roots(dataset, project_root)]:
             resolved = root.resolve()
             if resolved not in roots:
                 roots.append(resolved)
         for root in roots:
-            ct, gt, lung = (
-                _atm_paths(root, case_id)
-                if dataset == "atm22"
-                else _aeropath_paths(root, case_id)
-            )
+            ct, gt, lung = _reference_paths_in_root(dataset, root, case_id)
             attempted.append(ct)
             if ct.is_file():
                 return dataset, ct.resolve(), gt.resolve() if gt else None, lung.resolve() if lung else None, root
 
     attempted_text = "\n".join(f"  - {path}" for path in attempted)
+    remedy = (
+        "\nThis looks like a restaged AeroPath case; run "
+        "scripts/stage_aeropath_as_atm_layout.py to populate data/AeroPath_atm_layout."
+        if hint == "aeropath"
+        else ""
+    )
     raise FileNotFoundError(
-        f"Could not find the CT for case {case_id}. Tried:\n{attempted_text}"
+        f"Could not find the CT for case {case_id} ({hint or 'unknown'} layout). "
+        f"Tried:\n{attempted_text}{remedy}"
     )
 
 
@@ -625,6 +707,10 @@ def load_prediction_bundle(
     zooms = ct_image.header.get_zooms()[:3]
     metadata = _bundle_metadata(source, prediction_path)
     metadata["dataset_name"] = dataset
+    if dataset == "aeropath" and _case_dataset_hint(case_id) == "aeropath":
+        # The viewer shows the staged ATM identifier; name the release case too, so a
+        # figure can be traced back to the published AeroPath numbering.
+        metadata["aeropath_case"] = _aeropath_case_number(case_id)
     return PredictionBundle(
         source=source,
         case_id=str(case_id),
@@ -662,43 +748,92 @@ def combine_cropped_masks(
     return CroppedMask(data, first.offset, first.full_shape)
 
 
+def layer_vertex_budget(layer_count: int, budget: int = SCENE_VERTEX_BUDGET) -> int:
+    """Split the scene budget over the surfaces that will be drawn together."""
+
+    return max(_MIN_LAYER_VERTEX_BUDGET, int(budget) // max(1, int(layer_count)))
+
+
+def _estimated_stride(voxel_count: int, max_vertices: int) -> int:
+    """Guess a stride so the search below usually needs one marching-cubes pass."""
+
+    if max_vertices <= 0 or voxel_count <= 0:
+        return 1
+    # Airways are thin tubes, so marching cubes emits roughly half a vertex per
+    # foreground voxel, and striding by s thins a tube by about s**2 rather than
+    # the s**3 a solid body would give.  Measured on ATM'22 and AeroPath cases.
+    # Rounded down deliberately: the search below only ever coarsens, so starting
+    # a step too fine costs one extra pass, while starting a step too coarse
+    # would throw away distal branches that would have fitted.
+    return max(1, int(math.sqrt(0.55 * voxel_count / max_vertices)))
+
+
+def _isosurface(
+    data: np.ndarray,
+    stride: int,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Marching cubes on a strided view, in the voxel grid of the full mask."""
+
+    sampled = data[::stride, ::stride, ::stride]
+    if not sampled.any():
+        return None
+    coordinates = np.argwhere(sampled)
+    lower = np.maximum(coordinates.min(axis=0) - 1, 0)
+    upper = np.minimum(coordinates.max(axis=0) + 2, sampled.shape)
+    slices = tuple(slice(int(start), int(stop)) for start, stop in zip(lower, upper))
+    # Zero padding guarantees a closed isosurface even when foreground reaches
+    # the edge of the stored crop.
+    padded = np.pad(sampled[slices].astype(np.uint8), 1, mode="constant")
+    vertices, faces, _, _ = marching_cubes(padded, level=0.5)
+    return (vertices - 1.0 + lower.astype(np.float32)) * float(stride), faces
+
+
 def build_mask_mesh(
     mask: CroppedMask,
     affine: np.ndarray,
     *,
     preferred_stride: int = 1,
-    max_sampled_foreground_voxels: int = 450_000,
+    max_vertices: int = SCENE_VERTEX_BUDGET,
+    max_stride: int = 8,
 ) -> MaskMesh | None:
-    """Create a compact world-coordinate mesh with an adaptive safety stride."""
+    """Create a world-coordinate mesh, coarsening only if a budget demands it.
+
+    At the default budget nothing is coarsened, so ``preferred_stride`` is what
+    decides resolution.  When a budget is imposed it is enforced on the vertices
+    marching cubes actually produces, not on foreground voxels: a 0.5 mm airway
+    holds far more surface per voxel than a 1 mm one, so a voxel-count guard
+    lets exactly the dense cases through.  ``MaskMesh.stride`` reports the
+    resolution used, which callers should show whenever it exceeds 1 -- striding
+    thins distal branches.
+    """
 
     data = np.asarray(mask.data, dtype=bool)
-    if not data.any():
+    voxels = int(np.count_nonzero(data))
+    if not voxels:
         return None
-    stride = max(1, int(preferred_stride))
-    while (
-        stride < 8
-        and int(np.count_nonzero(data[::stride, ::stride, ::stride]))
-        > max_sampled_foreground_voxels
-    ):
+
+    budget = max(1, int(max_vertices))
+    stride = max(1, int(preferred_stride), _estimated_stride(voxels, budget))
+    surface: tuple[np.ndarray, np.ndarray] | None = None
+    tried: set[int] = set()
+    while stride not in tried:
+        tried.add(stride)
+        candidate = _isosurface(data, stride)
+        if candidate is None:
+            # The stride stepped clean over a structure a voxel or two wide.
+            if stride == 1:
+                return None
+            stride -= 1
+            continue
+        surface = candidate
+        if len(candidate[0]) <= budget or stride >= max_stride:
+            break
         stride += 1
 
-    sampled = data[::stride, ::stride, ::stride]
-    while stride > 1 and not sampled.any():
-        stride -= 1
-        sampled = data[::stride, ::stride, ::stride]
-    coordinates = np.argwhere(sampled)
-    lower = np.maximum(coordinates.min(axis=0) - 1, 0)
-    upper = np.minimum(coordinates.max(axis=0) + 2, sampled.shape)
-    slices = tuple(slice(int(start), int(stop)) for start, stop in zip(lower, upper))
-    cropped = sampled[slices]
-    # Zero padding guarantees a closed isosurface even when foreground reaches
-    # the edge of the stored crop.
-    padded = np.pad(cropped.astype(np.uint8), 1, mode="constant")
-    vertices, faces, _, _ = marching_cubes(padded, level=0.5)
-    voxel_vertices = (
-        (vertices - 1.0 + lower.astype(np.float32)) * float(stride)
-        + np.asarray(mask.offset, dtype=np.float32)
-    )
+    if surface is None:
+        return None
+    vertices, faces = surface
+    voxel_vertices = vertices + np.asarray(mask.offset, dtype=np.float32)
     world_vertices = nib.affines.apply_affine(affine, voxel_vertices).astype(
         np.float32, copy=False
     )
@@ -832,6 +967,8 @@ def launch_itksnap(
 
 
 __all__ = [
+    "AEROPATH_ID_OFFSET",
+    "SCENE_VERTEX_BUDGET",
     "CroppedMask",
     "MaskMesh",
     "PredictionBundle",
@@ -848,6 +985,7 @@ __all__ = [
     "extract_mask_plane",
     "find_itksnap_executable",
     "launch_itksnap",
+    "layer_vertex_budget",
     "list_prediction_cases",
     "load_prediction_bundle",
     "resolve_reference_paths",

@@ -11,7 +11,7 @@ the repository's clDice pooling semantics on a single slice:
 
 Run from the repository root:
 
-    python scripts/generate_cldice_explainer.py
+    python dissertation/scripts/generate_cldice_explainer.py
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ from scipy.ndimage import (
 )
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 FIGURE_ROOT = ROOT / "dissertation" / "Figures"
 
 INK = "#0f172a"

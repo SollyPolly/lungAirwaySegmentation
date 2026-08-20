@@ -1,12 +1,12 @@
 $ErrorActionPreference = 'Stop'
 
-$Project = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$Dissertation = Join-Path $Project 'dissertation'
+# This script lives in dissertation/scripts/, so its parent IS the dissertation root.
+$Dissertation = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $Build = Join-Path $Dissertation 'build'
 
 New-Item -ItemType Directory -Force -Path $Build | Out-Null
 # Push rather than Set so the caller's working directory survives the build and a
-# following `.\scripts\...` invocation still resolves.
+# following `.\dissertation\scripts\...` invocation still resolves.
 Push-Location $Dissertation
 
 function Invoke-PdfLaTeX {
@@ -22,26 +22,25 @@ function Invoke-PdfLaTeX {
     }
 }
 
-$PreviousBibInputs = $env:BIBINPUTS
 try {
     Invoke-PdfLaTeX
 
-    # biblatex creates main-blx.bib beside the auxiliary files, so the build
-    # directory must stay searchable. The SOURCE directory must come FIRST: a
-    # stale references.bib left in build/ would otherwise shadow the real one and
-    # silently freeze the bibliography (bibtex reports only a "didn't find a
-    # database entry" warning, and the citation renders as an undefined "[?]").
-    $env:BIBINPUTS = "$Dissertation;$Build"
-    & bibtex (Join-Path $Build 'main')
+    # BIBER, not bibtex: main.tex declares backend=biber, under which biblatex emits
+    # a .bcf control file and writes NO \citation/\bibdata/\bibstyle into main.aux.
+    # Running bibtex against that aux finds nothing, exits 1, and truncates main.bbl
+    # to zero bytes -- which silently empties the bibliography rather than failing
+    # loudly at the pdflatex stage. Run from $Dissertation (the Push-Location above)
+    # so \addbibresource{references.bib} resolves next to main.tex; --output-directory
+    # keeps the .bcf read and the .bbl write inside build/.
+    & biber "--output-directory=$Build" 'main'
     if ($LASTEXITCODE -ne 0) {
-        throw "bibtex failed with exit code $LASTEXITCODE."
+        throw "biber failed with exit code $LASTEXITCODE."
     }
 
     Invoke-PdfLaTeX
     Invoke-PdfLaTeX
 }
 finally {
-    $env:BIBINPUTS = $PreviousBibInputs
     Pop-Location
 }
 

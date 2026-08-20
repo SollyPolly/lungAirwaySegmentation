@@ -1,0 +1,111 @@
+#!/bin/bash
+#PBS -N nnLCSup260Prep
+#PBS -l select=1:ncpus=6:mem=96gb
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -o /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation/logs/nnLCSup260Prep.out
+
+set -euo pipefail
+
+PROJECT=/rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation
+cd "$PROJECT"
+
+module load miniforge/3
+source "$HOME/miniforge3/etc/profile.d/conda.sh"
+conda activate ctfm
+
+export nnUNet_raw="$PROJECT/data/nnunet/nnUNet_raw"
+export nnUNet_preprocessed="$PROJECT/data/nnunet/nnUNet_preprocessed"
+export nnUNet_results="$PROJECT/data/nnunet/nnUNet_results"
+
+SOURCE_DATASET="$nnUNet_raw/Dataset126_ATM22MT240LungCrop"
+RAW_DATASET="$nnUNet_raw/Dataset127_ATM22SUP260LungCrop"
+PREPROCESSED_DATASET="$nnUNet_preprocessed/Dataset127_ATM22SUP260LungCrop"
+
+# Set this above the worst per-case value the builder's preflight reports if the
+# frozen lung ROI clips a little trachea on some of the 240. Leave it at 0 the
+# first time so the report is seen before any tolerance is granted.
+MAX_LOST_FOREGROUND_FRACTION=${MAX_LOST_FOREGROUND_FRACTION:-0}
+
+test -f "$SOURCE_DATASET/dataset.json" || {
+    echo "Missing source Dataset126 raw dataset: $SOURCE_DATASET"
+    exit 1
+}
+
+python -c "
+import json
+from pathlib import Path
+folds = json.loads(Path('$SOURCE_DATASET/splits_final.json').read_text())
+assert len(folds) == 5, f'Dataset126 raw splits_final.json has {len(folds)} folds, not 5'
+print('Dataset126 five-fold source split OK')
+"
+
+test ! -e "$RAW_DATASET" || {
+    echo "Dataset127 raw directory already exists: $RAW_DATASET"
+    echo "Move an incomplete build aside, or skip preparation if it already completed."
+    exit 1
+}
+
+test ! -e "$PREPROCESSED_DATASET" || {
+    echo "Dataset127 preprocessed directory already exists: $PREPROCESSED_DATASET"
+    echo "Move an incomplete build aside, or skip preparation if it already completed."
+    exit 1
+}
+
+python -u -m scripts.build_lungcrop_supervised260_nnunet \
+    --nnunet-raw "$nnUNet_raw" \
+    --max-lost-foreground-fraction "$MAX_LOST_FOREGROUND_FRACTION"
+
+nnUNetv2_extract_fingerprint -d 127 -np 6
+
+cp "$RAW_DATASET/dataset.json" "$PREPROCESSED_DATASET/dataset.json"
+
+# Plans come from Dataset123, so Dataset127 inherits the same Dataset111 spacing,
+# patch size, batch size and CTNormalization as every other rung of the label
+# curve. Only the labelled pool is allowed to vary across the curve.
+nnUNetv2_move_plans_between_datasets \
+    -s 123 \
+    -t 127 \
+    -sp nnUNetPlans \
+    -tp nnUNetPlans
+
+nnUNetv2_preprocess \
+    -d 127 \
+    -plans_name nnUNetPlans \
+    -c 3d_fullres \
+    -np 6
+
+cp "$RAW_DATASET/splits_final.json" "$PREPROCESSED_DATASET/splits_final.json"
+cp "$RAW_DATASET/label_provenance.json" "$PREPROCESSED_DATASET/label_provenance.json"
+cp "$RAW_DATASET/lung_crop_manifest.json" "$PREPROCESSED_DATASET/lung_crop_manifest.json"
+
+test -d "$PREPROCESSED_DATASET/nnUNetPlans_3d_fullres" || {
+    echo "Dataset127 preprocessing did not produce nnUNetPlans_3d_fullres"
+    exit 1
+}
+
+python -c "
+import json
+from pathlib import Path
+source = json.loads(Path('$nnUNet_preprocessed/Dataset123_ATM22L20LungCrop/nnUNetPlans.json').read_text())
+target = json.loads(Path('$PREPROCESSED_DATASET/nnUNetPlans.json').read_text())
+a = source['configurations']['3d_fullres']
+b = target['configurations']['3d_fullres']
+for field in ('spacing', 'patch_size', 'batch_size', 'normalization_schemes'):
+    assert a[field] == b[field], f'{field} differs: {a[field]} vs {b[field]}'
+print('Dataset127 3d_fullres plans match Dataset123:', b['spacing'], b['patch_size'], b['batch_size'])
+
+labels = json.loads(Path('$PREPROCESSED_DATASET/dataset.json').read_text())['labels']
+assert labels == {'background': 0, 'airway': 1}, labels
+folds = json.loads(Path('$PREPROCESSED_DATASET/splits_final.json').read_text())
+assert len(folds) == 5
+for index, fold in enumerate(folds):
+    assert len(fold['train']) == 256 and len(fold['val']) == 4, index
+mt = json.loads(Path('$nnUNet_preprocessed/Dataset126_ATM22MT240LungCrop/splits_final.json').read_text())
+for index, (sup, semi) in enumerate(zip(folds, mt)):
+    assert set(sup['train']) == set(semi['train']), index
+    assert set(sup['val']) == set(semi['val']), index
+print('Dataset127 folds are paired fold-for-fold with Dataset126')
+"
+
+echo "Dataset127 ready: five folds of 256 labelled train / 4 GT validation, paired with Dataset126"

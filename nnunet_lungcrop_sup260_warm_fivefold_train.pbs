@@ -1,0 +1,131 @@
+#!/bin/bash
+#PBS -N nnLCSup260W5F
+#PBS -J 0-4
+#PBS -l select=1:ncpus=6:mem=64gb:ngpus=1
+#PBS -l walltime=15:00:00
+#PBS -j oe
+#PBS -o /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation/logs/nnLCSup260W5F.o^array_index^
+
+# Supervised 260-label ceiling on the SAME continuation envelope as MT240:
+# warm-started from the fold-matched Dataset123 @20 seed, then 500 epochs at
+# LR 1e-3 over all 260 cases with their real labels. Same one-GT/one-secondary
+# batch, same strong intensity view from epoch 5, same EMA deployed in
+# checkpoint_final.
+#
+# This is the SCHEDULE-MATCHED ceiling, so (MT - control) / (oracle - control)
+# is the fraction of the label gap consistency recovers with everything else
+# held fixed. It is NOT the same arm as nnunet_lungcrop_sup260_fivefold_train.pbs,
+# which is the from-scratch 1000-epoch "best supervised model at 260 labels"
+# rung of the label curve. Both use Dataset127; they differ in trainer only.
+#
+# Resume is checkpoint-safe via the inherited .mt sidecar. A walltime kill banks
+# progress, so re-qsub the array: finished folds exit in seconds.
+
+set -euo pipefail
+
+PROJECT=/rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation
+cd "$PROJECT"
+
+module load miniforge/3
+source "$HOME/miniforge3/etc/profile.d/conda.sh"
+conda activate ctfm
+
+export nnUNet_raw="$PROJECT/data/nnunet/nnUNet_raw"
+export nnUNet_preprocessed="$PROJECT/data/nnunet/nnUNet_preprocessed"
+export nnUNet_results="$PROJECT/data/nnunet/nnUNet_results"
+export TORCH_HOME="$HOME/.torchcache"
+export nnUNet_n_proc_DA=4
+
+FOLD="$PBS_ARRAY_INDEX"
+SEED_TRAINER=nnUNetTrainer_NoDeepSupervision_NoMirroring
+TRAINER=nnUNetTrainer_OracleGT_WarmStart_TwoStream_NoDeepSupervision_NoMirroring
+SEED_CHECKPOINT="$nnUNet_results/Dataset123_ATM22L20LungCrop/${SEED_TRAINER}__nnUNetPlans__3d_fullres/fold_${FOLD}/checkpoint_final.pth"
+RESULT_DIR="$nnUNet_results/Dataset127_ATM22SUP260LungCrop/${TRAINER}__nnUNetPlans__3d_fullres/fold_${FOLD}"
+
+NNUNET_PACKAGE=$(python -c 'from pathlib import Path; import nnunetv2; print(Path(nnunetv2.__file__).resolve().parent)')
+TRAINER_DIR="$NNUNET_PACKAGE/training/nnUNetTrainer/variants/network_architecture"
+test -d "$TRAINER_DIR" || {
+    echo "Cannot find nnU-Net trainer directory: $TRAINER_DIR"
+    exit 1
+}
+
+for TRAINER_FILE in \
+    nnUNetTrainer_NoDeepSupervision_NoMirroring.py \
+    nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring.py \
+    nnUNetTrainer_MeanTeacher_TwoStream_NoDeepSupervision_NoMirroring.py
+do
+    test -f "$PROJECT/nnunet_trainers/$TRAINER_FILE" || {
+        echo "Missing repository trainer: $PROJECT/nnunet_trainers/$TRAINER_FILE"
+        exit 1
+    }
+    ln -sfn "$PROJECT/nnunet_trainers/$TRAINER_FILE" "$TRAINER_DIR/$TRAINER_FILE"
+done
+
+# The trainer is discovered by name, so a stale symlink is a silent wrong-arm
+# risk. Fail here rather than at construction time.
+python -c "
+from nnunetv2.utilities.find_class_by_name import recursive_find_python_class
+import nnunetv2, os
+found = recursive_find_python_class(
+    os.path.join(os.path.dirname(nnunetv2.__file__), 'training', 'nnUNetTrainer'),
+    '$TRAINER',
+    'nnunetv2.training.nnUNetTrainer',
+)
+assert found is not None, 'nnU-Net cannot discover $TRAINER'
+print('trainer discovery OK:', found.__name__)
+print('  contract key      :', found.experiment_contract_key)
+print('  secondary stream  :', found.secondary_provenance)
+"
+
+python -c "
+import json
+from pathlib import Path
+root = Path('$nnUNet_preprocessed')
+base = root / 'Dataset127_ATM22SUP260LungCrop'
+folds = json.loads((base / 'splits_final.json').read_text())
+assert len(folds) == 5, f'Expected five Dataset127 folds, got {len(folds)}'
+fold = folds[$FOLD]
+assert len(fold['train']) == 256 and len(fold['val']) == 4, (len(fold['train']), len(fold['val']))
+
+dataset = json.loads((base / 'dataset.json').read_text())
+assert dataset['labels'] == {'background': 0, 'airway': 1}, dataset['labels']
+contract = dataset['supervised_ceiling']
+provenance = {k: v for k, v in contract['case_provenance'].items()}
+gt = [k for k in fold['train'] if provenance[k] == 'gt']
+oracle = [k for k in fold['train'] if provenance[k] == 'oracle_gt']
+assert (len(gt), len(oracle)) == (16, 240), (len(gt), len(oracle))
+assert all(provenance[k] == 'gt' for k in fold['val']), 'validation must be real GT only'
+
+mt = json.loads((root / 'Dataset126_ATM22MT240LungCrop' / 'splits_final.json').read_text())[$FOLD]
+assert set(fold['train']) == set(mt['train']), 'fold $FOLD train differs from MT240'
+assert set(fold['val']) == set(mt['val']), 'fold $FOLD val differs from MT240'
+print('Dataset127 fold $FOLD preflight OK: 16 GT + 240 oracle train, val', fold['val'])
+"
+
+test -f "$SEED_CHECKPOINT" || {
+    echo "Missing fold-matched Dataset123 seed checkpoint: $SEED_CHECKPOINT"
+    exit 1
+}
+
+if test -f "$RESULT_DIR/checkpoint_final.pth"; then
+    echo "Dataset127 warm-start fold $FOLD is already complete"
+    exit 0
+fi
+
+if test -f "$RESULT_DIR/checkpoint_latest.pth"; then
+    test -f "$RESULT_DIR/checkpoint_latest.pth.mt" || {
+        echo "Cannot resume fold $FOLD: checkpoint_latest.pth.mt is missing"
+        exit 1
+    }
+    nnUNetv2_train 127 3d_fullres "$FOLD" \
+        -tr "$TRAINER" \
+        -p nnUNetPlans \
+        --c
+else
+    nnUNetv2_train 127 3d_fullres "$FOLD" \
+        -tr "$TRAINER" \
+        -p nnUNetPlans \
+        -pretrained_weights "$SEED_CHECKPOINT"
+fi
+
+echo "Dataset127 warm-start SUP260 fold $FOLD completed"

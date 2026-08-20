@@ -5,7 +5,7 @@ dissertation explainer.  First export the *continuous* foreground probabilities
 from one EMA-teacher checkpoint with nnU-Net's ``--save_probabilities`` flag.
 Then run, from the repository root::
 
-    .venv\Scripts\python.exe scripts\generate_cldice_real_airway_patch.py
+    .venv\Scripts\python.exe dissertation\scripts\generate_cldice_real_airway_patch.py
 
 The morphology is evaluated in 3-D with the exact functions imported from the
 Mean-Teacher trainer.  A larger computation crop provides more than the ten-voxel
@@ -33,9 +33,10 @@ import numpy as np
 from skimage.morphology import skeletonize
 import torch
 
-# Running a file from ``scripts/`` puts that directory, rather than the repository
-# root, on sys.path. Add the root so the canonical trainer implementation imports.
-ROOT = Path(__file__).resolve().parents[1]
+# Running a file from ``dissertation/scripts/`` puts that directory, rather than the
+# repository root, on sys.path. Add the root so the canonical trainer implementation
+# imports.
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
