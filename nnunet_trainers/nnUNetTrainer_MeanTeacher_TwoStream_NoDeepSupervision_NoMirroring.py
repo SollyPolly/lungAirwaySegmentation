@@ -477,11 +477,6 @@ class nnUNetTrainer_OfflinePseudo_WarmStart_TwoStream_NoDeepSupervision_NoMirror
     secondary_stream_name = "pseudo"
     secondary_loss_scope = "supervised_scope=gt-plus-fixed-pseudo"
     requires_ignore_label = False
-    # Subclasses that reuse this envelope with a different secondary target
-    # relabel the log lines through these, so a training log never claims a
-    # target source the arm does not have.
-    arm_log_tag = "OfflinePseudo"
-    secondary_target_description = "fixed Dataset123 argmax targets"
 
     def __init__(
         self,
@@ -501,9 +496,8 @@ class nnUNetTrainer_OfflinePseudo_WarmStart_TwoStream_NoDeepSupervision_NoMirror
     def on_train_start(self) -> None:
         super().on_train_start()
         self.print_to_log_file(
-            f"[{self.arm_log_tag}] {self.secondary_target_description}; no online teacher "
-            f"forward; Dice+CE stream weights GT=1.0 "
-            f"{self.secondary_stream_name}={self.pseudo_loss_weight}; "
+            "[OfflinePseudo] fixed Dataset123 argmax targets; no online teacher forward; "
+            f"Dice+CE stream weights GT=1.0 pseudo={self.pseudo_loss_weight}; "
             f"strong-view start={self.consistency_warmup_epochs}; "
             "EMA is used only for final weight averaging."
         )
@@ -565,56 +559,13 @@ class nnUNetTrainer_OfflinePseudo_WarmStart_TwoStream_NoDeepSupervision_NoMirror
         super().on_train_epoch_end(train_outputs)
         if self._offline_log_n > 0:
             self.print_to_log_file(
-                f"[{self.arm_log_tag}] gt_loss={self._offline_log_gt / self._offline_log_n:.4f} "
-                f"{self.secondary_stream_name}_loss="
-                f"{self._offline_log_pseudo / self._offline_log_n:.4f} "
-                f"{self.secondary_stream_name}_weight={self.pseudo_loss_weight:.2f}"
+                f"[OfflinePseudo] gt_loss={self._offline_log_gt / self._offline_log_n:.4f} "
+                f"pseudo_loss={self._offline_log_pseudo / self._offline_log_n:.4f} "
+                f"pseudo_weight={self.pseudo_loss_weight:.2f}"
             )
         self._offline_log_gt = 0.0
         self._offline_log_pseudo = 0.0
         self._offline_log_n = 0
-
-
-class nnUNetTrainer_OracleGT_WarmStart_TwoStream_NoDeepSupervision_NoMirroring(
-    nnUNetTrainer_OfflinePseudo_WarmStart_TwoStream_NoDeepSupervision_NoMirroring
-):
-    """Supervised label ceiling on the SAME continuation envelope as MT240.
-
-    Dataset127 is Dataset126 with the 240 all-ignore targets replaced by their
-    real ATM'22 annotation, so this arm is the offline-pseudo arm with the
-    pseudo-labels swapped for oracle GT. Everything else is the shared
-    continuation envelope: the same fold-matched Dataset123 seed, the same
-    one-GT/one-secondary batch, the same strong intensity view from epoch 5,
-    500 epochs at LR 1e-3, and the same EMA average deployed in
-    ``checkpoint_final``.
-
-    That makes the four arms differ in exactly one thing -- what the 240 scans
-    contribute to the gradient:
-
-    * control      -- nothing (all-ignore target, no consistency)
-    * MT           -- online clDice consistency against the EMA teacher
-    * offline SSL  -- Dice+CE against fixed seed pseudo-labels
-    * this arm     -- Dice+CE against their real labels
-
-    So ``(MT - control) / (oracle - control)`` is the fraction of the available
-    label gap that consistency recovers, with every other factor held fixed.
-
-    Note what is deliberately NOT changed: the 240 keep the secondary stream's
-    purely random patch sampling, while the 16 GT keep the 50% forced-foreground
-    draw. Real labels on the 240 would justify oversampling their foreground
-    too, but that would change patch statistics against the three arms this one
-    exists to be compared with. The un-handicapped "best supervised model at 260
-    labels" is the separate from-scratch Dataset127 run, which uses stock
-    uniform sampling over all 256 cases.
-    """
-
-    experiment_contract_key = "supervised_ceiling"
-    secondary_provenance = "oracle_gt"
-    secondary_stream_name = "oracle"
-    secondary_loss_scope = "supervised_scope=gt-plus-oracle-gt"
-    requires_ignore_label = False
-    arm_log_tag = "OracleGT"
-    secondary_target_description = "real ATM'22 labels on all 260 cases"
 
 
 class nnUNetTrainer_MeanTeacher_WarmStart_TwoStream_LRMirroring(

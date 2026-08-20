@@ -1,0 +1,36 @@
+{
+  "protocol_version": "mt240_full_state_epoch_seeded_v1",
+  "dataset_id": 126,
+  "configuration": "3d_fullres",
+  "fold": 0,
+  "initial_checkpoint": "Dataset123_ATM22L20LungCrop/nnUNetTrainer_NoDeepSupervision_NoMirroring__nnUNetPlans__3d_fullres/fold_0/checkpoint_final.pth",
+  "initial_checkpoint_sha256": "2f7344a2cdab8d2fa4e43c600a8234f7c73585903df8068d92a25bb6c2e42c5e",
+  "replicates": {
+    "1": 2026082101,
+    "2": 2026082102,
+    "3": 2026082103,
+    "4": 2026082104,
+    "5": 2026082105
+  },
+  "required_complete_pairs": 3,
+  "target_complete_pairs": 5,
+  "completion_cutoff": "2026-09-04",
+  "arms": {
+    "control": "nnUNetTrainer_MT240Paired_Control_NoDeepSupervision_NoMirroring",
+    "softcldice_w010": "nnUNetTrainer_MT240Paired_SoftCLDiceW010_NoDeepSupervision_NoMirroring",
+    "plainmse_w010": "nnUNetTrainer_MT240Paired_PlainMSEW010_NoDeepSupervision_NoMirroring"
+  },
+  "primary_cohort": "VAL20",
+  "primary_metrics": [
+    "tld_raw",
+    "branch_detection_raw"
+  ],
+  "secondary_metrics": [
+    "dice_raw",
+    "precision_raw"
+  ],
+  "deployment_checkpoint": "checkpoint_final.pth",
+  "deployment_network": "final_ema_teacher",
+  "tta": false,
+  "pair_inclusion_rule": "include a replicate only when both control and treatment complete; infrastructure failures are resubmitted with the same replicate seed"
+}

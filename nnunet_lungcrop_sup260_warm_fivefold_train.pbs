@@ -6,22 +6,27 @@
 #PBS -j oe
 #PBS -o /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation/logs/nnLCSup260W5F.o^array_index^
 
-# Supervised 260-label ceiling on the SAME continuation envelope as MT240:
+# Schedule-matched 260-label oracle reference on the MT240 continuation envelope:
 # warm-started from the fold-matched Dataset123 @20 seed, then 500 epochs at
 # LR 1e-3 over all 260 cases with their real labels. Same one-GT/one-secondary
 # batch, same strong intensity view from epoch 5, same EMA deployed in
 # checkpoint_final.
 #
-# This is the SCHEDULE-MATCHED ceiling, so (MT - control) / (oracle - control)
-# is the fraction of the label gap consistency recovers with everything else
-# held fixed. It is NOT the same arm as nnunet_lungcrop_sup260_fivefold_train.pbs,
-# which is the from-scratch 1000-epoch "best supervised model at 260 labels"
-# rung of the label curve. Both use Dataset127; they differ in trainer only.
+# The inherited offline envelope averages GT and oracle losses, so this is NOT
+# a literal one-variable fraction of a label gap. It is also distinct from the
+# from-scratch 1000-epoch all-label reference. Do not submit this lower-priority
+# arm until its estimand and GT weighting have been explicitly redesigned.
 #
 # Resume is checkpoint-safe via the inherited .mt sidecar. A walltime kill banks
 # progress, so re-qsub the array: finished folds exit in seconds.
 
 set -euo pipefail
+
+test "${ALLOW_UNMATCHED_ORACLE:-0}" = "1" || {
+    echo "OracleGT warm arm is intentionally deferred: its averaged loss is not a matched label-only contrast."
+    echo "Redesign the estimand first; set ALLOW_UNMATCHED_ORACLE=1 only for a deliberate descriptive run."
+    exit 1
+}
 
 PROJECT=/rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation
 cd "$PROJECT"
@@ -38,6 +43,7 @@ export nnUNet_n_proc_DA=4
 
 FOLD="$PBS_ARRAY_INDEX"
 SEED_TRAINER=nnUNetTrainer_NoDeepSupervision_NoMirroring
+MODULE=nnUNetTrainer_OracleGT_NoDeepSupervision_NoMirroring
 TRAINER=nnUNetTrainer_OracleGT_WarmStart_TwoStream_NoDeepSupervision_NoMirroring
 SEED_CHECKPOINT="$nnUNet_results/Dataset123_ATM22L20LungCrop/${SEED_TRAINER}__nnUNetPlans__3d_fullres/fold_${FOLD}/checkpoint_final.pth"
 RESULT_DIR="$nnUNet_results/Dataset127_ATM22SUP260LungCrop/${TRAINER}__nnUNetPlans__3d_fullres/fold_${FOLD}"
@@ -49,16 +55,45 @@ test -d "$TRAINER_DIR" || {
     exit 1
 }
 
+verify_blob() {
+    local source_file=$1
+    local expected_blob=$2
+    local actual_blob
+    test -f "$source_file" || { echo "Missing source: $source_file"; exit 1; }
+    actual_blob=$(git hash-object "$source_file")
+    test "$actual_blob" = "$expected_blob" || {
+        echo "Refusing OracleGT launch: source changed: $source_file"
+        echo "expected Git blob $expected_blob, found $actual_blob"
+        exit 1
+    }
+}
+
+verify_blob nnunet_trainers/nnUNetTrainer_NoDeepSupervision_NoMirroring.py \
+    23af9756e44a5f63d7e136b2177276c8a9299ae0
+verify_blob nnunet_trainers/nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring.py \
+    1e401b0f421b595d7c579cd062747f63c138ed88
+verify_blob nnunet_trainers/nnUNetTrainer_MeanTeacher_TwoStream_NoDeepSupervision_NoMirroring.py \
+    c80fe415da7823bc491333c4e70fb4ae94d5f8cc
+verify_blob "nnunet_trainers/${MODULE}.py" 9ef259d72649de2f776cab4d2fefcc9e0694e930
+
 for TRAINER_FILE in \
     nnUNetTrainer_NoDeepSupervision_NoMirroring.py \
     nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring.py \
-    nnUNetTrainer_MeanTeacher_TwoStream_NoDeepSupervision_NoMirroring.py
+    nnUNetTrainer_MeanTeacher_TwoStream_NoDeepSupervision_NoMirroring.py \
+    "${MODULE}.py"
 do
     test -f "$PROJECT/nnunet_trainers/$TRAINER_FILE" || {
         echo "Missing repository trainer: $PROJECT/nnunet_trainers/$TRAINER_FILE"
         exit 1
     }
-    ln -sfn "$PROJECT/nnunet_trainers/$TRAINER_FILE" "$TRAINER_DIR/$TRAINER_FILE"
+    if test -e "$TRAINER_DIR/$TRAINER_FILE" || test -L "$TRAINER_DIR/$TRAINER_FILE"; then
+        cmp -s "$PROJECT/nnunet_trainers/$TRAINER_FILE" "$TRAINER_DIR/$TRAINER_FILE" || {
+            echo "Refusing to replace different installed trainer: $TRAINER_DIR/$TRAINER_FILE"
+            exit 1
+        }
+    else
+        ln -s "$PROJECT/nnunet_trainers/$TRAINER_FILE" "$TRAINER_DIR/$TRAINER_FILE"
+    fi
 done
 
 # The trainer is discovered by name, so a stale symlink is a silent wrong-arm

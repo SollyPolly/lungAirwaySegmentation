@@ -1,0 +1,303 @@
+#!/bin/bash
+#PBS -N nnLCSoftW030
+#PBS -l select=1:ncpus=6:mem=64gb:ngpus=1
+#PBS -l walltime=18:00:00
+#PBS -j oe
+#PBS -o /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation/logs/
+
+# Dedicated recovery launcher for the missing w_max=0.30 member of the
+# Dataset126 soft-probability-clDice weight sensitivity analysis.
+#
+# This is deliberately a single PBS job, not an array. It targets the same
+# trainer and result directory as index 2 of the retired 1-2 sweep launcher,
+# so a valid checkpoint from that attempt is resumed and w_max=0.03 is never
+# resubmitted. Against the completed w_max=0.10 arm, the only intended training
+# variable is configured_consistency_max (0.10 -> 0.30).
+
+set -euo pipefail
+umask 027
+
+PROJECT=/rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation
+cd "$PROJECT"
+
+: "${PBS_JOBID:?Submit this launcher with qsub; PBS_JOBID is not set}"
+
+module load miniforge/3
+source "$HOME/miniforge3/etc/profile.d/conda.sh"
+conda activate ctfm
+
+export nnUNet_raw="$PROJECT/data/nnunet/nnUNet_raw"
+export nnUNet_preprocessed="$PROJECT/data/nnunet/nnUNet_preprocessed"
+export nnUNet_results="$PROJECT/data/nnunet/nnUNet_results"
+export TORCH_HOME="$HOME/.torchcache"
+export nnUNet_n_proc_DA=4
+
+DATASET=126
+FOLD=0
+EXPECTED_W=0.30
+SEED_TRAINER=nnUNetTrainer_NoDeepSupervision_NoMirroring
+SOFT_MODULE=nnUNetTrainer_MeanTeacher_SoftCLDice_Diagnostics_NoDeepSupervision_NoMirroring
+MODULE=nnUNetTrainer_MeanTeacher_SoftCLDiceWSweep_Diagnostics_NoDeepSupervision_NoMirroring
+TRAINER=nnUNetTrainer_MeanTeacher_WarmStart_TwoStream_SoftCLDiceW030Diagnostics_NoDeepSupervision_NoMirroring
+PBS_SCRIPT_REL=nnunet_lungcrop_mt240_softcldice_w030_train.pbs
+SEED_CHECKPOINT="$nnUNet_results/Dataset123_ATM22L20LungCrop/${SEED_TRAINER}__nnUNetPlans__3d_fullres/fold_${FOLD}/checkpoint_final.pth"
+EXPECTED_SEED_SHA256=2f7344a2cdab8d2fa4e43c600a8234f7c73585903df8068d92a25bb6c2e42c5e
+RESULT_DIR="$nnUNet_results/Dataset126_ATM22MT240LungCrop/${TRAINER}__nnUNetPlans__3d_fullres/fold_${FOLD}"
+
+command -v flock >/dev/null 2>&1 || {
+    echo "flock is required to prevent duplicate w_max=0.30 jobs"
+    exit 1
+}
+mkdir -p "$PROJECT/logs/nnunet_locks"
+exec 9>"$PROJECT/logs/nnunet_locks/mt240_softcldice_w030_fold0.lock"
+flock -n 9 || {
+    echo "Another w_max=0.30 fold-0 launcher currently holds the run lock"
+    exit 1
+}
+
+NNUNET_PACKAGE=$(python -c 'from pathlib import Path; import nnunetv2; print(Path(nnunetv2.__file__).resolve().parent)')
+TRAINER_DIR="$NNUNET_PACKAGE/training/nnUNetTrainer/variants/network_architecture"
+test -d "$TRAINER_DIR" || {
+    echo "Cannot find nnU-Net trainer directory: $TRAINER_DIR"
+    exit 1
+}
+
+# Bind every training source to both the reviewed Git blob and the checked-out
+# HEAD. This catches local edits as well as a commit that omitted a required
+# file. The dedicated PBS is also required to be committed unchanged.
+verify_tracked_blob() {
+    local source_file=$1
+    local expected_blob=$2
+    local actual_blob
+    local head_blob
+    test -f "$source_file" || {
+        echo "Missing repository source: $source_file"
+        exit 1
+    }
+    git ls-files --error-unmatch "$source_file" >/dev/null 2>&1 || {
+        echo "Refusing launch: source is not tracked by Git: $source_file"
+        exit 1
+    }
+    actual_blob=$(git hash-object "$source_file")
+    head_blob=$(git rev-parse "HEAD:$source_file")
+    test "$actual_blob" = "$expected_blob" && test "$head_blob" = "$expected_blob" || {
+        echo "Refusing launch: reviewed source mismatch: $source_file"
+        echo "expected=$expected_blob working_tree=$actual_blob HEAD=$head_blob"
+        exit 1
+    }
+}
+
+verify_tracked_blob nnunet_trainers/nnUNetTrainer_NoDeepSupervision_NoMirroring.py \
+    23af9756e44a5f63d7e136b2177276c8a9299ae0
+verify_tracked_blob nnunet_trainers/nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring.py \
+    1e401b0f421b595d7c579cd062747f63c138ed88
+verify_tracked_blob nnunet_trainers/nnUNetTrainer_MeanTeacher_TwoStream_NoDeepSupervision_NoMirroring.py \
+    c80fe415da7823bc491333c4e70fb4ae94d5f8cc
+verify_tracked_blob "nnunet_trainers/${SOFT_MODULE}.py" \
+    34131e294f560a5b34d57298cf0ebe7e95eb1af1
+verify_tracked_blob "nnunet_trainers/${MODULE}.py" \
+    9d95f5f49b5acf5404275c27dfee21546462a5c3
+
+git ls-files --error-unmatch "$PBS_SCRIPT_REL" >/dev/null 2>&1 || {
+    echo "Refusing launch: commit $PBS_SCRIPT_REL before qsub"
+    exit 1
+}
+PBS_WORKTREE_BLOB=$(git hash-object "$PBS_SCRIPT_REL")
+PBS_HEAD_BLOB=$(git rev-parse "HEAD:$PBS_SCRIPT_REL")
+test "$PBS_WORKTREE_BLOB" = "$PBS_HEAD_BLOB" || {
+    echo "Refusing launch: $PBS_SCRIPT_REL differs from committed HEAD"
+    echo "working_tree=$PBS_WORKTREE_BLOB HEAD=$PBS_HEAD_BLOB"
+    exit 1
+}
+
+# Never replace a different installed trainer. Existing identical files and
+# symlinks into this checkout are accepted; absent modules are linked once.
+ensure_same_trainer() {
+    local source_file="$PROJECT/nnunet_trainers/$1"
+    local target_file="$TRAINER_DIR/$1"
+    test -f "$source_file" || {
+        echo "Missing repository trainer: $source_file"
+        exit 1
+    }
+    if test -L "$target_file"; then
+        test "$(readlink -f "$target_file")" = "$(readlink -f "$source_file")" || {
+            echo "Refusing to replace different trainer symlink: $target_file"
+            exit 1
+        }
+    elif test -e "$target_file"; then
+        cmp -s "$source_file" "$target_file" || {
+            echo "Refusing to replace different installed trainer: $target_file"
+            exit 1
+        }
+    else
+        ln -s "$source_file" "$target_file"
+    fi
+}
+
+for TRAINER_FILE in \
+    nnUNetTrainer_NoDeepSupervision_NoMirroring.py \
+    nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring.py \
+    nnUNetTrainer_MeanTeacher_TwoStream_NoDeepSupervision_NoMirroring.py \
+    "${SOFT_MODULE}.py" \
+    "${MODULE}.py"
+do
+    ensure_same_trainer "$TRAINER_FILE"
+done
+
+python - <<PY
+import math
+
+from nnunetv2.training.nnUNetTrainer.variants.network_architecture.${SOFT_MODULE} import (
+    nnUNetTrainer_MeanTeacher_WarmStart_TwoStream_SoftCLDiceDiagnostics_NoDeepSupervision_NoMirroring as SoftBase,
+)
+from nnunetv2.training.nnUNetTrainer.variants.network_architecture.${MODULE} import (
+    REFERENCE_CONSISTENCY_MAX,
+    SWEEP_TRAINERS,
+    ${TRAINER} as Trainer,
+)
+
+assert issubclass(Trainer, SoftBase)
+assert SWEEP_TRAINERS[2] is Trainer
+assert Trainer.configured_consistency_max == ${EXPECTED_W}
+assert REFERENCE_CONSISTENCY_MAX == 0.10
+assert math.isclose(
+    Trainer.configured_consistency_max,
+    3 * REFERENCE_CONSISTENCY_MAX,
+    rel_tol=0,
+    abs_tol=1e-12,
+)
+assert Trainer.diagnostic_objective == "soft_probability_cldice_w0p30"
+assert Trainer.enable_soft_probability_consistency is True
+assert Trainer.protocol_exposure == "K1"
+assert Trainer.expected_labelled_per_step == 1
+assert Trainer.expected_unlabelled_per_step == 1
+assert Trainer.expected_local_batch_size == 2
+print(f"Trainer preflight OK: {Trainer.__name__}, w_max={Trainer.configured_consistency_max}")
+PY
+
+test -s "$SEED_CHECKPOINT" || {
+    echo "Missing or empty Dataset123 fold-0 seed checkpoint: $SEED_CHECKPOINT"
+    exit 1
+}
+ACTUAL_SEED_SHA256=$(sha256sum "$SEED_CHECKPOINT" | awk '{print $1}')
+test "$ACTUAL_SEED_SHA256" = "$EXPECTED_SEED_SHA256" || {
+    echo "Refusing launch: Dataset123 seed checkpoint SHA-256 mismatch"
+    echo "expected=$EXPECTED_SEED_SHA256 actual=$ACTUAL_SEED_SHA256"
+    exit 1
+}
+
+test -d "$nnUNet_preprocessed/Dataset126_ATM22MT240LungCrop/nnUNetPlans_3d_fullres" || {
+    echo "Dataset126 preprocessing is missing; do not launch SoftCLDice w_max=0.30"
+    exit 1
+}
+
+# Confirm that Dataset126 fold 0 is the intended 16-GT/240-U continuation of
+# the same Dataset123 fold-0 seed model.
+python - <<'PY'
+import json
+import os
+from pathlib import Path
+
+root = Path(os.environ["nnUNet_preprocessed"])
+seed_root = root / "Dataset123_ATM22L20LungCrop"
+mt_root = root / "Dataset126_ATM22MT240LungCrop"
+seed_splits = json.loads((seed_root / "splits_final.json").read_text())
+mt_splits = json.loads((mt_root / "splits_final.json").read_text())
+dataset = json.loads((mt_root / "dataset.json").read_text())
+provenance = {
+    str(key): str(value).lower()
+    for key, value in dataset["semi_supervised"]["case_provenance"].items()
+}
+seed = seed_splits[0]
+mt = mt_splits[0]
+gt_train = {key for key in mt["train"] if provenance[key] == "gt"}
+u_train = {key for key in mt["train"] if provenance[key] == "ignore"}
+assert list(provenance.values()).count("gt") == 20
+assert list(provenance.values()).count("ignore") == 240
+assert len(gt_train) == 16 and len(u_train) == 240
+assert len(mt["train"]) == 256 and len(mt["val"]) == 4
+assert len(set(mt["train"])) == 256 and len(set(mt["val"])) == 4
+assert not set(mt["train"]) & set(mt["val"])
+assert set(mt["train"]) | set(mt["val"]) == set(provenance)
+assert all(provenance[key] == "gt" for key in mt["val"])
+assert set(seed["train"]) == gt_train
+assert set(seed["val"]) == set(mt["val"])
+print("Dataset contract OK: Dataset126 fold 0 matches Dataset123 (16 GT + 240 U; 4 GT val)")
+PY
+
+mkdir -p "$PROJECT/logs/launch_manifests"
+MANIFEST="$PROJECT/logs/launch_manifests/mt240_softcldice_w030_${PBS_JOBID}.txt"
+{
+    echo "protocol=mt240_softcldice_weight_sensitivity"
+    echo "status=preflight_passed"
+    echo "utc_start=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "pbs_job_id=$PBS_JOBID"
+    echo "pbs_jobname=${PBS_JOBNAME:-unknown}"
+    echo "execution_host=${HOSTNAME:-unknown}"
+    echo "submit_host=${PBS_O_HOST:-unknown}"
+    echo "git_commit=$(git rev-parse HEAD)"
+    echo "pbs_git_blob=$PBS_HEAD_BLOB"
+    echo "dataset=$DATASET"
+    echo "fold=$FOLD"
+    echo "trainer=$TRAINER"
+    echo "consistency_objective=soft_probability_cldice"
+    echo "consistency_max=$EXPECTED_W"
+    echo "seed_checkpoint=$SEED_CHECKPOINT"
+    echo "seed_checkpoint_sha256=$ACTUAL_SEED_SHA256"
+    echo "result_dir=$RESULT_DIR"
+} > "$MANIFEST"
+
+if test -f "$RESULT_DIR/checkpoint_final.pth"; then
+    test -s "$RESULT_DIR/checkpoint_final.pth.mt" || {
+        echo "Final checkpoint exists but its Mean-Teacher sidecar is missing"
+        exit 1
+    }
+    {
+        echo "status=already_complete"
+        echo "student_final_sha256=$(sha256sum "$RESULT_DIR/checkpoint_final.pth" | awk '{print $1}')"
+        echo "teacher_final_sha256=$(sha256sum "$RESULT_DIR/checkpoint_final.pth.mt" | awk '{print $1}')"
+        echo "utc_end=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    } >> "$MANIFEST"
+    echo "SoftCLDice w_max=0.30 fold-0 run is already complete"
+    exit 0
+fi
+
+if test -f "$RESULT_DIR/checkpoint_latest.pth"; then
+    test -s "$RESULT_DIR/checkpoint_latest.pth.mt" || {
+        echo "Cannot resume: checkpoint_latest.pth.mt is missing"
+        exit 1
+    }
+    echo "mode=resume" >> "$MANIFEST"
+    echo "Resuming SoftCLDice w_max=0.30; verify the log reports EMA restoration"
+    nnUNetv2_train "$DATASET" 3d_fullres "$FOLD" \
+        -tr "$TRAINER" \
+        -p nnUNetPlans \
+        --c
+else
+    if test -d "$RESULT_DIR" && test -n "$(find "$RESULT_DIR" -mindepth 1 -print -quit)"; then
+        echo "Refusing a fresh start in non-empty incomplete result directory: $RESULT_DIR"
+        echo "Inspect the failed job's files before deciding whether they are safe to remove."
+        exit 1
+    fi
+    echo "mode=fresh_warm_start" >> "$MANIFEST"
+    nnUNetv2_train "$DATASET" 3d_fullres "$FOLD" \
+        -tr "$TRAINER" \
+        -p nnUNetPlans \
+        -pretrained_weights "$SEED_CHECKPOINT"
+fi
+
+test -s "$RESULT_DIR/checkpoint_final.pth" || {
+    echo "Training returned without checkpoint_final.pth"
+    exit 1
+}
+test -s "$RESULT_DIR/checkpoint_final.pth.mt" || {
+    echo "Training returned without the final Mean-Teacher sidecar"
+    exit 1
+}
+{
+    echo "status=complete"
+    echo "student_final_sha256=$(sha256sum "$RESULT_DIR/checkpoint_final.pth" | awk '{print $1}')"
+    echo "teacher_final_sha256=$(sha256sum "$RESULT_DIR/checkpoint_final.pth.mt" | awk '{print $1}')"
+    echo "utc_end=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+} >> "$MANIFEST"
+echo "Dataset126 SoftCLDice w_max=0.30 fold-0 training completed"
