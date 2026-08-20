@@ -52,6 +52,22 @@ MANIFEST_DIR="$nnUNet_results/paired_launch_manifests"
 MANIFEST="$MANIFEST_DIR/${ARM}.json"
 mkdir -p "$MANIFEST_DIR"
 
+# Ten array members may become eligible together. Keep different
+# arm/replicate pairs independent while refusing an accidental duplicate of
+# the same pair. An advisory lock is released automatically if the job exits
+# or its node fails, so it cannot leave a stale sentinel that blocks resume.
+command -v flock >/dev/null 2>&1 || {
+    echo "flock is required to protect paired result directories"
+    exit 1
+}
+LOCK_DIR="$PROJECT/logs/nnunet_locks"
+mkdir -p "$LOCK_DIR"
+exec 9>"$LOCK_DIR/mt240_paired_${ARM}_rep${REPLICATE}.lock"
+flock -n 9 || {
+    echo "Another job is already running paired arm=$ARM replicate=$REPLICATE"
+    exit 1
+}
+
 NNUNET_PACKAGE=$(python -c 'from pathlib import Path; import nnunetv2; print(Path(nnunetv2.__file__).resolve().parent)')
 TRAINER_DIR="$NNUNET_PACKAGE/training/nnUNetTrainer/variants/network_architecture"
 test -d "$TRAINER_DIR" || { echo "Cannot find nnU-Net trainer directory: $TRAINER_DIR"; exit 1; }
@@ -60,11 +76,17 @@ verify_blob() {
     local source_file=$1
     local expected_blob=$2
     local actual_blob
+    local head_blob
     test -f "$source_file" || { echo "Missing source: $source_file"; exit 1; }
+    git ls-files --error-unmatch "$source_file" >/dev/null 2>&1 || {
+        echo "Refusing paired launch: source is not tracked: $source_file"
+        exit 1
+    }
     actual_blob=$(git hash-object "$source_file")
-    test "$actual_blob" = "$expected_blob" || {
+    head_blob=$(git rev-parse "HEAD:$source_file")
+    test "$actual_blob" = "$expected_blob" && test "$head_blob" = "$expected_blob" || {
         echo "Refusing paired launch: source changed: $source_file"
-        echo "expected Git blob $expected_blob, found $actual_blob"
+        echo "expected=$expected_blob working_tree=$actual_blob HEAD=$head_blob"
         exit 1
     }
 }
@@ -91,8 +113,19 @@ ensure_same_trainer() {
             echo "Refusing to replace different installed trainer: $target_file"
             exit 1
         }
-    else
-        ln -s "$source_file" "$target_file"
+    elif ! ln -s "$source_file" "$target_file" 2>/dev/null; then
+        # Concurrent array members can all observe an absent link before the
+        # first one creates it. Accept the winner only when it installed the
+        # exact reviewed source; otherwise fail closed.
+        if test -e "$target_file" || test -L "$target_file"; then
+            cmp -s "$source_file" "$target_file" || {
+                echo "Concurrent install produced a different trainer: $target_file"
+                exit 1
+            }
+        else
+            echo "Could not install trainer: $target_file"
+            exit 1
+        fi
     fi
 }
 

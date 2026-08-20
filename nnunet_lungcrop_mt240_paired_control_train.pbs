@@ -2,18 +2,20 @@
 #PBS -N nnLCPairCtrl
 #PBS -J 1-5
 #PBS -l select=1:ncpus=6:mem=64gb:ngpus=1
-#PBS -l walltime=18:00:00
+#PBS -l walltime=12:00:00
 #PBS -j oe
 #PBS -o /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation/logs/nnLCPairCtrl.o^array_index^
 
 set -euo pipefail
 PROJECT=/rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation
 cd "$PROJECT"
-EXPECTED_RUNNER_BLOB=f4fb55262c0a9bd85ae1a6aedadad1f5326e903a
+EXPECTED_RUNNER_BLOB=f6c0f06ef88f13946b38d6df27e99bcc0cfdbf8d
 ACTUAL_RUNNER_BLOB=$(git hash-object scripts/run_nnunet_mt240_paired.sh)
-test "$ACTUAL_RUNNER_BLOB" = "$EXPECTED_RUNNER_BLOB" || {
+HEAD_RUNNER_BLOB=$(git rev-parse HEAD:scripts/run_nnunet_mt240_paired.sh)
+test "$ACTUAL_RUNNER_BLOB" = "$EXPECTED_RUNNER_BLOB" && \
+    test "$HEAD_RUNNER_BLOB" = "$EXPECTED_RUNNER_BLOB" || {
     echo "Refusing paired control launch: shared runner changed"
-    echo "expected $EXPECTED_RUNNER_BLOB, found $ACTUAL_RUNNER_BLOB"
+    echo "expected=$EXPECTED_RUNNER_BLOB working_tree=$ACTUAL_RUNNER_BLOB HEAD=$HEAD_RUNNER_BLOB"
     exit 1
 }
 PAIRED_ARM=control bash scripts/run_nnunet_mt240_paired.sh
