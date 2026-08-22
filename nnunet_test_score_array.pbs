@@ -1,0 +1,94 @@
+#!/bin/bash
+#PBS -N nnTestScore
+#PBS -J 0-6
+#PBS -l select=1:ncpus=1:mem=24gb
+#PBS -l walltime=00:45:00
+#PBS -j oe
+#PBS -o /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation/logs/nnTestScore.o^array_index^
+
+# Scores the seven pre-committed arms on the SEALED ATM'22 test split (20 cases).
+# Predictions are produced LOCALLY and uploaded; this job only scores.
+#
+# CPU ONLY, ncpus=1 ON PURPOSE. scripts/evaluate_nnunet_predictions.py has no
+# multiprocessing/Pool/joblib anywhere -- its main loop is a serial `for cid in cases`, and
+# the cost sits in scipy EDT, connected components and skeletonisation, all single-threaded.
+# Asking for more cores would not shorten it by one second and only delays scheduling.
+# The thread vars below stop numpy oversubscribing the single allocated core.
+#
+# Walltime: measured 1.0 min/case locally (three 27-case arms took 27/25/29 min), so 20 cases
+# is ~20 min local. An HPC core runs ~1.3-1.7x slower single-threaded, giving 26-34 min, so a
+# 30 min limit is a coin flip. 45 min is the conservative choice and still backfills instantly.
+#
+# mem=24gb: the comparable MONAI-era distal analyses peaked at 15.85 GB on the same full-grid
+# 512x512x714 distance transforms, so this is ~1.5x measured peak.
+
+set -euo pipefail
+
+PROJECT=/rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation
+cd "$PROJECT"
+
+module load miniforge/3
+source "$HOME/miniforge3/etc/profile.d/conda.sh"
+conda activate ctfm
+
+# Single-core allocation: prevent numpy/BLAS from spawning threads it cannot use.
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+
+# One entry per pre-committed arm; array index selects the arm.
+ARMS=(
+    "Dataset111_test_l110_nods_nomirror_f0"
+    "Dataset123_test_seed_f0"
+    "Dataset126_test_mt240_control_final_teacher"
+    "Dataset126_test_mt240_hard_f0_final_teacher"
+    "Dataset126_test_mt240_hard_5f_final_teacher"
+    "Dataset126_test_mt240_softcldice_final_teacher"
+    "Dataset126_test_mt240_softcldice_asym_final_teacher"
+)
+
+IDX="${PBS_ARRAY_INDEX:-unset}"
+case "$IDX" in
+    0|1|2|3|4|5|6) ;;
+    *) echo "Unexpected array index '$IDX'; this array covers 0-6 only"; exit 1 ;;
+esac
+
+ARM="${ARMS[$IDX]}"
+PRED_DIR="$PROJECT/data/nnunet/predict_out/$ARM"
+OUT_JSON="$PRED_DIR/${ARM}_topology_lcc6.json"
+
+echo "=== index $IDX -> $ARM ==="
+
+test -d "$PRED_DIR" || {
+    echo "Missing prediction directory (upload it first): $PRED_DIR"
+    exit 1
+}
+
+# Fail loudly on a partial upload rather than silently scoring a short cohort.
+N_PRED=$(find "$PRED_DIR" -maxdepth 1 -name 'ATM_*.nii.gz' | wc -l)
+test "$N_PRED" -eq 20 || {
+    echo "Expected 20 predictions in $PRED_DIR, found $N_PRED -- upload incomplete"
+    exit 1
+}
+
+if test -s "$OUT_JSON"; then
+    echo "Already scored: $OUT_JSON"
+    exit 0
+fi
+
+# SEALED TEST. No --data-config: ATM'22 is the scorer default root, unlike AeroPath.
+# RAW is primary and trachea-seeded LCC-6 is the declared sensitivity; both come from
+# this single pass, so neither is selected after the fact.
+python -m scripts.evaluate_nnunet_predictions \
+    --pred-dir "$PRED_DIR" \
+    --split-config configs/nnunet/atm22_split_l20.yaml \
+    --report-split test \
+    --branch \
+    --out "$OUT_JSON"
+
+test -s "$OUT_JSON" || {
+    echo "Scorer returned without writing $OUT_JSON"
+    exit 1
+}
+echo "Sealed-test scoring complete for $ARM"

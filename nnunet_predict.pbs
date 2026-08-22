@@ -1,0 +1,70 @@
+#!/bin/bash
+#PBS -N nnUNetPredict
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1:gpu_type=L40S
+#PBS -l walltime=04:00:00
+#PBS -j oe
+# Edit -o per run to your own log (your workflow); qsub captures it at submission, so:
+# edit -o -> qsub -v SPLIT=val -> edit -o -> qsub -v SPLIT=test ... into separate logs.
+#PBS -o /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation/nnunet_predict.out
+
+set -eo pipefail
+
+PROJ=/rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation
+cd "$PROJ" || exit 1
+
+module load miniforge/3
+source "$HOME/miniforge3/etc/profile.d/conda.sh"
+conda activate ctfm
+
+# nnU-Net v2 needs its data roots exported (the trained model lives under nnUNet_results).
+export nnUNet_raw="$PROJ/data/nnunet/nnUNet_raw"
+export nnUNet_preprocessed="$PROJ/data/nnunet/nnUNet_preprocessed"
+export nnUNet_results="$PROJ/data/nnunet/nnUNet_results"
+
+python -V
+nvidia-smi
+
+# =====================================================================
+# Track A: stock nnU-Net control. Build a predict-input folder from OUR held-out
+# split, then predict with the 5-fold ensemble (native argmax masks). Score
+# separately with nnunet_score.pbs (CPU-only). Selectors (qsub -v VAR=...):
+#   SPLIT=val (default) | test   -- test is FINAL-ONLY (sealed; build/score warn)
+#   DS=111    (default) | 112     -- 111 = 110-case control; 112 = data-matched 20
+#   SPLIT_CONFIG=<yaml>           -- canonical split definition
+#
+#   qsub nnunet_predict.pbs                 # val, Dataset111
+#   qsub -v SPLIT=test nnunet_predict.pbs   # test (final only)
+#   qsub -v DS=112 nnunet_predict.pbs       # data-matched 20-case control (val)
+# =====================================================================
+DS="${DS:-111}"
+SPLIT="${SPLIT:-val}"
+SPLIT_CONFIG="${SPLIT_CONFIG:-configs/nnunet/atm22_split_l20.yaml}"
+IN="data/nnunet/predict_in/${SPLIT}"
+OUT="data/nnunet/predict_out/Dataset${DS}_${SPLIT}"
+
+echo "=== nnU-Net predict: DS=$DS SPLIT=$SPLIT -> $OUT ==="
+
+# --- preflight: refuse to run until ALL 5 folds have finished (checkpoint_final.pth).
+# Globs the dataset dir so it works for DS=111 (ATM22) and DS=112 (ATM22only20).
+DSDIR=$(ls -d "$nnUNet_results"/Dataset${DS}_*/nnUNetTrainer__nnUNetPlans__3d_fullres 2>/dev/null | head -1 || true)
+if [ -z "$DSDIR" ]; then
+  echo "ABORT: no trained model dir under $nnUNet_results for dataset $DS." >&2; exit 1
+fi
+for f in 0 1 2 3 4; do
+  if [ ! -f "$DSDIR/fold_${f}/checkpoint_final.pth" ]; then
+    echo "ABORT: fold $f not finished (no checkpoint_final.pth in $DSDIR/fold_${f})." >&2
+    echo "  Wait for training to complete, or to use best-so-far add '-chk checkpoint_best'" >&2
+    echo "  to the nnUNetv2_predict line below." >&2
+    exit 1
+  fi
+done
+echo "preflight OK: all 5 folds have checkpoint_final.pth in $DSDIR"
+
+# 1) build input from our split's CTs (named ATM_XXX_0000.nii.gz)
+python -u -m scripts.make_nnunet_predict_input \
+  --split-config "$SPLIT_CONFIG" --report-split "$SPLIT" --out-dir "$IN"
+
+# 2) 5-fold ensemble prediction (checkpoint_final; native argmax -> ATM_XXX.nii.gz)
+nnUNetv2_predict -i "$IN" -o "$OUT" -d "$DS" -c 3d_fullres -f 0 1 2 3 4
+
+echo "=== done -> $OUT  (now: qsub -v DS=$DS,SPLIT=$SPLIT nnunet_score.pbs) ==="

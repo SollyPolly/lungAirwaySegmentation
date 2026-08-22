@@ -1,0 +1,36 @@
+#!/bin/bash
+#PBS -N nnUNetScore
+#PBS -l select=1:ncpus=8:mem=64gb
+#PBS -l walltime=02:00:00
+#PBS -j oe
+# CPU-only (no ngpus): the scorer never calls CUDA, it only skeletonises masks.
+# Edit -o per run to your own log.
+#PBS -o /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation/nnunet_score.out
+
+set -eo pipefail
+
+PROJ=/rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation
+cd "$PROJ" || exit 1
+
+module load miniforge/3
+source "$HOME/miniforge3/etc/profile.d/conda.sh"
+conda activate ctfm
+
+python -V
+
+# =====================================================================
+# Score nnU-Net hard masks with topology metrics and trachea-anchored LCC.
+# Run AFTER nnunet_predict.pbs with the SAME DS/SPLIT (the predictions must exist).
+# Selectors mirror the predict job:
+#   qsub -v DS=111,SPLIT=val nnunet_score.pbs
+#   qsub -v DS=111,SPLIT=test nnunet_score.pbs    # final only
+# =====================================================================
+DS="${DS:-111}"
+SPLIT="${SPLIT:-val}"
+SPLIT_CONFIG="${SPLIT_CONFIG:-configs/nnunet/atm22_split_l20.yaml}"
+OUT="data/nnunet/predict_out/Dataset${DS}_${SPLIT}"
+
+echo "=== score nnU-Net: DS=$DS SPLIT=$SPLIT from $OUT ==="
+python -u -m scripts.evaluate_nnunet_predictions \
+  --pred-dir "$OUT" --split-config "$SPLIT_CONFIG" --report-split "$SPLIT" --branch \
+  --out "$OUT/nnunet${DS}_${SPLIT}_topology.json"

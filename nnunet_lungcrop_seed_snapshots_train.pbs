@@ -1,0 +1,226 @@
+#!/bin/bash
+#PBS -N nnLCSeedSnap
+#PBS -l select=1:ncpus=6:mem=64gb:ngpus=1
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -o /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation/logs/nnLCSeedSnap.out
+
+# Dataset123 fold-0 supervised seed, 1000 epochs, RETAINING mid-trajectory
+# checkpoints (epochs 3/5/10/15/25/50/100/250/500/750) for the Mean-Teacher
+# seed-maturity ladder.
+#
+# WALLTIME 12:00 — derived from the three completed Dataset123 runs, measured
+# end to end from their training logs (first to last timestamp, including the
+# ~3 min final validation):
+#     fold 0  9.49 h   (33.0 s/epoch mean, p95 33.3 s)
+#     fold 1 10.75 h   (37.6 s/epoch mean, p95 40.2 s)
+#     fold 2 10.40 h   (36.3 s/epoch mean, p95 38.7 s)
+# Slowest observed 10.75 h; the ten snapshot writes add ~2 s each. 12:00
+# leaves ~1.25 h over the worst observed node and matches the allocation the
+# nnLCSeed5F array already completed all five folds under. Do NOT cut to 11:00:
+# that leaves ~15 min over fold 1's observed time. A walltime kill is
+# recoverable — the resume branch below restarts from checkpoint_latest.pth.
+#
+# WHY RETRAIN AT ALL, given a 1000-epoch fold-0 seed already exists: the early
+# checkpoints do not exist and cannot be recovered. Stock nnU-Net keeps only
+# checkpoint_best and checkpoint_final, so epochs 3-750 of the 2026-07-22 run
+# are gone. This run is the ONLY way to obtain them; it is not a duplicate.
+#
+# It does NOT automatically obsolete the existing seed. cudnn is
+# non-deterministic and nnU-Net seeds nothing, so this is a different draw, and
+# whether the mature rung must be re-run as a fresh MT/Control pair (rather than
+# reusing the existing Delta = +0.0144) is decided by the evidence probe: if
+# this run's checkpoint_final lands inside the 2026-07-22 seed's observed halo
+# band [1.0303, 1.0534], the trajectories agree on the quantity the ladder
+# measures and the existing pair is reusable. Both are probed side by side in
+# nnunet_lungcrop_seed_snapshot_probe.pbs.
+#
+# The existing Dataset123 checkpoint stays untouched and keeps carrying every
+# published result.
+
+set -euo pipefail
+
+PROJECT=/rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation
+cd "$PROJECT"
+
+module load miniforge/3
+source "$HOME/miniforge3/etc/profile.d/conda.sh"
+conda activate ctfm
+
+export nnUNet_raw="$PROJECT/data/nnunet/nnUNet_raw"
+export nnUNet_preprocessed="$PROJECT/data/nnunet/nnUNet_preprocessed"
+export nnUNet_results="$PROJECT/data/nnunet/nnUNet_results"
+export TORCH_HOME="$HOME/.torchcache"
+export nnUNet_n_proc_DA=4
+
+DATASET=123
+FOLD=0
+TRAINER=nnUNetTrainer_Snapshots_NoDeepSupervision_NoMirroring
+RESULT_DIR="$nnUNet_results/Dataset123_ATM22L20LungCrop/${TRAINER}__nnUNetPlans__3d_fullres/fold_${FOLD}"
+
+NNUNET_PACKAGE=$(python -c 'from pathlib import Path; import nnunetv2; print(Path(nnunetv2.__file__).resolve().parent)')
+TRAINER_DIR="$NNUNET_PACKAGE/training/nnUNetTrainer/variants/network_architecture"
+test -d "$TRAINER_DIR" || {
+    echo "Cannot find nnU-Net trainer directory: $TRAINER_DIR"
+    exit 1
+}
+
+# Fail closed if a reviewed trainer changed after this protocol was written.
+verify_parent_blob() {
+    local source_file=$1
+    local expected_blob=$2
+    local actual_blob
+    test -f "$source_file" || {
+        echo "Missing repository trainer source: $source_file"
+        exit 1
+    }
+    actual_blob=$(git hash-object "$source_file")
+    test "$actual_blob" = "$expected_blob" || {
+        echo "Refusing snapshot-seed launch: trainer changed: $source_file"
+        echo "expected Git blob $expected_blob, found $actual_blob"
+        exit 1
+    }
+}
+
+verify_parent_blob nnunet_trainers/nnUNetTrainer_NoDeepSupervision_NoMirroring.py \
+    23af9756e44a5f63d7e136b2177276c8a9299ae0
+verify_parent_blob "nnunet_trainers/${TRAINER}.py" \
+    195aaa90a6433dd58c8e18c50367bb4884bcaaaa
+
+# Never replace a different installed trainer. Existing identical files and
+# symlinks to this checkout are accepted; absent modules are linked once.
+ensure_same_trainer() {
+    local source_file="$PROJECT/nnunet_trainers/$1"
+    local target_file="$TRAINER_DIR/$1"
+    test -f "$source_file" || {
+        echo "Missing repository trainer: $source_file"
+        exit 1
+    }
+    if test -L "$target_file"; then
+        test "$(readlink -f "$target_file")" = "$(readlink -f "$source_file")" || {
+            echo "Refusing to replace different trainer symlink: $target_file"
+            exit 1
+        }
+    elif test -e "$target_file"; then
+        cmp -s "$source_file" "$target_file" || {
+            echo "Refusing to replace different installed trainer: $target_file"
+            exit 1
+        }
+    elif ! ln -s "$source_file" "$target_file" 2>/dev/null; then
+        if test -L "$target_file"; then
+            test "$(readlink -f "$target_file")" = "$(readlink -f "$source_file")" || {
+                echo "Concurrent install produced a different trainer symlink: $target_file"
+                exit 1
+            }
+        elif test -e "$target_file"; then
+            cmp -s "$source_file" "$target_file" || {
+                echo "Concurrent install produced a different trainer file: $target_file"
+                exit 1
+            }
+        else
+            echo "Could not install trainer module: $target_file"
+            exit 1
+        fi
+    fi
+}
+
+for TRAINER_FILE in \
+    nnUNetTrainer_NoDeepSupervision_NoMirroring.py \
+    "${TRAINER}.py"
+do
+    ensure_same_trainer "$TRAINER_FILE"
+done
+
+# Discovery + contract preflight: the snapshot schedule must be exactly what
+# the ladder was designed around, and training must be otherwise unmodified.
+python - <<PY
+from nnunetv2.training.nnUNetTrainer.variants.network_architecture.nnUNetTrainer_NoDeepSupervision_NoMirroring import (
+    nnUNetTrainer_NoDeepSupervision_NoMirroring as Base,
+)
+from nnunetv2.training.nnUNetTrainer.variants.network_architecture.${TRAINER} import (
+    ${TRAINER} as Trainer,
+)
+
+assert issubclass(Trainer, Base)
+assert Trainer.snapshot_epochs == (3, 5, 10, 15, 25, 50, 100, 250, 500, 750), Trainer.snapshot_epochs
+# Training itself must be the parent's: only on_epoch_end/on_train_start are
+# overridden, plus the snapshot helpers.
+overridden = {
+    name for name in vars(Trainer)
+    if not name.startswith("__") and name not in {
+        "snapshot_epochs", "snapshot_filename",
+        "on_epoch_end", "on_train_start",
+        "_validate_snapshot_epochs",
+    }
+}
+assert not overridden, f"snapshot trainer changes more than checkpointing: {overridden}"
+print(f"Snapshot trainer preflight OK: {Trainer.__name__}")
+PY
+
+test -f "$nnUNet_preprocessed/Dataset123_ATM22L20LungCrop/splits_final.json" || {
+    echo "Dataset123 split metadata is missing"
+    exit 1
+}
+
+test -d "$nnUNet_preprocessed/Dataset123_ATM22L20LungCrop/nnUNetPlans_3d_fullres" || {
+    echo "Dataset123 preprocessing is missing; do not launch the snapshot seed"
+    exit 1
+}
+
+# Same 16 GT train / 4 GT val fold-0 split as the seed every published result
+# warm-starts from, so the ladder's mature rung is comparable to it.
+python - <<'PY'
+import json
+import os
+from pathlib import Path
+
+root = Path(os.environ["nnUNet_preprocessed"]) / "Dataset123_ATM22L20LungCrop"
+folds = json.loads((root / "splits_final.json").read_text())
+assert len(folds) == 5, f"Expected five Dataset123 folds, got {len(folds)}"
+fold = folds[0]
+assert len(fold["train"]) == 16, len(fold["train"])
+assert len(fold["val"]) == 4, len(fold["val"])
+assert not set(fold["train"]) & set(fold["val"])
+print("Dataset123 fold-0 split preflight OK:", sorted(fold["val"]))
+PY
+
+if test -f "$RESULT_DIR/checkpoint_final.pth"; then
+    echo "Snapshot seed fold-0 run is already complete"
+    ls -1 "$RESULT_DIR"/checkpoint_snapshot_ep*.pth 2>/dev/null || echo "WARNING: no snapshots present"
+    exit 0
+fi
+
+if test -f "$RESULT_DIR/checkpoint_latest.pth"; then
+    echo "Resuming snapshot seed from checkpoint_latest.pth"
+    nnUNetv2_train "$DATASET" 3d_fullres "$FOLD" \
+        -tr "$TRAINER" \
+        -p nnUNetPlans \
+        --c
+else
+    if test -d "$RESULT_DIR" && test -n "$(find "$RESULT_DIR" -mindepth 1 -print -quit)"; then
+        echo "Refusing a fresh start in non-empty incomplete result directory: $RESULT_DIR"
+        exit 1
+    fi
+    nnUNetv2_train "$DATASET" 3d_fullres "$FOLD" \
+        -tr "$TRAINER" \
+        -p nnUNetPlans
+fi
+
+# A resume that crosses a snapshot epoch writes it then; a resume that starts
+# PAST one cannot. Report rather than fail: the run is still valid, but the
+# ladder loses that rung and the operator needs to know before probing.
+echo "Snapshot inventory:"
+for EPOCH in 0003 0005 0010 0015 0025 0050 0100 0250 0500 0750; do
+    SNAP="$RESULT_DIR/checkpoint_snapshot_ep${EPOCH}.pth"
+    if test -s "$SNAP"; then
+        echo "  present: checkpoint_snapshot_ep${EPOCH}.pth"
+    else
+        echo "  MISSING: checkpoint_snapshot_ep${EPOCH}.pth (resume skipped past it?)"
+    fi
+done
+
+test -s "$RESULT_DIR/checkpoint_final.pth" || {
+    echo "Training returned without a final checkpoint"
+    exit 1
+}
+echo "Dataset123 snapshot seed fold-0 training completed"

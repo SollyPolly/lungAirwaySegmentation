@@ -1,0 +1,272 @@
+#!/bin/bash
+#PBS -N nnLCMT240KSweep
+#PBS -J 1-2
+#PBS -l select=1:ncpus=6:mem=64gb:ngpus=1
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -o /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation/logs/
+
+# Soft-skeleton iteration sweep for the soft-clDice arm.
+# ARRAY JOB: one subjob per cldice_iters. Submit once with `qsub`; PBS creates both.
+#
+#   index 1 -> cldice_iters = 3   (reach ~radius 3; segmental and finer)
+#   (ref)      cldice_iters = 10  == 126_softcl, already trained, deliberately NOT re-run
+#   index 2 -> cldice_iters = 15  (past the measured max GT radius of 13.2; full reach)
+#
+# Everything else is inherited from the reported soft arm, so a difference is
+# attributable to cldice_iters alone. Purpose: 10 entered with the first clDice
+# commit under the rule "set >= the largest expected airway radius in voxels" and
+# was never swept. Iterations are a reach dial over calibre -- structures below
+# threshold contribute exactly zero skeleton mass, and above it the contribution
+# saturates -- so the value sets how much PROXIMAL mass sits in the denominator of
+# both clDice terms. Measured on 18 teacher patches, the distal (radius < 2.5)
+# share of soft-skeleton mass is 0.690 at 3 iterations against 0.456 at 10.
+#
+# Index 2 is dearer than the reference (the skeleton loop runs twice per step at
+# four pooling passes per iteration) and may not finish in 12h. That is safe:
+# each subjob is independently self-resuming, so re-`qsub` the whole array and any
+# subjob whose run already finished exits 0 with "already complete". Subjobs get
+# separate logs because -o names a DIRECTORY: PBS then uses its own default filename,
+# which already carries the job id and subjob index, so subjobs cannot collide and we do
+# not depend on any -o substitution token.
+# NOTE PBS writes the -o file only when a subjob ENDS; for live progress read
+# nnU-Net's own training_log_*.txt inside each result directory. The applied value
+# is echoed there once, as "[KSweep] cldice_iters=N".
+
+set -euo pipefail
+
+PROJECT=/rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation
+cd "$PROJECT"
+
+module load miniforge/3
+source "$HOME/miniforge3/etc/profile.d/conda.sh"
+conda activate ctfm
+
+export nnUNet_raw="$PROJECT/data/nnunet/nnUNet_raw"
+export nnUNet_preprocessed="$PROJECT/data/nnunet/nnUNet_preprocessed"
+export nnUNet_results="$PROJECT/data/nnunet/nnUNet_results"
+export TORCH_HOME="$HOME/.torchcache"
+export nnUNet_n_proc_DA=4
+
+DATASET=126
+FOLD=0
+SEED_TRAINER=nnUNetTrainer_NoDeepSupervision_NoMirroring
+SOFT_MODULE=nnUNetTrainer_MeanTeacher_SoftCLDice_Diagnostics_NoDeepSupervision_NoMirroring
+MODULE=nnUNetTrainer_MeanTeacher_SoftCLDiceKSweep_Diagnostics_NoDeepSupervision_NoMirroring
+
+# Map the array index to its trainer and expected iteration count. Fail loudly on
+# an index this script does not know about, rather than silently training the
+# wrong arm.
+INDEX="${PBS_ARRAY_INDEX:?This is an array job; submit with qsub (PBS sets PBS_ARRAY_INDEX)}"
+case "$INDEX" in
+    1)
+        TRAINER=nnUNetTrainer_MeanTeacher_WarmStart_TwoStream_SoftCLDiceK03Diagnostics_NoDeepSupervision_NoMirroring
+        EXPECTED_K=3
+        ;;
+    2)
+        TRAINER=nnUNetTrainer_MeanTeacher_WarmStart_TwoStream_SoftCLDiceK15Diagnostics_NoDeepSupervision_NoMirroring
+        EXPECTED_K=15
+        ;;
+    *)
+        echo "Unknown array index $INDEX; this sweep defines 1 and 2 only"
+        exit 1
+        ;;
+esac
+
+echo "=== cldice_iters sweep subjob $INDEX: $TRAINER (cldice_iters=$EXPECTED_K) ==="
+
+SEED_CHECKPOINT="$nnUNet_results/Dataset123_ATM22L20LungCrop/${SEED_TRAINER}__nnUNetPlans__3d_fullres/fold_${FOLD}/checkpoint_final.pth"
+RESULT_DIR="$nnUNet_results/Dataset126_ATM22MT240LungCrop/${TRAINER}__nnUNetPlans__3d_fullres/fold_${FOLD}"
+
+NNUNET_PACKAGE=$(python -c 'from pathlib import Path; import nnunetv2; print(Path(nnunetv2.__file__).resolve().parent)')
+TRAINER_DIR="$NNUNET_PACKAGE/training/nnUNetTrainer/variants/network_architecture"
+test -d "$TRAINER_DIR" || {
+    echo "Cannot find nnU-Net trainer directory: $TRAINER_DIR"
+    exit 1
+}
+
+# Fail closed if a shared, already-running parent or this sweep's own module
+# changes after this protocol was reviewed.
+verify_parent_blob() {
+    local source_file=$1
+    local expected_blob=$2
+    local actual_blob
+    test -f "$source_file" || {
+        echo "Missing repository trainer source: $source_file"
+        exit 1
+    }
+    actual_blob=$(git hash-object "$source_file")
+    test "$actual_blob" = "$expected_blob" || {
+        echo "Refusing KSweep launch: trainer changed: $source_file"
+        echo "expected Git blob $expected_blob, found $actual_blob"
+        exit 1
+    }
+}
+
+verify_parent_blob nnunet_trainers/nnUNetTrainer_NoDeepSupervision_NoMirroring.py \
+    23af9756e44a5f63d7e136b2177276c8a9299ae0
+verify_parent_blob nnunet_trainers/nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring.py \
+    1e401b0f421b595d7c579cd062747f63c138ed88
+verify_parent_blob nnunet_trainers/nnUNetTrainer_MeanTeacher_TwoStream_NoDeepSupervision_NoMirroring.py \
+    c80fe415da7823bc491333c4e70fb4ae94d5f8cc
+verify_parent_blob "nnunet_trainers/${SOFT_MODULE}.py" \
+    34131e294f560a5b34d57298cf0ebe7e95eb1af1
+verify_parent_blob "nnunet_trainers/${MODULE}.py" \
+    72765d8f4e7ac0e8205969bfb77b1cb53226197f
+
+# Never replace a different installed trainer. Existing identical files and
+# symlinks to this checkout are accepted; absent modules are linked once. The two
+# subjobs are queued together, but whether they RUN together is the scheduler's
+# decision -- they may overlap, or start hours apart. When they do overlap, the
+# test-then-symlink below is not atomic and can race; the re-check in the ln
+# failure branch is what makes that safe. The window is microseconds, so this
+# path is rarely exercised -- it is insurance, not the expected flow.
+ensure_same_trainer() {
+    local source_file="$PROJECT/nnunet_trainers/$1"
+    local target_file="$TRAINER_DIR/$1"
+    test -f "$source_file" || {
+        echo "Missing repository trainer: $source_file"
+        exit 1
+    }
+    if test -L "$target_file"; then
+        test "$(readlink -f "$target_file")" = "$(readlink -f "$source_file")" || {
+            echo "Refusing to replace different trainer symlink: $target_file"
+            exit 1
+        }
+    elif test -e "$target_file"; then
+        cmp -s "$source_file" "$target_file" || {
+            echo "Refusing to replace different installed trainer: $target_file"
+            exit 1
+        }
+    elif ! ln -s "$source_file" "$target_file" 2>/dev/null; then
+        if test -L "$target_file"; then
+            test "$(readlink -f "$target_file")" = "$(readlink -f "$source_file")" || {
+                echo "Concurrent install produced a different trainer symlink: $target_file"
+                exit 1
+            }
+        elif test -e "$target_file"; then
+            cmp -s "$source_file" "$target_file" || {
+                echo "Concurrent install produced a different trainer file: $target_file"
+                exit 1
+            }
+        else
+            echo "Could not install trainer module: $target_file"
+            exit 1
+        fi
+    fi
+}
+
+for TRAINER_FILE in \
+    nnUNetTrainer_NoDeepSupervision_NoMirroring.py \
+    nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring.py \
+    nnUNetTrainer_MeanTeacher_TwoStream_NoDeepSupervision_NoMirroring.py \
+    "${SOFT_MODULE}.py" \
+    "${MODULE}.py"
+do
+    ensure_same_trainer "$TRAINER_FILE"
+done
+
+python - <<PY
+from nnunetv2.training.nnUNetTrainer.variants.network_architecture.${SOFT_MODULE} import (
+    nnUNetTrainer_MeanTeacher_WarmStart_TwoStream_SoftCLDiceDiagnostics_NoDeepSupervision_NoMirroring as SoftBase,
+)
+from nnunetv2.training.nnUNetTrainer.variants.network_architecture.${MODULE} import (
+    SWEEP_TRAINERS,
+    REFERENCE_CLDICE_ITERS,
+    ${TRAINER} as Trainer,
+)
+
+assert issubclass(Trainer, SoftBase)
+assert SWEEP_TRAINERS[${INDEX}] is Trainer, "array index does not map to the trainer this subjob selected"
+assert Trainer.configured_cldice_iters == ${EXPECTED_K}
+assert Trainer.configured_cldice_iters != REFERENCE_CLDICE_ITERS, "this would re-run the reported arm"
+# Only cldice_iters may differ from the reported soft arm.
+assert Trainer.configured_consistency_max == SoftBase.configured_consistency_max
+assert Trainer.enable_soft_probability_consistency is True
+assert Trainer.protocol_exposure == "K1"
+assert Trainer.expected_labelled_per_step == 1
+assert Trainer.expected_unlabelled_per_step == 1
+assert Trainer.expected_local_batch_size == 2
+print(f"Preflight OK: {Trainer.__name__} cldice_iters={Trainer.configured_cldice_iters}")
+PY
+
+test -s "$SEED_CHECKPOINT" || {
+    echo "Missing or empty Dataset123 fold-0 seed checkpoint: $SEED_CHECKPOINT"
+    exit 1
+}
+
+test -d "$nnUNet_preprocessed/Dataset126_ATM22MT240LungCrop/nnUNetPlans_3d_fullres" || {
+    echo "Dataset126 preprocessing is missing; do not launch the cldice_iters sweep"
+    exit 1
+}
+
+# Confirm that Dataset126 fold 0 has exactly the same 16 optimisation labels
+# and four held-out labels as the Dataset123 checkpoint used to warm-start it.
+python - <<'PY'
+import json
+import os
+from pathlib import Path
+
+root = Path(os.environ["nnUNet_preprocessed"])
+seed_root = root / "Dataset123_ATM22L20LungCrop"
+mt_root = root / "Dataset126_ATM22MT240LungCrop"
+seed_splits = json.loads((seed_root / "splits_final.json").read_text())
+mt_splits = json.loads((mt_root / "splits_final.json").read_text())
+dataset = json.loads((mt_root / "dataset.json").read_text())
+provenance = {
+    str(key): str(value).lower()
+    for key, value in dataset["semi_supervised"]["case_provenance"].items()
+}
+seed = seed_splits[0]
+mt = mt_splits[0]
+gt_train = {key for key in mt["train"] if provenance[key] == "gt"}
+u_train = {key for key in mt["train"] if provenance[key] == "ignore"}
+assert list(provenance.values()).count("gt") == 20
+assert list(provenance.values()).count("ignore") == 240
+assert len(gt_train) == 16 and len(u_train) == 240
+assert len(mt["train"]) == 256 and len(mt["val"]) == 4
+assert len(set(mt["train"])) == 256 and len(set(mt["val"])) == 4
+assert not set(mt["train"]) & set(mt["val"])
+assert set(mt["train"]) | set(mt["val"]) == set(provenance)
+assert all(provenance[key] == "gt" for key in mt["val"])
+assert set(seed["train"]) == gt_train
+assert set(seed["val"]) == set(mt["val"])
+print("Dataset126 fold-0 contract OK: matched Dataset123 16 GT train/4 GT val + 240 U")
+PY
+
+if test -f "$RESULT_DIR/checkpoint_final.pth"; then
+    test -s "$RESULT_DIR/checkpoint_final.pth.mt" || {
+        echo "Subjob $INDEX final checkpoint exists but its Mean-Teacher sidecar is missing"
+        exit 1
+    }
+    echo "Subjob $INDEX (cldice_iters=$EXPECTED_K) is already complete"
+    exit 0
+fi
+
+if test -f "$RESULT_DIR/checkpoint_latest.pth"; then
+    test -s "$RESULT_DIR/checkpoint_latest.pth.mt" || {
+        echo "Cannot resume subjob $INDEX: checkpoint_latest.pth.mt is missing"
+        exit 1
+    }
+    echo "Resuming subjob $INDEX; the log MUST contain"
+    echo "  [MeanTeacher] restored EMA teacher from sidecar (.mt)"
+    nnUNetv2_train "$DATASET" 3d_fullres "$FOLD" \
+        -tr "$TRAINER" \
+        -p nnUNetPlans \
+        --c
+else
+    if test -d "$RESULT_DIR" && test -n "$(find "$RESULT_DIR" -mindepth 1 -print -quit)"; then
+        echo "Refusing a fresh start in non-empty incomplete result directory: $RESULT_DIR"
+        exit 1
+    fi
+    nnUNetv2_train "$DATASET" 3d_fullres "$FOLD" \
+        -tr "$TRAINER" \
+        -p nnUNetPlans \
+        -pretrained_weights "$SEED_CHECKPOINT"
+fi
+
+test -s "$RESULT_DIR/checkpoint_final.pth.mt" || {
+    echo "Training returned without a final Mean-Teacher sidecar"
+    exit 1
+}
+echo "Subjob $INDEX (cldice_iters=$EXPECTED_K) training completed"

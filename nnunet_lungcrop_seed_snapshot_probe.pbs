@@ -1,0 +1,130 @@
+#!/bin/bash
+#PBS -N nnLCSeedProbe
+#PBS -l select=1:ncpus=6:mem=64gb:ngpus=1
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#PBS -o /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation/logs/nnLCSeedProbe.out
+
+# Teacher-evidence probe across the Dataset123 seed snapshots.
+#
+# Answers, BEFORE any paired MT/Control GPU time is spent: does an earlier seed
+# actually carry more sub-threshold evidence? The mature seed sits at halo
+# ratio p>0.1/p>0.5 = 1.0373 (n=190, min 1.0303, max 1.0534) with
+# soft_only_patches <= 0.004. If the early snapshots land in the same place,
+# confidence saturation is immediate and the ladder collapses to fewer rungs.
+#
+# WALLTIME 02:00 — the probe is 250 forward-only steps per checkpoint against
+# ~52.5 s/epoch for a full 250-step MT training epoch (fwd+bwd on two patches
+# plus a teacher forward and two soft skeletons). Forward-only on one patch is
+# cheaper, so budget ~45 s per checkpoint: twelve checkpoints (ten snapshots,
+# this run's final, and the 2026-07-22 seed) plus one-off trainer init, dataset
+# unpack verification and patch caching is ~13 min. 02:00 is ~9x that, which
+# absorbs a cold RDS filesystem or an unpack not already done by a previous
+# Dataset126 run. A job this small backfills immediately, so there is nothing
+# to gain from cutting it finer.
+
+set -euo pipefail
+
+PROJECT=/rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation
+cd "$PROJECT"
+
+module load miniforge/3
+source "$HOME/miniforge3/etc/profile.d/conda.sh"
+conda activate ctfm
+
+export nnUNet_raw="$PROJECT/data/nnunet/nnUNet_raw"
+export nnUNet_preprocessed="$PROJECT/data/nnunet/nnUNet_preprocessed"
+export nnUNet_results="$PROJECT/data/nnunet/nnUNet_results"
+export TORCH_HOME="$HOME/.torchcache"
+export nnUNet_n_proc_DA=4
+
+SEED_TRAINER=nnUNetTrainer_Snapshots_NoDeepSupervision_NoMirroring
+SEED_DIR="$nnUNet_results/Dataset123_ATM22L20LungCrop/${SEED_TRAINER}__nnUNetPlans__3d_fullres/fold_0"
+MATURE_SEED="$nnUNet_results/Dataset123_ATM22L20LungCrop/nnUNetTrainer_NoDeepSupervision_NoMirroring__nnUNetPlans__3d_fullres/fold_0/checkpoint_final.pth"
+OUT_DIR="$PROJECT/runs/mt_diagnostics"
+MODULE=nnUNetTrainer_MeanTeacher_SoftCLDice_Diagnostics_NoDeepSupervision_NoMirroring
+
+NNUNET_PACKAGE=$(python -c 'from pathlib import Path; import nnunetv2; print(Path(nnunetv2.__file__).resolve().parent)')
+TRAINER_DIR="$NNUNET_PACKAGE/training/nnUNetTrainer/variants/network_architecture"
+test -d "$TRAINER_DIR" || {
+    echo "Cannot find nnU-Net trainer directory: $TRAINER_DIR"
+    exit 1
+}
+
+# The probe reuses the diagnostic trainer's OWN statistic code so its numbers
+# stay comparable with the logged runs. Pin every file that feeds that path.
+verify_blob() {
+    local source_file=$1
+    local expected_blob=$2
+    local actual_blob
+    test -f "$source_file" || {
+        echo "Missing repository source: $source_file"
+        exit 1
+    }
+    actual_blob=$(git hash-object "$source_file")
+    test "$actual_blob" = "$expected_blob" || {
+        echo "Refusing probe launch: file changed: $source_file"
+        echo "expected Git blob $expected_blob, found $actual_blob"
+        exit 1
+    }
+}
+
+verify_blob nnunet_trainers/nnUNetTrainer_NoDeepSupervision_NoMirroring.py \
+    23af9756e44a5f63d7e136b2177276c8a9299ae0
+verify_blob nnunet_trainers/nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring.py \
+    1e401b0f421b595d7c579cd062747f63c138ed88
+verify_blob nnunet_trainers/nnUNetTrainer_MeanTeacher_TwoStream_NoDeepSupervision_NoMirroring.py \
+    c80fe415da7823bc491333c4e70fb4ae94d5f8cc
+verify_blob "nnunet_trainers/${MODULE}.py" \
+    34131e294f560a5b34d57298cf0ebe7e95eb1af1
+verify_blob scripts/nnunet_teacher_evidence_probe.py \
+    9c8270f80566f6c3895636ed1a70f264074aadef
+
+for TRAINER_FILE in \
+    nnUNetTrainer_NoDeepSupervision_NoMirroring.py \
+    nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring.py \
+    nnUNetTrainer_MeanTeacher_TwoStream_NoDeepSupervision_NoMirroring.py \
+    "${MODULE}.py"
+do
+    test -e "$TRAINER_DIR/$TRAINER_FILE" || {
+        echo "Trainer not installed in nnU-Net: $TRAINER_FILE"
+        echo "Run one of the Dataset126 training PBS scripts first; they install the symlinks."
+        exit 1
+    }
+done
+
+test -d "$nnUNet_preprocessed/Dataset126_ATM22MT240LungCrop/nnUNetPlans_3d_fullres" || {
+    echo "Dataset126 preprocessing is missing; the probe needs its unlabelled stream"
+    exit 1
+}
+
+# Probe every snapshot that exists, then the mature rung from the SAME
+# trajectory (checkpoint_final of the snapshot run), then the historical
+# 2026-07-22 seed as an external reference point. The last one is a different
+# RNG draw and must not be treated as a ladder rung.
+CHECKPOINTS=()
+for EPOCH in 0003 0005 0010 0015 0025 0050 0100 0250 0500 0750; do
+    SNAP="$SEED_DIR/checkpoint_snapshot_ep${EPOCH}.pth"
+    test -s "$SNAP" && CHECKPOINTS+=("$SNAP")
+done
+test -s "$SEED_DIR/checkpoint_final.pth" && CHECKPOINTS+=("$SEED_DIR/checkpoint_final.pth")
+test -s "$MATURE_SEED" && CHECKPOINTS+=("$MATURE_SEED")
+
+test ${#CHECKPOINTS[@]} -gt 0 || {
+    echo "No checkpoints found to probe. Has nnunet_lungcrop_seed_snapshots_train.pbs run?"
+    exit 1
+}
+
+echo "Probing ${#CHECKPOINTS[@]} checkpoints:"
+printf '  %s\n' "${CHECKPOINTS[@]}"
+
+mkdir -p "$OUT_DIR"
+python scripts/nnunet_teacher_evidence_probe.py \
+    --dataset-id 126 \
+    --fold 0 \
+    --steps 250 \
+    --checkpoint "${CHECKPOINTS[@]}" \
+    --scratch-folder "${TMPDIR:-/tmp}/mt_evidence_probe_$$" \
+    --out "$OUT_DIR/seed_snapshot_evidence.json"
+
+echo "Seed snapshot evidence probe completed -> $OUT_DIR/seed_snapshot_evidence.json"

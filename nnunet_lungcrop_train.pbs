@@ -1,0 +1,78 @@
+#!/bin/bash
+#PBS -N nnLCMTArray
+#PBS -J 1-2
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+#PBS -l walltime=14:00:00
+#PBS -j oe
+#PBS -o /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation/logs/nnLCMTArray.o^array_index^
+
+set -euo pipefail
+
+PROJECT=/rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation
+cd "$PROJECT"
+
+module load miniforge/3
+source "$HOME/miniforge3/etc/profile.d/conda.sh"
+conda activate ctfm
+
+export nnUNet_raw="$PROJECT/data/nnunet/nnUNet_raw"
+export nnUNet_preprocessed="$PROJECT/data/nnunet/nnUNet_preprocessed"
+export nnUNet_results="$PROJECT/data/nnunet/nnUNet_results"
+export TORCH_HOME="$HOME/.torchcache"
+export nnUNet_n_proc_DA=4
+
+SEED_TRAINER=nnUNetTrainer_NoDeepSupervision_NoMirroring
+SEED_CHECKPOINT="$nnUNet_results/Dataset123_ATM22L20LungCrop/${SEED_TRAINER}__nnUNetPlans__3d_fullres/fold_0/checkpoint_final.pth"
+
+case "$PBS_ARRAY_INDEX" in
+    1)
+        RUN=control
+        TRAINER=nnUNetTrainer_MeanTeacher_WarmStart_TwoStream_Control_NoDeepSupervision_NoMirroring
+        ;;
+    2)
+        RUN=mt
+        TRAINER=nnUNetTrainer_MeanTeacher_WarmStart_TwoStream_NoDeepSupervision_NoMirroring
+        ;;
+    *)
+        echo "Invalid array index: $PBS_ARRAY_INDEX"
+        exit 1
+        ;;
+esac
+
+RESULT_DIR="$nnUNet_results/Dataset124_ATM22MTLungCrop/${TRAINER}__nnUNetPlans__3d_fullres/fold_0"
+
+test -f "$SEED_CHECKPOINT" || {
+    echo "Missing seed checkpoint: $SEED_CHECKPOINT"
+    exit 1
+}
+
+test -d "$nnUNet_preprocessed/Dataset124_ATM22MTLungCrop/nnUNetPlans_3d_fullres" || {
+    echo "Dataset124 preprocessing is missing"
+    exit 1
+}
+
+if test -f "$RESULT_DIR/checkpoint_final.pth"; then
+    echo "$RUN is already complete"
+    exit 0
+fi
+
+echo "Starting $RUN"
+
+if test -f "$RESULT_DIR/checkpoint_latest.pth"; then
+    test -f "$RESULT_DIR/checkpoint_latest.pth.mt" || {
+        echo "Cannot resume: checkpoint_latest.pth.mt is missing"
+        exit 1
+    }
+
+    nnUNetv2_train 124 3d_fullres 0 \
+        -tr "$TRAINER" \
+        -p nnUNetPlans \
+        --c
+else
+    nnUNetv2_train 124 3d_fullres 0 \
+        -tr "$TRAINER" \
+        -p nnUNetPlans \
+        -pretrained_weights "$SEED_CHECKPOINT"
+fi
+
+echo "$RUN completed"

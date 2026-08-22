@@ -1,0 +1,233 @@
+#!/bin/bash
+#PBS -N nnLCMTSoft5F
+#PBS -J 1-4
+#PBS -l select=1:ncpus=6:mem=64gb:ngpus=1
+#PBS -l walltime=18:00:00
+#PBS -j oe
+#PBS -o /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation/logs/nnLCMTSoft5F.o^array_index^
+
+# Folds 1-4 of the soft-probability clDice consistency arm, warm-started from the
+# fold-matched Dataset123 seed. Fold 0 already exists and is NOT in this array.
+#
+# Self-resuming: a subjob whose fold already has checkpoint_final.pth exits 0 in about a
+# minute, and one holding checkpoint_latest.pth resumes with --c. To requeue after a
+# walltime kill, re-qsub this whole array; finished folds cost a minute each.
+#
+# Soft fold 0 measured 94.7 s/epoch mean -> ~13.2 h for 500 epochs, and still walled at
+# epoch 441 under a 15 h limit. 18 h gives ~36% headroom without pricing the subjobs out
+# of backfill: PBS schedules long walltime requests behind shorter ones, so asking for 24 h
+# buys queue delay that costs more than the resume it avoids. If a fold still walls, just
+# re-qsub -- it resumes from checkpoint_latest with --c.
+
+set -euo pipefail
+
+PROJECT=/rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation
+cd "$PROJECT"
+
+module load miniforge/3
+source "$HOME/miniforge3/etc/profile.d/conda.sh"
+conda activate ctfm
+
+export nnUNet_raw="$PROJECT/data/nnunet/nnUNet_raw"
+export nnUNet_preprocessed="$PROJECT/data/nnunet/nnUNet_preprocessed"
+export nnUNet_results="$PROJECT/data/nnunet/nnUNet_results"
+export TORCH_HOME="$HOME/.torchcache"
+export nnUNet_n_proc_DA=4
+
+DATASET=126
+FOLD="$PBS_ARRAY_INDEX"
+export FOLD
+SEED_TRAINER=nnUNetTrainer_NoDeepSupervision_NoMirroring
+MODULE=nnUNetTrainer_MeanTeacher_SoftCLDice_Diagnostics_NoDeepSupervision_NoMirroring
+TRAINER=nnUNetTrainer_MeanTeacher_WarmStart_TwoStream_SoftCLDiceDiagnostics_NoDeepSupervision_NoMirroring
+SEED_CHECKPOINT="$nnUNet_results/Dataset123_ATM22L20LungCrop/${SEED_TRAINER}__nnUNetPlans__3d_fullres/fold_${FOLD}/checkpoint_final.pth"
+RESULT_DIR="$nnUNet_results/Dataset126_ATM22MT240LungCrop/${TRAINER}__nnUNetPlans__3d_fullres/fold_${FOLD}"
+
+case "$FOLD" in
+    1|2|3|4) ;;
+    *) echo "Unexpected array index '$FOLD'; this array covers folds 1-4 only"; exit 1 ;;
+esac
+
+NNUNET_PACKAGE=$(python -c 'from pathlib import Path; import nnunetv2; print(Path(nnunetv2.__file__).resolve().parent)')
+TRAINER_DIR="$NNUNET_PACKAGE/training/nnUNetTrainer/variants/network_architecture"
+test -d "$TRAINER_DIR" || {
+    echo "Cannot find nnU-Net trainer directory: $TRAINER_DIR"
+    exit 1
+}
+
+# Fail closed if a shared parent or this isolated diagnostic implementation changed
+# after the fold-0 run was reviewed. Blobs verified identical 2026-08-16.
+verify_parent_blob() {
+    local source_file=$1
+    local expected_blob=$2
+    local actual_blob
+    test -f "$source_file" || {
+        echo "Missing repository trainer source: $source_file"
+        exit 1
+    }
+    actual_blob=$(git hash-object "$source_file")
+    test "$actual_blob" = "$expected_blob" || {
+        echo "Refusing SoftCLDice launch: trainer changed: $source_file"
+        echo "expected Git blob $expected_blob, found $actual_blob"
+        exit 1
+    }
+}
+
+verify_parent_blob nnunet_trainers/nnUNetTrainer_NoDeepSupervision_NoMirroring.py \
+    23af9756e44a5f63d7e136b2177276c8a9299ae0
+verify_parent_blob nnunet_trainers/nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring.py \
+    1e401b0f421b595d7c579cd062747f63c138ed88
+verify_parent_blob nnunet_trainers/nnUNetTrainer_MeanTeacher_TwoStream_NoDeepSupervision_NoMirroring.py \
+    c80fe415da7823bc491333c4e70fb4ae94d5f8cc
+verify_parent_blob "nnunet_trainers/${MODULE}.py" \
+    34131e294f560a5b34d57298cf0ebe7e95eb1af1
+
+# Never replace a different installed trainer. Four subjobs start together and WILL race
+# on these symlinks, so create-then-re-check and accept only the reviewed source.
+ensure_same_trainer() {
+    local source_file="$PROJECT/nnunet_trainers/$1"
+    local target_file="$TRAINER_DIR/$1"
+    test -f "$source_file" || {
+        echo "Missing repository trainer: $source_file"
+        exit 1
+    }
+    if test -L "$target_file"; then
+        test "$(readlink -f "$target_file")" = "$(readlink -f "$source_file")" || {
+            echo "Refusing to replace different trainer symlink: $target_file"
+            exit 1
+        }
+    elif test -e "$target_file"; then
+        cmp -s "$source_file" "$target_file" || {
+            echo "Refusing to replace different installed trainer: $target_file"
+            exit 1
+        }
+    elif ! ln -s "$source_file" "$target_file" 2>/dev/null; then
+        if test -L "$target_file"; then
+            test "$(readlink -f "$target_file")" = "$(readlink -f "$source_file")" || {
+                echo "Concurrent install produced a different trainer symlink: $target_file"
+                exit 1
+            }
+        elif test -e "$target_file"; then
+            cmp -s "$source_file" "$target_file" || {
+                echo "Concurrent install produced a different trainer file: $target_file"
+                exit 1
+            }
+        else
+            echo "Could not install trainer module: $target_file"
+            exit 1
+        fi
+    fi
+}
+
+for TRAINER_FILE in \
+    nnUNetTrainer_NoDeepSupervision_NoMirroring.py \
+    nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring.py \
+    nnUNetTrainer_MeanTeacher_TwoStream_NoDeepSupervision_NoMirroring.py \
+    "${MODULE}.py"
+do
+    ensure_same_trainer "$TRAINER_FILE"
+done
+
+python - <<PY
+from nnunetv2.training.nnUNetTrainer.variants.network_architecture.nnUNetTrainer_MeanTeacher_TwoStream_NoDeepSupervision_NoMirroring import (
+    nnUNetTrainer_MeanTeacher_WarmStart_TwoStream_NoDeepSupervision_NoMirroring as K1Base,
+)
+from nnunetv2.training.nnUNetTrainer.variants.network_architecture.${MODULE} import (
+    ${TRAINER} as Trainer,
+)
+
+assert issubclass(Trainer, K1Base)
+assert Trainer.protocol_exposure == "K1"
+assert Trainer.expected_labelled_per_step == 1
+assert Trainer.expected_unlabelled_per_step == 1
+assert Trainer.expected_local_batch_size == 2
+assert Trainer.diagnostic_objective == "soft_probability_cldice"
+assert Trainer.enable_soft_probability_consistency is True
+assert Trainer.configured_consistency_max == 0.1
+print(f"Trainer discovery/protocol preflight OK: {Trainer.__name__}")
+PY
+
+test -s "$SEED_CHECKPOINT" || {
+    echo "Missing or empty fold-matched Dataset123 seed checkpoint: $SEED_CHECKPOINT"
+    exit 1
+}
+
+test -d "$nnUNet_preprocessed/Dataset126_ATM22MT240LungCrop/nnUNetPlans_3d_fullres" || {
+    echo "Dataset126 preprocessing is missing; do not launch SoftCLDice"
+    exit 1
+}
+
+# Same contract the fold-0 run enforced, parameterised by fold: this fold's Dataset126
+# split must carry exactly the 16 GT optimisation labels and 4 held-out GT cases of the
+# Dataset123 checkpoint warm-starting it, over the shared 240-case unlabelled pool.
+python - <<'PY'
+import json
+import os
+from pathlib import Path
+
+fold = int(os.environ["FOLD"])
+root = Path(os.environ["nnUNet_preprocessed"])
+seed_root = root / "Dataset123_ATM22L20LungCrop"
+mt_root = root / "Dataset126_ATM22MT240LungCrop"
+seed_splits = json.loads((seed_root / "splits_final.json").read_text())
+mt_splits = json.loads((mt_root / "splits_final.json").read_text())
+dataset = json.loads((mt_root / "dataset.json").read_text())
+
+assert len(seed_splits) == 5, f"Expected five Dataset123 folds, got {len(seed_splits)}"
+assert len(mt_splits) == 5, f"Expected five Dataset126 folds, got {len(mt_splits)}"
+
+provenance = {
+    str(key): str(value).lower()
+    for key, value in dataset["semi_supervised"]["case_provenance"].items()
+}
+seed = seed_splits[fold]
+mt = mt_splits[fold]
+gt_train = {key for key in mt["train"] if provenance[key] == "gt"}
+u_train = {key for key in mt["train"] if provenance[key] == "ignore"}
+assert list(provenance.values()).count("gt") == 20
+assert list(provenance.values()).count("ignore") == 240
+assert len(gt_train) == 16 and len(u_train) == 240
+assert len(mt["train"]) == 256 and len(mt["val"]) == 4
+assert len(set(mt["train"])) == 256 and len(set(mt["val"])) == 4
+assert not set(mt["train"]) & set(mt["val"])
+assert set(mt["train"]) | set(mt["val"]) == set(provenance)
+assert all(provenance[key] == "gt" for key in mt["val"])
+assert set(seed["train"]) == gt_train
+assert set(seed["val"]) == set(mt["val"])
+print(f"Dataset126 fold-{fold} contract OK: matched Dataset123 16 GT train/4 GT val + 240 U")
+PY
+
+if test -f "$RESULT_DIR/checkpoint_final.pth"; then
+    test -s "$RESULT_DIR/checkpoint_final.pth.mt" || {
+        echo "SoftCLDice fold $FOLD final checkpoint exists but its Mean-Teacher sidecar is missing"
+        exit 1
+    }
+    echo "Dataset126 MT240 SoftCLDice fold $FOLD is already complete"
+    exit 0
+fi
+
+if test -f "$RESULT_DIR/checkpoint_latest.pth"; then
+    test -s "$RESULT_DIR/checkpoint_latest.pth.mt" || {
+        echo "Cannot resume SoftCLDice fold $FOLD: checkpoint_latest.pth.mt is missing"
+        exit 1
+    }
+    nnUNetv2_train "$DATASET" 3d_fullres "$FOLD" \
+        -tr "$TRAINER" \
+        -p nnUNetPlans \
+        --c
+else
+    if test -d "$RESULT_DIR" && test -n "$(find "$RESULT_DIR" -mindepth 1 -print -quit)"; then
+        echo "Refusing a fresh start in non-empty incomplete result directory: $RESULT_DIR"
+        exit 1
+    fi
+    nnUNetv2_train "$DATASET" 3d_fullres "$FOLD" \
+        -tr "$TRAINER" \
+        -p nnUNetPlans \
+        -pretrained_weights "$SEED_CHECKPOINT"
+fi
+
+test -s "$RESULT_DIR/checkpoint_final.pth.mt" || {
+    echo "Training returned without a final Mean-Teacher sidecar"
+    exit 1
+}
+echo "Dataset126 MT240 SoftCLDice fold $FOLD training completed"
