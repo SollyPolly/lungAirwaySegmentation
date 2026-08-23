@@ -1,0 +1,102 @@
+#!/bin/bash
+#PBS -N nnLCSoftWHigh
+#PBS -J 1-2
+#PBS -l select=1:ncpus=6:mem=64gb:ngpus=1
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -o /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation/logs/
+
+# High-weight continuation of the Dataset126 soft-clDice consistency sweep:
+# w_max = 0.50 (index 1) and 1.00 (index 2), fold 0, warm-started from the same
+# Dataset123 fold-0 seed as every other rung.
+#
+# WHY: the swept range is MONOTONE in tree length and branch detection on VAL20
+# (TD 0.9299 -> 0.9398 -> 0.9526 and BD 0.8739 -> 0.8909 -> 0.9142 across
+# w = 0.03 / 0.10 / 0.30, the top rung beating the zero-consistency control on
+# 20/20 cases for both), so it never brackets a turning point and the reported
+# w_max = 0.1 is not the top of the range. These two rungs look for the ceiling.
+#
+# It is defensible to go higher because there is no collapse precursor at 0.30:
+# final internal validation Dice 0.9139 / 0.9051 / 0.9068 across the three rungs,
+# soft_tprec ~0.965 at all three, teacher probability mass flat at ~19-20k. The
+# known teacher collapses at w >= 0.3 belong to the class-balanced voxel-MSE
+# ablation, whose ~100x foreground gradient amplification does not apply to the
+# geometry-normalised clDice term.
+#
+# WATCH on these rungs, since this is where a ceiling would first appear:
+# [MTSoftCLDice] teacher_prob_mass and soft_tprec against the 0.30 run's ~19000
+# and 0.966. Falling probability mass with the student tracking it down is the
+# positive-feedback collapse signature; checkpoint_best_teacher is the insurance.
+# A collapse at w = 1.00 is a reportable result, not a wasted job.
+#
+# WALLTIME 12:00 — the w = 0.30 fold measured 63 s/epoch end to end, so 500
+# epochs is ~8.75 h and this is ~37% headroom. Self-resuming (see below), so a
+# wall costs one qsub rather than the run; do not pad it further, PBS backfill
+# schedules long requests behind shorter ones.
+
+set -euo pipefail
+PROJECT=/rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation
+cd "$PROJECT"
+
+module load miniforge/3
+source "$HOME/miniforge3/etc/profile.d/conda.sh"
+conda activate ctfm
+
+export nnUNet_raw="$PROJECT/data/nnunet/nnUNet_raw"
+export nnUNet_preprocessed="$PROJECT/data/nnunet/nnUNet_preprocessed"
+export nnUNet_results="$PROJECT/data/nnunet/nnUNet_results"
+export TORCH_HOME="$HOME/.torchcache"
+export nnUNet_n_proc_DA=4
+
+case "$PBS_ARRAY_INDEX" in
+    1) TRAINER=nnUNetTrainer_MeanTeacher_WarmStart_TwoStream_SoftCLDiceW050Diagnostics_NoDeepSupervision_NoMirroring ;;
+    2) TRAINER=nnUNetTrainer_MeanTeacher_WarmStart_TwoStream_SoftCLDiceW100Diagnostics_NoDeepSupervision_NoMirroring ;;
+    *) echo "Unexpected array index '$PBS_ARRAY_INDEX'; this array covers 1-2 only"; exit 1 ;;
+esac
+
+RESULT_DIR="$nnUNet_results/Dataset126_ATM22MT240LungCrop/${TRAINER}__nnUNetPlans__3d_fullres/fold_0"
+SEED="$nnUNet_results/Dataset123_ATM22L20LungCrop/nnUNetTrainer_NoDeepSupervision_NoMirroring__nnUNetPlans__3d_fullres/fold_0/checkpoint_final.pth"
+
+test -s "$SEED" || {
+    echo "Missing or empty Dataset123 fold-0 seed checkpoint: $SEED"
+    exit 1
+}
+
+# The trainer module is a separate file from the reviewed w=0.03/0.30 sweep so
+# those completed jobs keep the Git blob their own launch guards pin. Fail here
+# rather than four hours into a queued job if it is not installed.
+python - <<PY
+from nnunetv2.training.nnUNetTrainer.variants.network_architecture.nnUNetTrainer_MeanTeacher_SoftCLDiceWSweepHigh_Diagnostics_NoDeepSupervision_NoMirroring import (
+    ${TRAINER} as Trainer,
+)
+
+expected = {1: 0.50, 2: 1.00}[${PBS_ARRAY_INDEX}]
+assert Trainer.configured_consistency_max == expected, (
+    f"index ${PBS_ARRAY_INDEX} expects w_max={expected}, trainer carries {Trainer.configured_consistency_max}"
+)
+print(f"Preflight OK: {Trainer.__name__} at w_max={Trainer.configured_consistency_max}")
+PY
+
+if test -f "$RESULT_DIR/checkpoint_final.pth"; then
+    echo "$TRAINER fold 0 is already complete"
+    exit 0
+elif test -f "$RESULT_DIR/checkpoint_latest.pth"; then
+    echo "Resuming $TRAINER fold 0 from checkpoint_latest.pth"
+    nnUNetv2_train 126 3d_fullres 0 -tr "$TRAINER" -p nnUNetPlans --c
+else
+    # A node-level CUDA-init failure leaves a log stub in fold_0 that would make
+    # a requeue look like a resumable run. Clear the directory before
+    # resubmitting the single index if that happens.
+    if test -d "$RESULT_DIR" && test -n "$(find "$RESULT_DIR" -mindepth 1 -print -quit)"; then
+        echo "Refusing a fresh start in non-empty incomplete result directory: $RESULT_DIR"
+        echo "Inspect the failed job's files before deciding whether they are safe to remove."
+        exit 1
+    fi
+    nnUNetv2_train 126 3d_fullres 0 -tr "$TRAINER" -p nnUNetPlans -pretrained_weights "$SEED"
+fi
+
+test -s "$RESULT_DIR/checkpoint_final.pth.mt" || {
+    echo "Training returned without a Mean-Teacher sidecar"
+    exit 1
+}
+echo "$TRAINER fold 0 training completed"
