@@ -1,0 +1,269 @@
+#!/bin/bash
+#PBS -N nnLCMT240BalMSE
+#PBS -l select=1:ncpus=6:mem=64gb:ngpus=1
+#PBS -l walltime=10:00:00
+#PBS -j oe
+#PBS -o /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation/logs/nnLCMT240BalMSE.out
+
+# Dataset126 fold-0 K1 class-balanced voxel-MSE Mean-Teacher, w_max = 0.10.
+# The third point of the geometry ladder: plain MSE does NOT escape the
+# starved-signal null, soft-clDice does via geometric rebalancing, and this arm
+# escapes it via COUNT-based rebalancing. It is the only arm that can show the
+# soft-clDice win is about geometry rather than merely about having a
+# consistency term that fires. Full rationale in the trainer module.
+#
+# WALLTIME 10:00 -- from the two completed PlainMSE arms on this exact envelope,
+# measured end to end from their training logs (first to last timestamp,
+# including the final full-volume validation):
+#     PlainMSE w=0.30   7 h 22 m   (2026-08-20 11:31:38 -> 18:53:47)
+#     PlainMSE w=0.10   6 h 56 m   (2026-08-22 11:53:01 -> 18:48:47)
+# "balanced" adds one threshold partition and two masked means per step against
+# "plain", which is negligible beside the forward/backward pass, so the same
+# envelope applies. 10:00 is ~36% over the slower observed run, matching the
+# 35-40% headroom rule. Do NOT pad further: a longer request queues behind
+# shorter ones on backfill, and this script is self-resuming, so a wall costs
+# one qsub rather than a rerun.
+#
+# Self-resuming: re-qsub and it continues from checkpoint_latest.pth with --c.
+
+set -euo pipefail
+
+PROJECT=/rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation
+cd "$PROJECT"
+
+module load miniforge/3
+source "$HOME/miniforge3/etc/profile.d/conda.sh"
+conda activate ctfm
+
+export nnUNet_raw="$PROJECT/data/nnunet/nnUNet_raw"
+export nnUNet_preprocessed="$PROJECT/data/nnunet/nnUNet_preprocessed"
+export nnUNet_results="$PROJECT/data/nnunet/nnUNet_results"
+export TORCH_HOME="$HOME/.torchcache"
+export nnUNet_n_proc_DA=4
+
+DATASET=126
+FOLD=0
+SEED_TRAINER=nnUNetTrainer_NoDeepSupervision_NoMirroring
+MODULE=nnUNetTrainer_MeanTeacher_BalancedMSE_NoDeepSupervision_NoMirroring
+TRAINER=nnUNetTrainer_MeanTeacher_WarmStart_TwoStream_BalancedMSE_NoDeepSupervision_NoMirroring
+EXPECTED_OBJECTIVE=class_balanced_voxel_mse_matched_weight
+EXPECTED_MODE=balanced
+EXPECTED_WMAX=0.1
+EXPECTED_PARTITION=0.5
+SEED_CHECKPOINT="$nnUNet_results/Dataset123_ATM22L20LungCrop/${SEED_TRAINER}__nnUNetPlans__3d_fullres/fold_${FOLD}/checkpoint_final.pth"
+RESULT_DIR="$nnUNet_results/Dataset126_ATM22MT240LungCrop/${TRAINER}__nnUNetPlans__3d_fullres/fold_${FOLD}"
+
+NNUNET_PACKAGE=$(python -c 'from pathlib import Path; import nnunetv2; print(Path(nnunetv2.__file__).resolve().parent)')
+TRAINER_DIR="$NNUNET_PACKAGE/training/nnUNetTrainer/variants/network_architecture"
+test -d "$TRAINER_DIR" || {
+    echo "Cannot find nnU-Net trainer directory: $TRAINER_DIR"
+    exit 1
+}
+
+# Fail closed if a shared, already-running K1 parent or this isolated
+# class-balanced implementation changes after this protocol was reviewed. The
+# three parent hashes are identical to the ones pinned by the SoftCLDice and
+# PlainMSE arms, which is the point: this run must differ from those in the
+# consistency mode alone.
+verify_parent_blob() {
+    local source_file=$1
+    local expected_blob=$2
+    local actual_blob
+    test -f "$source_file" || {
+        echo "Missing repository trainer source: $source_file"
+        exit 1
+    }
+    actual_blob=$(git hash-object "$source_file")
+    test "$actual_blob" = "$expected_blob" || {
+        echo "Refusing BalancedMSE launch: trainer changed: $source_file"
+        echo "expected Git blob $expected_blob, found $actual_blob"
+        exit 1
+    }
+}
+
+verify_parent_blob nnunet_trainers/nnUNetTrainer_NoDeepSupervision_NoMirroring.py \
+    23af9756e44a5f63d7e136b2177276c8a9299ae0
+verify_parent_blob nnunet_trainers/nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring.py \
+    1e401b0f421b595d7c579cd062747f63c138ed88
+verify_parent_blob nnunet_trainers/nnUNetTrainer_MeanTeacher_TwoStream_NoDeepSupervision_NoMirroring.py \
+    c80fe415da7823bc491333c4e70fb4ae94d5f8cc
+verify_parent_blob "nnunet_trainers/${MODULE}.py" \
+    fe9b8da7347c23c532a5a6c99655bf3d5ec2b35f
+
+# Never replace a different installed trainer. Existing identical files and
+# symlinks to this checkout are accepted; absent modules are linked once.
+ensure_same_trainer() {
+    local source_file="$PROJECT/nnunet_trainers/$1"
+    local target_file="$TRAINER_DIR/$1"
+    test -f "$source_file" || {
+        echo "Missing repository trainer: $source_file"
+        exit 1
+    }
+    if test -L "$target_file"; then
+        test "$(readlink -f "$target_file")" = "$(readlink -f "$source_file")" || {
+            echo "Refusing to replace different trainer symlink: $target_file"
+            exit 1
+        }
+    elif test -e "$target_file"; then
+        cmp -s "$source_file" "$target_file" || {
+            echo "Refusing to replace different installed trainer: $target_file"
+            exit 1
+        }
+    elif ! ln -s "$source_file" "$target_file" 2>/dev/null; then
+        # Concurrent MT arms race to create these same parent symlinks.
+        # Accept only the reviewed source.
+        if test -L "$target_file"; then
+            test "$(readlink -f "$target_file")" = "$(readlink -f "$source_file")" || {
+                echo "Concurrent install produced a different trainer symlink: $target_file"
+                exit 1
+            }
+        elif test -e "$target_file"; then
+            cmp -s "$source_file" "$target_file" || {
+                echo "Concurrent install produced a different trainer file: $target_file"
+                exit 1
+            }
+        else
+            echo "Could not install trainer module: $target_file"
+            exit 1
+        fi
+    fi
+}
+
+for TRAINER_FILE in \
+    nnUNetTrainer_NoDeepSupervision_NoMirroring.py \
+    nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring.py \
+    nnUNetTrainer_MeanTeacher_TwoStream_NoDeepSupervision_NoMirroring.py \
+    "${MODULE}.py"
+do
+    ensure_same_trainer "$TRAINER_FILE"
+done
+
+# Discovery + protocol preflight. The operative knobs are pinned as CLASS
+# attributes precisely so they can be asserted here, before any GPU time.
+python - <<PY
+from nnunetv2.training.nnUNetTrainer.variants.network_architecture.nnUNetTrainer_MeanTeacher_TwoStream_NoDeepSupervision_NoMirroring import (
+    nnUNetTrainer_MeanTeacher_WarmStart_TwoStream_NoDeepSupervision_NoMirroring as K1Base,
+)
+from nnunetv2.training.nnUNetTrainer.variants.network_architecture.${MODULE} import (
+    ${TRAINER} as Trainer,
+)
+
+assert issubclass(Trainer, K1Base)
+assert Trainer.protocol_exposure == "K1"
+assert Trainer.expected_labelled_per_step == 1
+assert Trainer.expected_unlabelled_per_step == 1
+assert Trainer.expected_local_batch_size == 2
+assert Trainer.diagnostic_objective == "${EXPECTED_OBJECTIVE}"
+assert Trainer.configured_consistency_mode == "${EXPECTED_MODE}"
+assert Trainer.configured_consistency_max == ${EXPECTED_WMAX}
+assert Trainer.configured_partition_threshold == ${EXPECTED_PARTITION}
+print(f"Trainer discovery/protocol preflight OK: {Trainer.__name__}")
+PY
+
+# The parent must actually implement the mode this arm selects. A silent
+# fallthrough to the balanced_confident default would run a DIFFERENT
+# experiment under this arm name.
+python - <<'PY'
+import inspect
+
+from nnunetv2.training.nnUNetTrainer.variants.network_architecture.nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring import (
+    nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring as Base,
+)
+
+source = inspect.getsource(Base._consistency)
+needle = 'self.consistency_mode == "balanced"'
+assert needle in source, (
+    "the installed MT parent has no balanced branch; this arm would silently "
+    "fall through to balanced_confident"
+)
+print("Consistency-mode preflight OK: parent implements balanced")
+PY
+
+test -s "$SEED_CHECKPOINT" || {
+    echo "Missing or empty Dataset123 fold-0 seed checkpoint: $SEED_CHECKPOINT"
+    exit 1
+}
+
+test -d "$nnUNet_preprocessed/Dataset126_ATM22MT240LungCrop/nnUNetPlans_3d_fullres" || {
+    echo "Dataset126 preprocessing is missing; do not launch BalancedMSE"
+    exit 1
+}
+
+# Confirm that Dataset126 fold 0 has exactly the same 16 optimisation labels
+# and four held-out labels as the Dataset123 checkpoint used to warm-start it.
+python - <<'PY'
+import json
+import os
+from pathlib import Path
+
+root = Path(os.environ["nnUNet_preprocessed"])
+seed_root = root / "Dataset123_ATM22L20LungCrop"
+mt_root = root / "Dataset126_ATM22MT240LungCrop"
+seed_splits = json.loads((seed_root / "splits_final.json").read_text())
+mt_splits = json.loads((mt_root / "splits_final.json").read_text())
+dataset = json.loads((mt_root / "dataset.json").read_text())
+provenance = {
+    str(key): str(value).lower()
+    for key, value in dataset["semi_supervised"]["case_provenance"].items()
+}
+seed = seed_splits[0]
+mt = mt_splits[0]
+gt_train = {key for key in mt["train"] if provenance[key] == "gt"}
+u_train = {key for key in mt["train"] if provenance[key] == "ignore"}
+assert list(provenance.values()).count("gt") == 20
+assert list(provenance.values()).count("ignore") == 240
+assert len(gt_train) == 16 and len(u_train) == 240
+assert len(mt["train"]) == 256 and len(mt["val"]) == 4
+assert len(set(mt["train"])) == 256 and len(set(mt["val"])) == 4
+assert not set(mt["train"]) & set(mt["val"])
+assert set(mt["train"]) | set(mt["val"]) == set(provenance)
+assert all(provenance[key] == "gt" for key in mt["val"])
+assert set(seed["train"]) == gt_train
+assert set(seed["val"]) == set(mt["val"])
+print("Dataset126 fold-0 contract OK: matched Dataset123 16 GT train/4 GT val + 240 U")
+PY
+
+if test -f "$RESULT_DIR/checkpoint_final.pth"; then
+    test -s "$RESULT_DIR/checkpoint_final.pth.mt" || {
+        echo "BalancedMSE final checkpoint exists but its Mean-Teacher sidecar is missing"
+        exit 1
+    }
+    echo "Dataset126 MT240 BalancedMSE fold-0 run is already complete"
+    exit 0
+fi
+
+if test -f "$RESULT_DIR/checkpoint_latest.pth"; then
+    test -s "$RESULT_DIR/checkpoint_latest.pth.mt" || {
+        echo "Cannot resume BalancedMSE: checkpoint_latest.pth.mt is missing"
+        exit 1
+    }
+    nnUNetv2_train "$DATASET" 3d_fullres "$FOLD" \
+        -tr "$TRAINER" \
+        -p nnUNetPlans \
+        --c
+else
+    if test -d "$RESULT_DIR" && test -n "$(find "$RESULT_DIR" -mindepth 1 -print -quit)"; then
+        echo "Refusing a fresh start in non-empty incomplete BalancedMSE result directory: $RESULT_DIR"
+        exit 1
+    fi
+    nnUNetv2_train "$DATASET" 3d_fullres "$FOLD" \
+        -tr "$TRAINER" \
+        -p nnUNetPlans \
+        -pretrained_weights "$SEED_CHECKPOINT"
+fi
+
+test -s "$RESULT_DIR/checkpoint_final.pth.mt" || {
+    echo "Training returned without a final Mean-Teacher sidecar"
+    exit 1
+}
+
+# The collapse question this arm was commissioned to answer. Report, do not
+# fail: a collapse is a reportable outcome, not a broken run.
+LOG=$(ls -t "$RESULT_DIR"/training_log_*.txt | head -1)
+echo "Teacher-health summary (the matched control finished at 0.9100):"
+grep -E 'Mean Validation Dice' "$LOG" | tail -1 || echo "  no final validation line"
+echo "  last consistency line (want a fraction of a few %, not 0.000):"
+grep -E ': \[MeanTeacher\] consistency=' "$LOG" | tail -1 || echo "  none logged"
+echo "  last best-teacher event:"
+grep -E ': \[MeanTeacher\] new best teacher' "$LOG" | tail -1 || echo "  none recorded"
+echo "Dataset126 MT240 BalancedMSE fold-0 training completed"
