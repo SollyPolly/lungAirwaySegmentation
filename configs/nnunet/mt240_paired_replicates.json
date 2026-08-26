@@ -1,5 +1,5 @@
 {
-  "protocol_version": "mt240_full_state_epoch_seeded_v1",
+  "protocol_version": "mt240_full_state_epoch_seeded_v2",
   "dataset_id": 126,
   "configuration": "3d_fullres",
   "fold": 0,

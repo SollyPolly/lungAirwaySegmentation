@@ -28,6 +28,8 @@ from typing import Mapping
 
 import numpy as np
 import torch
+import torch.nn.functional as F
+from nnunetv2.training.loss.robust_ce_loss import RobustCrossEntropyLoss
 from nnunetv2.utilities.default_n_proc_DA import get_allowed_n_proc_DA
 
 if __package__ == "nnunet_trainers":
@@ -48,7 +50,7 @@ else:
     )
 
 
-PAIRED_PROTOCOL_VERSION = "mt240_full_state_epoch_seeded_v1"
+PAIRED_PROTOCOL_VERSION = "mt240_full_state_epoch_seeded_v2"
 EXPECTED_DATASET123_FOLD0_SHA256 = (
     "2f7344a2cdab8d2fa4e43c600a8234f7c73585903df8068d92a25bb6c2e42c5e"
 )
@@ -85,6 +87,50 @@ def state_dict_sha256(state_dict: Mapping[str, torch.Tensor]) -> str:
         digest.update(np.asarray(tensor.shape, dtype=np.int64).tobytes())
         digest.update(tensor.reshape(-1).view(torch.uint8).numpy().tobytes())
     return digest.hexdigest()
+
+
+class DeterministicCrossEntropyLoss(RobustCrossEntropyLoss):
+    """CUDA-safe equivalent of nnU-Net's reduced cross-entropy.
+
+    PyTorch's spatial CUDA NLL implementation has no deterministic kernel when
+    it performs the reduction internally. The elementwise kernel is
+    deterministic, so compute the identical per-voxel losses first and reduce
+    them with ordinary tensor operations. This keeps strict deterministic mode
+    enabled instead of silently weakening the paired protocol with
+    ``warn_only=True``.
+    """
+
+    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        if target.ndim == input.ndim:
+            if target.shape[1] != 1:
+                raise RuntimeError("Cross-entropy target must have one channel")
+            target = target[:, 0]
+        target = target.long()
+        per_voxel = F.cross_entropy(
+            input,
+            target,
+            weight=self.weight,
+            ignore_index=self.ignore_index,
+            reduction="none",
+            label_smoothing=self.label_smoothing,
+        )
+        if self.reduction == "none":
+            return per_voxel
+        if self.reduction == "sum":
+            return per_voxel.sum()
+        if self.reduction != "mean":
+            raise RuntimeError(f"Unsupported cross-entropy reduction: {self.reduction}")
+
+        valid = target != self.ignore_index
+        if self.weight is None:
+            normalizer = valid.sum()
+        else:
+            safe_target = torch.where(valid, target, 0)
+            normalizer = self.weight.gather(0, safe_target.reshape(-1)).reshape_as(target)
+            normalizer = normalizer.masked_select(valid).sum()
+        # Match CrossEntropyLoss: an all-ignore target produces NaN for mean
+        # reduction. DC_and_CE_loss already skips CE in that case.
+        return per_voxel.sum() / normalizer
 
 
 def load_complete_network_state(
@@ -225,6 +271,22 @@ class _PairedReplicateMixin:
             expected_checkpoint_sha256=self.expected_init_checkpoint_sha256,
         )
 
+    def _build_loss(self):
+        loss = super()._build_loss()
+        original = getattr(loss, "ce", None)
+        if not isinstance(original, RobustCrossEntropyLoss):
+            raise RuntimeError(
+                "Paired protocol expected nnU-Net DC_and_CE_loss with "
+                "RobustCrossEntropyLoss"
+            )
+        loss.ce = DeterministicCrossEntropyLoss(
+            weight=original.weight,
+            ignore_index=original.ignore_index,
+            reduction=original.reduction,
+            label_smoothing=original.label_smoothing,
+        )
+        return loss
+
     def on_train_start(self) -> None:
         if get_allowed_n_proc_DA() != 0:
             raise RuntimeError(
@@ -243,7 +305,8 @@ class _PairedReplicateMixin:
             f"init_checkpoint_sha256={self._paired_initial_state['checkpoint_sha256']} "
             f"initial_network_sha256={self._paired_initial_state['network_state_sha256']} "
             f"seg_head_tensors={self._paired_initial_state['segmentation_head_tensor_count']} "
-            "augmentation_workers=0 deterministic_algorithms=true"
+            "augmentation_workers=0 deterministic_algorithms=true "
+            "cross_entropy=deterministic_unreduced_then_mean"
         )
 
     def on_train_epoch_start(self) -> None:

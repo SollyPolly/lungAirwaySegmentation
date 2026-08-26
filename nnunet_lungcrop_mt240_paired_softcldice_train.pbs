@@ -9,7 +9,7 @@
 set -euo pipefail
 PROJECT=/rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation
 cd "$PROJECT"
-EXPECTED_RUNNER_BLOB=f6c0f06ef88f13946b38d6df27e99bcc0cfdbf8d
+EXPECTED_RUNNER_BLOB=1ed44b414f41237143df14ace4b4158348932333
 ACTUAL_RUNNER_BLOB=$(git hash-object scripts/run_nnunet_mt240_paired.sh)
 HEAD_RUNNER_BLOB=$(git rev-parse HEAD:scripts/run_nnunet_mt240_paired.sh)
 test "$ACTUAL_RUNNER_BLOB" = "$EXPECTED_RUNNER_BLOB" && \

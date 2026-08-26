@@ -2,18 +2,20 @@
 #PBS -N nnLCPairMSE
 #PBS -J 1-5
 #PBS -l select=1:ncpus=6:mem=64gb:ngpus=1
-#PBS -l walltime=18:00:00
+#PBS -l walltime=12:00:00
 #PBS -j oe
 #PBS -o /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation/logs/nnLCPairMSE.o^array_index^
 
 set -euo pipefail
 PROJECT=/rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation
 cd "$PROJECT"
-EXPECTED_RUNNER_BLOB=f4fb55262c0a9bd85ae1a6aedadad1f5326e903a
+EXPECTED_RUNNER_BLOB=1ed44b414f41237143df14ace4b4158348932333
 ACTUAL_RUNNER_BLOB=$(git hash-object scripts/run_nnunet_mt240_paired.sh)
-test "$ACTUAL_RUNNER_BLOB" = "$EXPECTED_RUNNER_BLOB" || {
+HEAD_RUNNER_BLOB=$(git rev-parse HEAD:scripts/run_nnunet_mt240_paired.sh)
+test "$ACTUAL_RUNNER_BLOB" = "$EXPECTED_RUNNER_BLOB" && \
+    test "$HEAD_RUNNER_BLOB" = "$EXPECTED_RUNNER_BLOB" || {
     echo "Refusing paired MSE launch: shared runner changed"
-    echo "expected $EXPECTED_RUNNER_BLOB, found $ACTUAL_RUNNER_BLOB"
+    echo "expected=$EXPECTED_RUNNER_BLOB working_tree=$ACTUAL_RUNNER_BLOB HEAD=$HEAD_RUNNER_BLOB"
     exit 1
 }
 PAIRED_ARM=plainmse_w010 bash scripts/run_nnunet_mt240_paired.sh

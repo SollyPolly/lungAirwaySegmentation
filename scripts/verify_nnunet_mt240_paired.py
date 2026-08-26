@@ -18,7 +18,7 @@ import numpy as np
 import torch
 
 
-PROTOCOL_VERSION = "mt240_full_state_epoch_seeded_v1"
+PROTOCOL_VERSION = "mt240_full_state_epoch_seeded_v2"
 REPLICATE_SEEDS = {index: 2026082100 + index for index in range(1, 6)}
 ARM_TRAINERS = {
     "control": "nnUNetTrainer_MT240Paired_Control_NoDeepSupervision_NoMirroring",

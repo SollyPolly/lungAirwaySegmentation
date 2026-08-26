@@ -101,8 +101,8 @@ verify_blob nnunet_trainers/nnUNetTrainer_MeanTeacher_SoftCLDice_Diagnostics_NoD
     34131e294f560a5b34d57298cf0ebe7e95eb1af1
 verify_blob nnunet_trainers/nnUNetTrainer_MeanTeacher_VoxelMSE_NoDeepSupervision_NoMirroring.py \
     ba7071d6473e6eda130bfea4ff39cfda9428bbc4
-verify_blob "nnunet_trainers/${MODULE}.py" 762e5743d9abcedf4cce127dca91bd669935182c
-verify_blob configs/nnunet/mt240_paired_replicates.json 02390640082221e1e54af47ca44dbfa66b9bc6da
+verify_blob "nnunet_trainers/${MODULE}.py" 6b57d7f8c835fb4fec92e97a605cb48dc3c35984
+verify_blob configs/nnunet/mt240_paired_replicates.json efade3659ce973bb4f1cee44488e634a93e0a9f6
 
 ensure_same_trainer() {
     local source_file="$PROJECT/nnunet_trainers/$1"
@@ -152,6 +152,53 @@ test "$ACTUAL_SEED_SHA" = "$EXPECTED_SEED_SHA" || {
 }
 
 export PAIRED_ARM TRAINER RESULT_DIR MANIFEST PROJECT MODULE ACTUAL_SEED_SHA
+
+# Protocol v1 reached epoch 0 but failed before its first optimizer step because
+# PyTorch's reduced CUDA NLL kernel rejects strict deterministic mode. nnU-Net
+# nevertheless populated RESULT_DIR with logs/configuration files, which the
+# normal fresh-start guard correctly treats as unsafe. Permit exactly that
+# known manifest state to be archived (never deleted) before the v2 retry.
+if test -d "$RESULT_DIR" && test -n "$(find "$RESULT_DIR" -mindepth 1 -print -quit)" && \
+        ! test -f "$RESULT_DIR/checkpoint_latest.pth" && \
+        ! test -f "$RESULT_DIR/checkpoint_final.pth"; then
+    if find "$RESULT_DIR" -maxdepth 1 -type f -name 'checkpoint*.pth' -print -quit | grep -q .; then
+        echo "Refusing to archive incomplete result directory containing a checkpoint: $RESULT_DIR"
+        exit 1
+    fi
+    if python - <<'PY'
+import json
+import os
+from pathlib import Path
+
+manifest = Path(os.environ["MANIFEST"])
+if not manifest.is_file():
+    raise SystemExit(1)
+payload = json.loads(manifest.read_text())
+expected = {
+    "status": "launching",
+    "protocol_version": "mt240_full_state_epoch_seeded_v1",
+    "arm": os.environ["PAIRED_ARM"],
+    "replicate": int(os.environ["MT_PAIRED_REPLICATE"]),
+}
+if any(payload.get(key) != value for key, value in expected.items()):
+    raise SystemExit(1)
+if Path(payload.get("result_dir", "")).resolve() != Path(os.environ["RESULT_DIR"]).resolve():
+    raise SystemExit(1)
+PY
+    then
+        FAILED_RESULT_DIR="${RESULT_DIR}.failed_protocol_v1_$(date -u +%Y%m%dT%H%M%SZ)"
+        test ! -e "$FAILED_RESULT_DIR" || {
+            echo "Refusing to overwrite archived failed result: $FAILED_RESULT_DIR"
+            exit 1
+        }
+        mv -- "$RESULT_DIR" "$FAILED_RESULT_DIR"
+        echo "Archived protocol-v1 pre-checkpoint failure to $FAILED_RESULT_DIR"
+    else
+        echo "Refusing fresh start in unrecognized non-empty result directory: $RESULT_DIR"
+        exit 1
+    fi
+fi
+
 python - <<'PY'
 import json
 import os

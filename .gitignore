@@ -20,7 +20,8 @@ learning/
 docs/
 plot_scripts/
 presentation_scripts/
-tests/
+tests/*
+!tests/test_paired_deterministic_cross_entropy.py
 logs/
 
 writeup.md
