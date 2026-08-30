@@ -94,7 +94,7 @@ verify_blob() {
 verify_blob nnunet_trainers/nnUNetTrainer_NoDeepSupervision_NoMirroring.py \
     23af9756e44a5f63d7e136b2177276c8a9299ae0
 verify_blob nnunet_trainers/nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring.py \
-    1e401b0f421b595d7c579cd062747f63c138ed88
+    7d840298c711ca4c6a5e60c1c47f5b63d9370d95
 verify_blob nnunet_trainers/nnUNetTrainer_MeanTeacher_TwoStream_NoDeepSupervision_NoMirroring.py \
     c80fe415da7823bc491333c4e70fb4ae94d5f8cc
 verify_blob nnunet_trainers/nnUNetTrainer_MeanTeacher_SoftCLDice_Diagnostics_NoDeepSupervision_NoMirroring.py \

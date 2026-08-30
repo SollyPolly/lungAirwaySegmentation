@@ -67,15 +67,51 @@ else:  # installed beside this module in the nnU-Net trainer variants directory
 # lung_airway_segmentation/losses/topology.py (soft_erode/soft_open/soft_skeleton/soft_cldice_loss);
 # used for the geometry-aware "cldice" consistency mode. Reference: https://github.com/jocpae/clDice
 # ---------------------------------------------------------------------------------------------------
+def _max3_along(x: torch.Tensor, dim: int) -> torch.Tensor:
+    """Kernel-3, stride-1, pad-1 max along one spatial axis of an NCDHW tensor.
+
+    Numerically identical to ``F.max_pool3d`` with a kernel of 3 along ``dim``
+    and 1 elsewhere, including its implicit ``-inf`` padding, but assembled from
+    elementwise ``torch.maximum`` instead of the pooling kernel.
+
+    WHY. ``max_pool3d_with_indices_backward_cuda`` has no deterministic
+    implementation, so the pooling form raises under
+    ``torch.use_deterministic_algorithms(True)`` as soon as anything
+    backpropagates through the soft skeleton. The paired replicate protocol runs
+    with strict determinism, and the soft-clDice consistency term differentiates
+    through roughly eighty of these per optimizer step. Elementwise maximum has a
+    deterministic backward, so the skeleton becomes differentiable under the
+    protocol without relaxing it to ``warn_only``.
+
+    Forward values are exact: the window is compared with the same real elements
+    and ``-inf`` never wins because a kernel of 3 with a pad of 1 always contains
+    at least two real voxels. Gradient routing differs only on exact ties, where
+    ``torch.maximum`` splits the gradient between equal operands and the pooling
+    kernel sends all of it to one index.
+    """
+    padding = [0] * 6
+    padding[2 * (4 - dim)] = 1
+    padding[2 * (4 - dim) + 1] = 1
+    padded = F.pad(x, padding, value=float("-inf"))
+    length = x.shape[dim]
+    return torch.maximum(
+        torch.maximum(padded.narrow(dim, 0, length), padded.narrow(dim, 1, length)),
+        padded.narrow(dim, 2, length),
+    )
+
+
 def _soft_erode3d(x: torch.Tensor) -> torch.Tensor:
-    d = -F.max_pool3d(-x, (3, 1, 1), 1, (1, 0, 0))
-    h = -F.max_pool3d(-x, (1, 3, 1), 1, (0, 1, 0))
-    w = -F.max_pool3d(-x, (1, 1, 3), 1, (0, 0, 1))
+    d = -_max3_along(-x, 2)
+    h = -_max3_along(-x, 3)
+    w = -_max3_along(-x, 4)
     return torch.minimum(torch.minimum(d, h), w)
 
 
 def _soft_open3d(x: torch.Tensor) -> torch.Tensor:
-    return F.max_pool3d(_soft_erode3d(x), 3, 1, 1)
+    # Max over a 3x3x3 window is separable, so three axis-wise passes reproduce
+    # F.max_pool3d(., 3, 1, 1) exactly while staying deterministic.
+    eroded = _soft_erode3d(x)
+    return _max3_along(_max3_along(_max3_along(eroded, 2), 3), 4)
 
 
 def _soft_skeleton3d(x: torch.Tensor, iterations: int) -> torch.Tensor:
