@@ -1,0 +1,208 @@
+{
+  "generated": "2026-08-24T20:42:14+00:00",
+  "script": "dissertation/scripts/render_qualitative_plate.py",
+  "case_id": "046",
+  "cohort": "val",
+  "patient_selection": {
+    "rule": "explicit",
+    "rank": 16,
+    "cohort_size": 20,
+    "paired_tld_difference": 0.028377942599161488
+  },
+  "region_selection": {
+    "cluster_radius_mm": 18.0,
+    "separation_mm": 32.0,
+    "thin_radius_mm": 2.0,
+    "context_mm": 10.0,
+    "A": {
+      "definition": "densest recovered-centreline neighbourhood",
+      "centre_mm_stored_axes": [
+        266.6015625,
+        202.6171875,
+        250.0
+      ],
+      "count": 35
+    },
+    "B": {
+      "definition": "densest separated thin centreline missed by both arms",
+      "centre_mm_stored_axes": [
+        260.0390625,
+        253.4765625,
+        162.0
+      ],
+      "count": 84
+    }
+  },
+  "recovery_counts": {
+    "Found by both arms": 2564,
+    "Missed by both arms": 329,
+    "Lost by the Mean Teacher": 60,
+    "Recovered by the Mean Teacher": 148,
+    "basis": "centreline",
+    "reference_total": 3101,
+    "implied_delta": 0.02837794259916156
+  },
+  "prediction_dirs": {
+    "control": "Dataset126_val_mt240_control_final_teacher",
+    "soft_f0": "Dataset126_val_mt240_softcldice_final_teacher"
+  },
+  "render": {
+    "whole": {
+      "Reference": {
+        "voxels": 99731,
+        "voxel_retention": 1.0,
+        "components_before": 1,
+        "components_after": 1,
+        "surface_samples": 698973,
+        "samples_without_class": 0
+      },
+      "No consistency": {
+        "voxels": 102436,
+        "voxel_retention": 1.0,
+        "components_before": 23,
+        "components_after": 23,
+        "surface_samples": 728917,
+        "samples_without_class": 0
+      },
+      "Soft-clDice": {
+        "voxels": 103274,
+        "voxel_retention": 1.0,
+        "components_before": 21,
+        "components_after": 21,
+        "surface_samples": 742030,
+        "samples_without_class": 0
+      },
+      "Centreline change": {
+        "voxels": 18663,
+        "voxel_retention": 1.0,
+        "components_before": 1,
+        "components_after": 1,
+        "surface_samples": 459300,
+        "samples_without_class": 0
+      },
+      "frame": {
+        "render_pixels": [
+          1388,
+          1161
+        ],
+        "px_mm_final": 0.32,
+        "supersample": 2,
+        "azimuth_deg": -30.0,
+        "elevation_deg": 10.0,
+        "smooth_mm": 0.25,
+        "taubin_iterations": 16,
+        "splat_radius_px": 2
+      },
+      "annotations": {
+        "A": [
+          419.06113213809823,
+          243.48891843341812,
+          456.23154229434823,
+          320.3432778458093
+        ],
+        "B": [
+          469.25763329528655,
+          518.9583063210605,
+          526.1322910362776,
+          623.9297705241781
+        ]
+      }
+    },
+    "A": {
+      "Reference centreline": {
+        "voxels": 1016,
+        "voxel_retention": 1.0,
+        "components_before": 1,
+        "components_after": 1,
+        "surface_samples": 25739,
+        "samples_without_class": 0
+      },
+      "No consistency coverage": {
+        "voxels": 1659,
+        "voxel_retention": 1.0,
+        "components_before": 1,
+        "components_after": 1,
+        "surface_samples": 33917,
+        "samples_without_class": 0
+      },
+      "Soft-clDice coverage": {
+        "voxels": 1426,
+        "voxel_retention": 1.0,
+        "components_before": 1,
+        "components_after": 1,
+        "surface_samples": 31317,
+        "samples_without_class": 0
+      },
+      "Centreline change": {
+        "voxels": 1428,
+        "voxel_retention": 1.0,
+        "components_before": 1,
+        "components_after": 1,
+        "surface_samples": 30796,
+        "samples_without_class": 0
+      },
+      "frame": {
+        "render_pixels": [
+          755,
+          649
+        ],
+        "px_mm_final": 0.1,
+        "supersample": 2,
+        "azimuth_deg": -30.0,
+        "elevation_deg": 10.0,
+        "smooth_mm": 0.25,
+        "taubin_iterations": 16,
+        "splat_radius_px": 6
+      }
+    },
+    "B": {
+      "Reference centreline": {
+        "voxels": 1486,
+        "voxel_retention": 1.0,
+        "components_before": 4,
+        "components_after": 4,
+        "surface_samples": 38051,
+        "samples_without_class": 0
+      },
+      "No consistency coverage": {
+        "voxels": 2597,
+        "voxel_retention": 1.0,
+        "components_before": 4,
+        "components_after": 4,
+        "surface_samples": 51155,
+        "samples_without_class": 0
+      },
+      "Soft-clDice coverage": {
+        "voxels": 2495,
+        "voxel_retention": 1.0,
+        "components_before": 4,
+        "components_after": 4,
+        "surface_samples": 49904,
+        "samples_without_class": 0
+      },
+      "Centreline change": {
+        "voxels": 1704,
+        "voxel_retention": 1.0,
+        "components_before": 3,
+        "components_after": 3,
+        "surface_samples": 40692,
+        "samples_without_class": 0
+      },
+      "frame": {
+        "render_pixels": [
+          993,
+          636
+        ],
+        "px_mm_final": 0.1,
+        "supersample": 2,
+        "azimuth_deg": -30.0,
+        "elevation_deg": 10.0,
+        "smooth_mm": 0.25,
+        "taubin_iterations": 16,
+        "splat_radius_px": 6
+      }
+    }
+  },
+  "figure": "qualitative_plate_val_046.pdf",
+  "seconds": 105.6
+}

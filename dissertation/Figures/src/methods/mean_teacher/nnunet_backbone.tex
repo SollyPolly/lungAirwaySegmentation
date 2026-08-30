@@ -1,0 +1,246 @@
+\documentclass[border=8pt, multi, tikz]{standalone}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+% Vendored PlotNeuralNet Box / RightBandedBox primitives (MIT, see file header).
+\input{plotneuralnet_layers.tex}
+
+% Dataset126 3-D full-resolution PlainConvUNet, drawn in the PlotNeuralNet grammar
+% and following the structure of that project's examples/Unet/Unet.tex:
+%
+%   * a stage is a RightBandedBox whose banded sub-boxes are its individual
+%     convolutions, labelled underneath with their output channel count;
+%   * block HEIGHT and DEPTH track spatial resolution, block WIDTH tracks channels;
+%   * a narrow red slab marks each resolution reduction and a narrow blue slab each
+%     transposed-convolution expansion;
+%   * a translucent grey banded box is the concatenated encoder tensor;
+%   * skips leave the encoder stage's north-east corner, run above the panel, and
+%     drop into the matching concatenation box.
+%
+% Channel widths: 32 -> 2, 64 -> 2.8, 128 -> 3.6, 256 -> 4.6, 320 -> 5.5.
+% Heights/depths: 40, 32, 26, 19, 13, 8 for the six resolutions.
+\def\ConvColor{rgb:yellow,5;red,2.5;white,5}
+\def\ConvReluColor{rgb:yellow,5;red,5;white,5}
+\def\PoolColor{rgb:red,1;black,0.3}
+\def\UnpoolColor{rgb:blue,2;green,1;black,0.3}
+\def\SoftmaxColor{rgb:magenta,5;black,7}
+\def\CatColor{rgb:white,1;black,3}
+\def\CatBandColor{rgb:white,1;black,2}
+
+\usetikzlibrary{calc}
+
+% Spatial tensor sizes are placed as free nodes rather than through the pic's own
+% zlabel.  The vendored depth label uses text width = 14*depth, so a long size
+% string wraps into an unreadable column on the small deep blocks; a free node is
+% independent of block size and sits on the same near-face edge as the channel
+% labels.  #1 pic name, #2 label.
+\newcommand{\SpatialLabel}[2]{%
+  \node[font=\fontsize{15}{17}\selectfont,anchor=north,inner sep=0pt]
+    at ($(#1-nearsouthwest)!0.5!(#1-nearsoutheast)+(0,-.68)$) {#2};}
+
+\begin{document}
+\begin{tikzpicture}[font=\fontsize{18}{20}\selectfont]
+\tikzstyle{connection}=[ultra thick,every node/.style={sloped,allow upside down},draw=\edgecolor,opacity=0.7]
+\tikzstyle{copyconnection}=[ultra thick,every node/.style={sloped,allow upside down},draw={rgb:blue,4;red,1;green,1;black,3},opacity=0.7]
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Encoder
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% stage 0
+\pic[shift={(0,0,0)}] at (0,0,0) {RightBandedBox={name=cr0,%
+        xlabel={{"","32"}},fill=\ConvColor,bandfill=\ConvReluColor,%
+        height=40,width={2,2},depth=40}};
+\pic[shift={(0,0,0)}] at (cr0-east) {Box={name=p0,%
+        fill=\PoolColor,opacity=0.5,height=32,width=1,depth=32}};
+%%%%%%%%%%
+% stage 1
+\pic[shift={(1.1,0,0)}] at (p0-east) {RightBandedBox={name=cr1,%
+        xlabel={{"","64"}},fill=\ConvColor,bandfill=\ConvReluColor,%
+        height=32,width={2.8,2.8},depth=32}};
+\pic[shift={(0,0,0)}] at (cr1-east) {Box={name=p1,%
+        fill=\PoolColor,opacity=0.5,height=26,width=1,depth=26}};
+%%%%%%%%%%
+% stage 2
+\pic[shift={(0.95,0,0)}] at (p1-east) {RightBandedBox={name=cr2,%
+        xlabel={{"","128"}},fill=\ConvColor,bandfill=\ConvReluColor,%
+        height=26,width={3.6,3.6},depth=26}};
+\pic[shift={(0,0,0)}] at (cr2-east) {Box={name=p2,%
+        fill=\PoolColor,opacity=0.5,height=19,width=1,depth=19}};
+%%%%%%%%%%
+% stage 3
+\pic[shift={(0.85,0,0)}] at (p2-east) {RightBandedBox={name=cr3,%
+        xlabel={{"","256"}},fill=\ConvColor,bandfill=\ConvReluColor,%
+        height=19,width={4.6,4.6},depth=19}};
+\pic[shift={(0,0,0)}] at (cr3-east) {Box={name=p3,%
+        fill=\PoolColor,opacity=0.5,height=13,width=1,depth=13}};
+%%%%%%%%%%
+% stage 4
+\pic[shift={(0.8,0,0)}] at (p3-east) {RightBandedBox={name=cr4,%
+        xlabel={{"","320"}},fill=\ConvColor,bandfill=\ConvReluColor,%
+        height=13,width={5.5,5.5},depth=13}};
+% the one anisotropic reduction
+\pic[shift={(0,0,0)}] at (cr4-east) {Box={name=p4,%
+        fill=\PoolColor,opacity=0.5,height=8,width=1,depth=8}};
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Bottleneck
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\pic[shift={(0.9,0,0)}] at (p4-east) {RightBandedBox={name=cr5,%
+        xlabel={{"","320"}},fill=\ConvColor,bandfill=\ConvReluColor,%
+        height=8,width={5.5,5.5},depth=8}};
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Decoder
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% up4
+\pic[shift={(1.3,0,0)}] at (cr5-east) {Box={name=up4,%
+        fill=\UnpoolColor,opacity=0.6,height=13,width=1,depth=13}};
+\pic[shift={(0,0,0)}] at (up4-east) {RightBandedBox={name=ucr4,%
+        xlabel={{"","dummy"}},fill=\ConvColor,bandfill=\ConvReluColor,%
+        height=13,width=5.5,depth=13}};
+\pic[shift={(0,0,0)}] at (ucr4-east) {RightBandedBox={name=cat4,%
+        xlabel={{"+320",""}},fill=\CatColor,bandfill=\CatBandColor,opacity=0.2,%
+        height=13,width=5.5,depth=13}};
+\pic[shift={(0,0,0)}] at (cat4-east) {RightBandedBox={name=ucr4a,%
+        xlabel={{"","320"}},fill=\ConvColor,bandfill=\ConvReluColor,%
+        height=13,width={5.5,5.5},depth=13}};
+%%%%%%%%%%
+%% up3
+\pic[shift={(1.5,0,0)}] at (ucr4a-east) {Box={name=up3,%
+        fill=\UnpoolColor,opacity=0.6,height=19,width=1,depth=19}};
+\pic[shift={(0,0,0)}] at (up3-east) {RightBandedBox={name=ucr3,%
+        xlabel={{"","dummy"}},fill=\ConvColor,bandfill=\ConvReluColor,%
+        height=19,width=4.6,depth=19}};
+\pic[shift={(0,0,0)}] at (ucr3-east) {RightBandedBox={name=cat3,%
+        xlabel={{"+256",""}},fill=\CatColor,bandfill=\CatBandColor,opacity=0.2,%
+        height=19,width=4.6,depth=19}};
+\pic[shift={(0,0,0)}] at (cat3-east) {RightBandedBox={name=ucr3a,%
+        xlabel={{"","256"}},fill=\ConvColor,bandfill=\ConvReluColor,%
+        height=19,width={4.6,4.6},depth=19}};
+%%%%%%%%%%
+%% up2
+\pic[shift={(1.5,0,0)}] at (ucr3a-east) {Box={name=up2,%
+        fill=\UnpoolColor,opacity=0.6,height=26,width=1,depth=26}};
+\pic[shift={(0,0,0)}] at (up2-east) {RightBandedBox={name=ucr2,%
+        xlabel={{"","dummy"}},fill=\ConvColor,bandfill=\ConvReluColor,%
+        height=26,width=3.6,depth=26}};
+\pic[shift={(0,0,0)}] at (ucr2-east) {RightBandedBox={name=cat2,%
+        xlabel={{"+128",""}},fill=\CatColor,bandfill=\CatBandColor,opacity=0.2,%
+        height=26,width=3.6,depth=26}};
+\pic[shift={(0,0,0)}] at (cat2-east) {RightBandedBox={name=ucr2a,%
+        xlabel={{"","128"}},fill=\ConvColor,bandfill=\ConvReluColor,%
+        height=26,width={3.6,3.6},depth=26}};
+%%%%%%%%%%
+%% up1
+\pic[shift={(1.6,0,0)}] at (ucr2a-east) {Box={name=up1,%
+        fill=\UnpoolColor,opacity=0.6,height=32,width=1,depth=32}};
+\pic[shift={(0,0,0)}] at (up1-east) {RightBandedBox={name=ucr1,%
+        xlabel={{"","dummy"}},fill=\ConvColor,bandfill=\ConvReluColor,%
+        height=32,width=2.8,depth=32}};
+\pic[shift={(0,0,0)}] at (ucr1-east) {RightBandedBox={name=cat1,%
+        xlabel={{"+64",""}},fill=\CatColor,bandfill=\CatBandColor,opacity=0.2,%
+        height=32,width=2.8,depth=32}};
+\pic[shift={(0,0,0)}] at (cat1-east) {RightBandedBox={name=ucr1a,%
+        xlabel={{"","64"}},fill=\ConvColor,bandfill=\ConvReluColor,%
+        height=32,width={2.8,2.8},depth=32}};
+%%%%%%%%%%
+%% up0
+\pic[shift={(1.7,0,0)}] at (ucr1a-east) {Box={name=up0,%
+        fill=\UnpoolColor,opacity=0.6,height=40,width=1,depth=40}};
+\pic[shift={(0,0,0)}] at (up0-east) {RightBandedBox={name=ucr0,%
+        xlabel={{"","dummy"}},fill=\ConvColor,bandfill=\ConvReluColor,%
+        height=40,width=2,depth=40}};
+\pic[shift={(0,0,0)}] at (ucr0-east) {RightBandedBox={name=cat0,%
+        % 32-channel boxes are the narrowest in the panel; "+32" and "32" cannot
+        % separate at this width, so the shallowest concat relies on the pattern
+        % established by the four deeper stages.
+        xlabel={{"",""}},fill=\CatColor,bandfill=\CatBandColor,opacity=0.2,%
+        height=40,width=2,depth=40}};
+\pic[shift={(0,0,0)}] at (cat0-east) {RightBandedBox={name=ucr0a,%
+        xlabel={{"","32"}},fill=\ConvColor,bandfill=\ConvReluColor,%
+        height=40,width={2,2},depth=40}};
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Segmentation head
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\pic[shift={(2.3,0,0)}] at (ucr0a-east) {Box={name=out,caption=Softmax,%
+        xlabel={{"2"}},fill=\SoftmaxColor,%
+        height=40,width=1,depth=40}};
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Exact spatial tensor sizes, one line under each stage's channel labels
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\SpatialLabel{cr0}{$128{\times}160{\times}112$}
+\SpatialLabel{cr1}{$64{\times}80{\times}56$}
+\SpatialLabel{cr2}{$32{\times}40{\times}28$}
+\SpatialLabel{cr3}{$16{\times}20{\times}14$}
+\SpatialLabel{cr4}{$8{\times}10{\times}7$}
+\SpatialLabel{cr5}{$4{\times}5{\times}7$}
+\SpatialLabel{ucr4a}{$8{\times}10{\times}7$}
+\SpatialLabel{ucr3a}{$16{\times}20{\times}14$}
+\SpatialLabel{ucr2a}{$32{\times}40{\times}28$}
+\SpatialLabel{ucr1a}{$64{\times}80{\times}56$}
+\SpatialLabel{ucr0a}{$128{\times}160{\times}112$}
+
+% The single anisotropic transition.  Free nodes again: the pic's own caption uses
+% text width = 15*width/scale, which is far too narrow on a width-1 slab.
+\node[font=\fontsize{15}{17}\selectfont,anchor=north] at ($(p4-south)+(0,-2.05)$)
+  {down $s=(2,2,1)$};
+\node[font=\fontsize{15}{17}\selectfont,anchor=north] at ($(up4-south)+(0,-2.05)$)
+  {up $\times(2,2,1)$};
+% The head's "2" channel label plus the Softmax caption already carry the head;
+% the 1x1x1 convolution itself is stated in the figure caption rather than as a
+% free node, which would foul the outermost skip route descending into cat0.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Forward stream
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\draw [connection]  (p0-east)    -- node {\midarrow} (cr1-west);
+\draw [connection]  (p1-east)    -- node {\midarrow} (cr2-west);
+\draw [connection]  (p2-east)    -- node {\midarrow} (cr3-west);
+\draw [connection]  (p3-east)    -- node {\midarrow} (cr4-west);
+\draw [connection]  (p4-east)    -- node {\midarrow} (cr5-west);
+\draw [connection]  (cr5-east)   -- node {\midarrow} (up4-west);
+\draw [connection]  (ucr4a-east) -- node {\midarrow} (up3-west);
+\draw [connection]  (ucr3a-east) -- node {\midarrow} (up2-west);
+\draw [connection]  (ucr2a-east) -- node {\midarrow} (up1-west);
+\draw [connection]  (ucr1a-east) -- node {\midarrow} (up0-west);
+\draw [connection]  (ucr0a-east) -- node {\midarrow} (out-west);
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Copy / concatenate routes
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\path (cr4-southeast) -- (cr4-northeast) coordinate[pos=1.30] (cr4-top) ;
+\path (cr3-southeast) -- (cr3-northeast) coordinate[pos=1.32] (cr3-top) ;
+\path (cr2-southeast) -- (cr2-northeast) coordinate[pos=1.30] (cr2-top) ;
+\path (cr1-southeast) -- (cr1-northeast) coordinate[pos=1.28] (cr1-top) ;
+\path (cr0-southeast) -- (cr0-northeast) coordinate[pos=1.26] (cr0-top) ;
+
+\path (cat4-south) -- (cat4-north) coordinate[pos=1.30] (cat4-top) ;
+\path (cat3-south) -- (cat3-north) coordinate[pos=1.32] (cat3-top) ;
+\path (cat2-south) -- (cat2-north) coordinate[pos=1.30] (cat2-top) ;
+\path (cat1-south) -- (cat1-north) coordinate[pos=1.28] (cat1-top) ;
+\path (cat0-south) -- (cat0-north) coordinate[pos=1.26] (cat0-top) ;
+%
+\draw [copyconnection]  (cr4-northeast)
+-- node {\copymidarrow}(cr4-top)
+-- node {\copymidarrow}(cat4-top)
+-- node {\copymidarrow} (cat4-north);
+%
+\draw [copyconnection]  (cr3-northeast)
+-- node {\copymidarrow}(cr3-top)
+-- node {\copymidarrow}(cat3-top)
+-- node {\copymidarrow} (cat3-north);
+%
+\draw [copyconnection]  (cr2-northeast)
+-- node {\copymidarrow}(cr2-top)
+-- node {\copymidarrow}(cat2-top)
+-- node {\copymidarrow} (cat2-north);
+%
+\draw [copyconnection]  (cr1-northeast)
+-- node {\copymidarrow}(cr1-top)
+-- node {\copymidarrow}(cat1-top)
+-- node {\copymidarrow} (cat1-north);
+%
+\draw [copyconnection]  (cr0-northeast)
+-- node {\copymidarrow}(cr0-top)
+-- node {\copymidarrow}(cat0-top)
+-- node {\copymidarrow} (cat0-north);
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\end{tikzpicture}
+\end{document}

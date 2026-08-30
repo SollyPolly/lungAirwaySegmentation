@@ -1,0 +1,225 @@
+{
+  "generated": "2026-08-24T19:53:19+00:00",
+  "script": "dissertation/scripts/render_postprocessing_cases.py",
+  "cohort": "val",
+  "arm": "soft_f0",
+  "prediction_dir": "Dataset126_val_mt240_softcldice_final_teacher",
+  "connectivity": 6,
+  "selection": {
+    "rule": "helps,hurts",
+    "ranking": [
+      {
+        "case_id": "044",
+        "delta_precision": 0.015478303186367781,
+        "delta_td": -0.39919586444572086,
+        "delta_dice": -0.14433373192516297,
+        "retained_fraction": 0.7126162535910795
+      },
+      {
+        "case_id": "116",
+        "delta_precision": 0.004192704097738531,
+        "delta_td": -0.04382602899516741,
+        "delta_dice": -0.0025528967607785225,
+        "retained_fraction": 0.9872535888608233
+      },
+      {
+        "case_id": "147",
+        "delta_precision": 0.00854840298070092,
+        "delta_td": -0.030671936758893348,
+        "delta_dice": 0.000993972764743778,
+        "retained_fraction": 0.9855122366937255
+      },
+      {
+        "case_id": "046",
+        "delta_precision": 0.0070575507349387445,
+        "delta_td": -0.028055465978716554,
+        "delta_dice": 0.001604770875381134,
+        "retained_fraction": 0.9892699956094793
+      },
+      {
+        "case_id": "087",
+        "delta_precision": 0.003125197545372549,
+        "delta_td": -0.02658508281464289,
+        "delta_dice": -0.03322966100148983,
+        "retained_fraction": 0.9275666458995967
+      },
+      {
+        "case_id": "150",
+        "delta_precision": 0.016351578856927063,
+        "delta_td": -0.024819855884707698,
+        "delta_dice": 0.006785653931668745,
+        "retained_fraction": 0.9805163483513833
+      },
+      {
+        "case_id": "078",
+        "delta_precision": 0.0020958831941007006,
+        "delta_td": -0.022345401004676968,
+        "delta_dice": -0.0021555810177916745,
+        "retained_fraction": 0.9911416743510761
+      },
+      {
+        "case_id": "125",
+        "delta_precision": 0.006264379138437692,
+        "delta_td": -0.019719198611768407,
+        "delta_dice": 0.0010663435991764558,
+        "retained_fraction": 0.9898687119030075
+      },
+      {
+        "case_id": "027",
+        "delta_precision": 0.011937652742291083,
+        "delta_td": -0.01927437641723362,
+        "delta_dice": 0.003580020392577432,
+        "retained_fraction": 0.9843664289632474
+      },
+      {
+        "case_id": "081",
+        "delta_precision": 0.0002714923217574938,
+        "delta_td": -0.01498673740053047,
+        "delta_dice": -0.0008180574373808369,
+        "retained_fraction": 0.9976495344919953
+      },
+      {
+        "case_id": "056",
+        "delta_precision": 0.003926213681362034,
+        "delta_td": -0.014306676449009514,
+        "delta_dice": 0.0001470540885062377,
+        "retained_fraction": 0.9922313600812773
+      },
+      {
+        "case_id": "028",
+        "delta_precision": 0.006642308579316136,
+        "delta_td": -0.0123315825530943,
+        "delta_dice": 0.002847622199728339,
+        "retained_fraction": 0.9914658470392048
+      },
+      {
+        "case_id": "043",
+        "delta_precision": 0.0041644039547179545,
+        "delta_td": -0.01170431211498979,
+        "delta_dice": 0.0013223442159783216,
+        "retained_fraction": 0.9935650927017723
+      },
+      {
+        "case_id": "068",
+        "delta_precision": 0.004570954940018579,
+        "delta_td": -0.009931245225362817,
+        "delta_dice": 0.001721417885544252,
+        "retained_fraction": 0.9928806081778333
+      },
+      {
+        "case_id": "016",
+        "delta_precision": 0.0077861842829647365,
+        "delta_td": -0.007266268367511763,
+        "delta_dice": 0.002619151955879584,
+        "retained_fraction": 0.9900415832804055
+      },
+      {
+        "case_id": "152",
+        "delta_precision": 0.004860416726206074,
+        "delta_td": -0.0058772687986171634,
+        "delta_dice": 0.0015150229566212037,
+        "retained_fraction": 0.9936266127778641
+      },
+      {
+        "case_id": "033",
+        "delta_precision": 0.011662406642529488,
+        "delta_td": -0.005271084337349352,
+        "delta_dice": 0.005147025363396507,
+        "retained_fraction": 0.987204600290881
+      },
+      {
+        "case_id": "126",
+        "delta_precision": 0.0013991971840070505,
+        "delta_td": -0.005147615442846365,
+        "delta_dice": 0.00048446008087699166,
+        "retained_fraction": 0.9976680694126047
+      },
+      {
+        "case_id": "034",
+        "delta_precision": 0.015052672469243245,
+        "delta_td": -0.004567044208987903,
+        "delta_dice": 0.006747971713091161,
+        "retained_fraction": 0.9844248179586164
+      },
+      {
+        "case_id": "151",
+        "delta_precision": 0.017951504211760505,
+        "delta_td": -0.0037802419354838745,
+        "delta_dice": 0.00885454717141565,
+        "retained_fraction": 0.9811408080116034
+      }
+    ],
+    "chosen": [
+      {
+        "case_id": "151",
+        "rule": "largest precision gain"
+      },
+      {
+        "case_id": "044",
+        "rule": "largest tree-length loss"
+      }
+    ]
+  },
+  "cases": [
+    {
+      "case_id": "151",
+      "selection_rule": "largest precision gain",
+      "voxel_counts": {
+        "Kept by the filter": 269227,
+        "Removed, false positive": 5060,
+        "Removed, true airway": 115,
+        "retained_fraction": 0.9811408080116034
+      },
+      "score_deltas": {
+        "case_id": "151",
+        "delta_precision": 0.017951504211760505,
+        "delta_td": -0.0037802419354838745,
+        "delta_dice": 0.00885454717141565,
+        "retained_fraction": 0.9811408080116034
+      },
+      "render": {
+        "render_pixels": [
+          1878,
+          1822
+        ],
+        "px_mm_final": 0.32,
+        "supersample": 2,
+        "azimuth_deg": -30.0,
+        "elevation_deg": 10.0,
+        "smooth_mm": 0.25,
+        "taubin_iterations": 16,
+        "splat_radius_px": 2
+      }
+    },
+    {
+      "case_id": "044",
+      "selection_rule": "largest tree-length loss",
+      "voxel_counts": {
+        "Kept by the filter": 58540,
+        "Removed, false positive": 2389,
+        "Removed, true airway": 21219,
+        "retained_fraction": 0.7126162535910795
+      },
+      "score_deltas": {
+        "case_id": "044",
+        "delta_precision": 0.015478303186367781,
+        "delta_td": -0.39919586444572086,
+        "delta_dice": -0.14433373192516297,
+        "retained_fraction": 0.7126162535910795
+      },
+      "render": {
+        "render_pixels": [
+          1827,
+          1579
+        ],
+        "px_mm_final": 0.32,
+        "supersample": 2,
+        "azimuth_deg": -30.0,
+        "elevation_deg": 10.0,
+        "smooth_mm": 0.25,
+        "taubin_iterations": 16,
+        "splat_radius_px": 2
+      }
+    }
+  ]
+}

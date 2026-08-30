@@ -1,0 +1,75 @@
+%----------------------------------------------------------------------------------------
+%	IMPERIAL COLOUR PALETTE
+%	xcolor is already loaded by MastersDoctoralThesis.cls (with dvipsnames).
+%	Names below match Imperial's supplied swatches; reuse them in tables, tikz,
+%	and (mirrored in Python) for figures.
+%----------------------------------------------------------------------------------------
+
+% ---- Primary ----
+\definecolor{ImperialBlue}{HTML}{0000CD}   % headline colour
+\definecolor{ImperialNavy}{HTML}{000080}
+\definecolor{ImperialDark}{HTML}{232333}
+
+% ---- Extended palette ----
+\definecolor{ImpSaddleBrown}{HTML}{8B4513}
+\definecolor{ImpTeal}{HTML}{008080}
+\definecolor{ImpVioletRed}{HTML}{C71585}
+\definecolor{ImpIndigo}{HTML}{4B0082}
+\definecolor{ImpCrimson}{HTML}{DC143C}
+\definecolor{ImpOrangeRed}{HTML}{FF4500}
+\definecolor{ImpDarkGreen}{HTML}{006400}
+\definecolor{ImpSlateGray}{HTML}{708090}
+\definecolor{ImpYellow}{HTML}{FFFF00}
+\definecolor{ImpTurquoise}{HTML}{40E0D0}
+\definecolor{ImpViolet}{HTML}{EE82EE}
+\definecolor{ImpMediumSlateBlue}{HTML}{7B68EE}
+\definecolor{ImpRed}{HTML}{FF0000}
+\definecolor{ImpDarkOrange}{HTML}{FF8C00}
+\definecolor{ImpSpringGreen}{HTML}{00FF7F}
+\definecolor{ImpWhiteSmoke}{HTML}{F5F5F5}
+\definecolor{ImpDeepSkyBlue}{HTML}{00BFFF}
+\definecolor{ImpKhaki}{HTML}{F0E68C}
+\definecolor{ImpPaleTurquoise}{HTML}{AFEEEE}
+\definecolor{ImpLightPink}{HTML}{FFB6C1}
+\definecolor{ImpLavender}{HTML}{E6E6FA}
+\definecolor{ImpSalmon}{HTML}{FA8072}
+\definecolor{ImpOrange}{HTML}{FFA500}
+\definecolor{ImpPaleGreen}{HTML}{98FB98}
+
+%----------------------------------------------------------------------------------------
+%	HEADINGS IN IMPERIAL BLUE
+%----------------------------------------------------------------------------------------
+
+% Chapter titles use the class's own hooks (see MastersDoctoralThesis.cls).
+\RenewDocumentCommand{\chapterfont}{}{\Huge\bfseries\color{ImperialBlue}}
+\RenewDocumentCommand{\chapterprefixfont}{}{\LARGE\bfseries\color{ImperialBlue}}
+
+% Section levels: replicate the book-class defaults and add \color, so spacing is
+% untouched and no sectioning package (titlesec/sectsty) is needed.
+\makeatletter
+\renewcommand\section{\@startsection{section}{1}{\z@}%
+  {-3.5ex \@plus -1ex \@minus -.2ex}{2.3ex \@plus.2ex}%
+  {\normalfont\Large\bfseries\color{ImperialBlue}}}
+\renewcommand\subsection{\@startsection{subsection}{2}{\z@}%
+  {-3.25ex\@plus -1ex \@minus -.2ex}{1.5ex \@plus .2ex}%
+  {\normalfont\large\bfseries\color{ImperialBlue}}}
+\renewcommand\subsubsection{\@startsection{subsubsection}{3}{\z@}%
+  {-3.25ex\@plus -1ex \@minus -.2ex}{1.5ex \@plus .2ex}%
+  {\normalfont\normalsize\bfseries\color{ImperialBlue}}}
+\makeatother
+
+% Title-page rules in Imperial Blue.
+\renewcommand{\HRule}{\textcolor{ImperialBlue}{\rule{\linewidth}{0.6pt}}}
+\renewcommand{\decoRule}{\textcolor{ImperialBlue}{\rule{.8\textwidth}{.4pt}}}
+
+%----------------------------------------------------------------------------------------
+%	HYPERLINK COLOURS (override the class defaults at end of preamble)
+%----------------------------------------------------------------------------------------
+% hyperref has a single knob for internal cross-references: linkcolor covers figure, table,
+% section, equation and table-of-contents links alike, so making figure/table numbers black
+% necessarily makes every internal reference black. Citations and URLs keep their colour.
+\AtBeginDocument{\hypersetup{
+  linkcolor=black,          % internal refs (figures, tables, sections, equations, ToC)
+  citecolor=ImperialNavy,   % citations
+  urlcolor=ImperialBlue,    % URLs
+}}

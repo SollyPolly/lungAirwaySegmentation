@@ -1,0 +1,47 @@
+{
+  "generated": "2026-08-21T01:53:42+00:00",
+  "script": "dissertation/scripts/plot_training_diagnostics.py",
+  "input_glob": "runs/mt_diagnostics/*.csv",
+  "smooth_epochs": 5,
+  "final_epoch_window": 25,
+  "replicates_per_arm": {
+    "mt_soft": 1
+  },
+  "replicate_requirement_met": false,
+  "runs": [
+    {
+      "stem": "mt240_softcldice",
+      "arm": "mt_soft",
+      "replicate": null,
+      "path": "runs\\mt_diagnostics\\mt240_softcldice.csv",
+      "epochs": 195
+    }
+  ],
+  "final_window": {
+    "pseudo_dice": [
+      {
+        "stem": "mt240_softcldice",
+        "arm": "mt_soft",
+        "replicate": null,
+        "pseudo_dice": 0.9333079999999999
+      }
+    ],
+    "grad_weighted_ratio": [
+      {
+        "stem": "mt240_softcldice",
+        "arm": "mt_soft",
+        "replicate": null,
+        "grad_weighted_ratio": 0.31360151199999997
+      }
+    ],
+    "grad_cosine": [
+      {
+        "stem": "mt240_softcldice",
+        "arm": "mt_soft",
+        "replicate": null,
+        "grad_cosine": -0.0061082800000000015
+      }
+    ]
+  },
+  "figure": "training_diagnostics_single_run.pdf"
+}

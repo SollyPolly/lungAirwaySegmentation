@@ -1,0 +1,45 @@
+% !TEX root = ../main.tex
+% Chapter: Conclusion
+\chapter{Conclusion}
+\label{ch:conclusion}
+
+% One paragraph (booklet: "1 paragraph"): the take-home message and how the findings could
+% be used or explored further. May instead be folded into the final paragraph of the
+% Discussion -- if so, delete this chapter and its \include in main.tex.
+%
+% REWIRED 2026-08-14: the take-home is now about what teacher-derived consistency can and
+% cannot supply on a sparse tubular target, and about the value of measuring the mechanism
+% rather than reporting the delta. Do NOT reintroduce the from-scratch or retired-loss conclusions.
+%
+% ROUGH-DRAFT CONTENT: condense these bullets into one final paragraph.
+% FINAL WORD BUDGET: 150 words.
+\begin{itemize}
+  \item Opening claim: geometry-aware consistency makes semi-supervised training on sparse
+  airway foreground numerically viable where per-voxel consistency does not, contributing on
+  the order of 15\% of gradient norm without class balancing and without collapsing the
+  teacher.
+  \item[] \textcolor{red}{\textbf{This should be changed to:} Do not describe voxel-MSE as
+  numerically non-viable. The completed $w_{\max}=0.30$ run trained and scored normally but
+  remained close to, and slightly below, the no-consistency comparator. The defensible distinction
+  is outcome and anatomical localisation; finalise it after the matched $w_{\max}=0.10$ arm is
+  scored.}
+  \item PLACEHOLDER --- the measured outcome against the exactly matched control, stated in
+  one clause with its direction (completeness versus precision) and its single-seed bound.
+  \item[] \textcolor{red}{\textbf{This should be changed to:} state the measured outcome
+  against the configuration-matched no-consistency comparator and explicitly bound it to one
+  independently initialised run per configuration. Conclude that the pattern is consistent
+  with a consistency benefit, not that the comparison identifies a causal method effect.}
+  \item Include the completed deployment estimate: the five-fold Mean Teacher ensemble
+  retained the fold-0 topology result (TLD 0.9381, BD 0.8893) while improving Dice to 0.9277 and
+  precision to 0.9455. Present this as absolute robustness across folds, not as a second controlled
+  effect because no five-fold no-consistency ensemble was evaluated.
+  \item The bounding insight, which is the part worth remembering: consistency redistributes
+  the operating point but supplies no positive target for a branch the teacher never
+  represents, so the achievable gain is set by teacher content rather than by the loss.
+  \item Method-level take-home for the field: report semi-supervised results against a
+  continuation control, separate unlabelled pool size from unlabelled exposure, and instrument
+  the consistency term --- otherwise a null is uninterpretable and a gain is unattributable.
+  \item Closing line: topology-aware measurement should be standard for airway models, and
+  teacher-derived supervision is a targeted operating-point tool rather than a substitute for
+  annotation.
+\end{itemize}

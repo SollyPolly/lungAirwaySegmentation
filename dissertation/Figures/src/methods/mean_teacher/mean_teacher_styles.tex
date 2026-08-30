@@ -1,0 +1,26 @@
+% Shared colour palette for the Mean Teacher dissertation figures.
+%
+% This file used to carry drawing primitives as well (a perspective feature-volume
+% macro, a compact backbone pic and four data-tile pics). Those are gone: the
+% backbone panel now draws with the vendored PlotNeuralNet primitives, the protocol
+% panel builds its network glyphs from that same primitive, and its data tiles are
+% defined locally beside the drawing that uses them. What remains is the palette,
+% which is the only thing genuinely shared.
+%
+% Role coding: teacher warm, student blue, labelled-data green, loss/topology
+% purple. The probability ramp is a dark-to-yellow sequence so every predicted
+% probability tile in the figure reads on the same scale.
+\definecolor{MTInk}{HTML}{172033}
+\definecolor{MTMuted}{HTML}{5F6B7A}
+\definecolor{MTStudent}{HTML}{1464A5}
+\definecolor{MTStudentLight}{HTML}{DCEEFE}
+\definecolor{MTTeacher}{HTML}{D97706}
+\definecolor{MTTeacherLight}{HTML}{FEEDD3}
+\definecolor{MTLabel}{HTML}{11823B}
+\definecolor{MTLabelLight}{HTML}{E1F5E8}
+\definecolor{MTLoss}{HTML}{6D3FB5}
+\definecolor{MTLossLight}{HTML}{EEE7FA}
+\definecolor{MTProbabilityDark}{HTML}{260B45}
+\definecolor{MTProbabilityMid}{HTML}{A33B78}
+\definecolor{MTProbabilityHot}{HTML}{F59E0B}
+\definecolor{MTProbabilityPeak}{HTML}{FFF29A}

@@ -1,0 +1,56 @@
+{
+  "case": "ATM_044",
+  "probabilities": ".codex_tmp\\cldice_real_patch\\d126_final_teacher\\ATM_044.npz",
+  "window_name": "trunk_side_branch",
+  "window_xyz": [
+    314,
+    296,
+    331
+  ],
+  "display_voxels": [
+    52,
+    7,
+    86
+  ],
+  "halo_voxels": 14,
+  "iterations": 10,
+  "depths_shown": [
+    0,
+    3,
+    10
+  ],
+  "residual_depths_shown": [
+    0,
+    2,
+    4
+  ],
+  "fraction_above_0p5_by_depth": [
+    0.07584,
+    0.04338,
+    0.02274,
+    0.00802,
+    0.00128,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "first_depth_with_no_foreground": 5,
+  "voxel_spacing_mm": [
+    0.8203125,
+    0.8203125,
+    0.5
+  ],
+  "morphology_source": "nnunet_trainers/nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring.py",
+  "operators": {
+    "erosion": "minimum over centre plus six face-connected neighbours",
+    "dilation": "3x3x3 maximum pool",
+    "opening": "dilation of erosion",
+    "residual": "relu(current - opening(current))",
+    "accumulation": "S <- S + relu(delta - S*delta)"
+  },
+  "accumulation_check_max_abs_drift_from_trainer": 0.0,
+  "note": "Held-out inference crop, not a logged training batch."
+}

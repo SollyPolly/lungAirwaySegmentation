@@ -26,4 +26,24 @@ logs/
 
 writeup.md
 PROJECT_STATE.md
-dissertation/
+
+# Dissertation build and transient files
+/dissertation/build/
+/dissertation/Figures/src/methods/mean_teacher/build/
+/dissertation/**/__pycache__/
+/dissertation/**/*.aux
+/dissertation/**/*.log
+/dissertation/**/*.toc
+/dissertation/**/*.lof
+/dissertation/**/*.lot
+/dissertation/**/*.fls
+/dissertation/**/*.fdb_latexmk
+/dissertation/**/*.synctex.gz
+/dissertation/**/*.bbl
+/dissertation/**/*.blg
+/dissertation/**/*.bcf
+/dissertation/**/*.run.xml
+/dissertation/**/.DS_Store
+/dissertation/**/*.swp
+/dissertation/**/*.swo
+/dissertation/**/*~

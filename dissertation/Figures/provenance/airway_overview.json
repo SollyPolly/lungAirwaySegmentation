@@ -1,0 +1,47 @@
+{
+  "generated": "2026-08-17T02:10:38+00:00",
+  "script": "generate_intro_airway_overview.py",
+  "case": "ATM_001",
+  "voxel_size_mm_ras": [
+    0.8203,
+    0.8203,
+    0.5
+  ],
+  "airway_voxels": 152573,
+  "parsed_branches": 185,
+  "max_branch_depth": 10,
+  "proximal_max_generation": 2,
+  "slice_panel": {
+    "coronal_index_ras": 232,
+    "inset_box_mm": 30.0,
+    "trachea_inset_centre_mm": [
+      204.69122170275588,
+      83.07729658792651
+    ],
+    "distal_inset_centre_mm": [
+      120.45703125000001,
+      214.90714285714284
+    ],
+    "airway_voxels_in_slice": 5797,
+    "crop_extent_mm": {
+      "left": 64.29,
+      "right": 346.69,
+      "top": 26.5,
+      "bottom": 286.5,
+      "width": 282.4,
+      "height": 260.0
+    },
+    "inset_scale_bar_mm": 5.0,
+    "panel_scale_bar_mm": 50.0,
+    "measured_diameter_mm": {
+      "trachea": 14.900459108384043,
+      "distal": 2.5868224505413973
+    },
+    "stems": [
+      "airway_overview_slice",
+      "airway_overview_slice_depth",
+      "airway_overview_slice_noinset",
+      "airway_overview_slice_noinset_depth"
+    ]
+  }
+}

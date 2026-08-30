@@ -1,0 +1,267 @@
+\documentclass[border=2pt, multi, tikz]{standalone}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath}
+\usetikzlibrary{arrows.meta,calc,positioning,backgrounds}
+% Same-directory inputs so the file compiles both from the build script and from
+% an editor that sets the working directory to this file's own folder.
+\input{mean_teacher_styles.tex}
+% The network glyphs use the same vendored PlotNeuralNet primitive as the backbone
+% panel, so the two figures read as one system at two zoom levels.
+\input{plotneuralnet_layers.tex}
+
+% Two-stream Mean Teacher protocol panel.
+%
+% Routing principle: the corridor between the teacher row and the student row is
+% empty, so every operand of the consistency loss is delivered THROUGH it, and no
+% wire travels further than one row.  Every segment is axis-parallel: each arrow
+% either shares its source and target y (a single horizontal run) or turns through
+% explicit right angles.  Rows are therefore placed so that a block's output
+% anchor and its target's input anchor sit at exactly the same height.
+\newcommand{\MTFlowBody}{\fontsize{12.7}{14.2}\selectfont}
+\newcommand{\MTFlowSmall}{\fontsize{11.2}{12.5}\selectfont}
+\newcommand{\MTFlowRole}{\fontsize{14.2}{15.8}\selectfont\bfseries}
+\newcommand{\MTTeacherTarget}{T_U=\operatorname{sg}(p_{T,U})}
+
+% Role fills for the network glyphs.  The teacher reuses the backbone's own
+% convolution colours; the student is the matching blue, so the panel keeps its
+% orange/blue role coding while sharing the backbone's shape grammar.
+\def\MTTeacherFill{rgb:yellow,5;red,2.5;white,5}
+\def\MTTeacherBand{rgb:yellow,5;red,5;white,5}
+\def\MTStudentFill{rgb:blue,3;green,1;white,7}
+\def\MTStudentBand{rgb:blue,4;green,2;white,4}
+
+\tikzset{
+  mt flow neutral/.style={-{Latex[length=1.85mm,width=1.22mm]},draw=MTMuted,line width=.70pt},
+  mt flow topology/.style={-{Latex[length=1.85mm,width=1.22mm]},draw=MTLoss,line width=.74pt},
+  mt flow supervised/.style={-{Latex[length=1.85mm,width=1.22mm]},draw=MTLabel,line width=.74pt},
+  mt flow ema/.style={-{Latex[length=2.1mm,width=1.45mm]},draw=MTTeacher,line width=1.20pt,
+    dash pattern=on 1.8mm off .85mm},
+  mt flow grad/.style={-{Latex[length=2.0mm,width=1.35mm]},draw=MTStudent,line width=.86pt,
+    dash pattern=on 1.7mm off .9mm},
+  mt flow target/.style={draw=MTTeacher,fill=MTTeacherLight,rounded corners=.7mm,
+    line width=.68pt,minimum width=2.62cm,minimum height=.70cm,inner sep=.7mm,
+    font=\MTFlowBody,text=MTInk,align=center},
+  mt flow operator/.style={circle,draw=MTLoss,fill=white,line width=.65pt,
+    minimum size=.62cm,inner sep=0pt,font=\MTFlowBody,text=MTLoss},
+  mt flow perturb/.style={circle,draw=MTStudent,fill=MTStudentLight,line width=.65pt,
+    minimum size=.58cm,inner sep=0pt,font=\MTFlowBody,text=MTStudent},
+  mt flow consistency/.style={draw=MTLoss,fill=MTLossLight,rounded corners=.8mm,
+    line width=.78pt,text width=6.05cm,minimum height=2.95cm,inner sep=1.4mm,
+    align=center,font=\MTFlowBody,text=MTInk},
+  mt flow supervision/.style={draw=MTLabel,fill=MTLabelLight,rounded corners=.8mm,
+    line width=.78pt,minimum width=3.70cm,minimum height=1.25cm,inner sep=1.0mm,
+    align=center,font=\MTFlowBody,text=MTInk},
+  mt flow total/.style={draw=MTInk,fill=white,rounded corners=.8mm,line width=.88pt,
+    minimum width=3.00cm,minimum height=1.22cm,inner sep=1.0mm,align=center,
+    font=\MTFlowBody,text=MTInk},
+}
+
+% Five-stage symbolic backbone built from the backbone panel's own RightBandedBox
+% primitive: same cuboid shape, same banded convolution grammar, only the role
+% colour and the scale differ.  It summarises rather than enumerates the exact
+% 11-stage network; the companion figure carries the real stage list.
+% #1 name, #2 x, #3 flow-axis y, #4 fill colour, #5 band colour.
+\newcommand{\MTUNet}[5]{%
+  \pic at (#2,#3) {RightBandedBox={name=#1s1,fill=#4,bandfill=#5,height=9,width=2,depth=6}};
+  \pic[shift={(.18,0,0)}] at (#1s1-east) {RightBandedBox={name=#1s2,fill=#4,bandfill=#5,height=7,width=2.5,depth=5}};
+  \pic[shift={(.18,0,0)}] at (#1s2-east) {RightBandedBox={name=#1s3,fill=#4,bandfill=#5,height=5,width=3,depth=4}};
+  \pic[shift={(.18,0,0)}] at (#1s3-east) {RightBandedBox={name=#1s4,fill=#4,bandfill=#5,height=7,width=2.5,depth=5}};
+  \pic[shift={(.18,0,0)}] at (#1s4-east) {RightBandedBox={name=#1s5,fill=#4,bandfill=#5,height=9,width=2,depth=6}};
+  \foreach \i/\j in {1/2,2/3,3/4,4/5}{%
+    \draw[-{Latex[length=1.05mm,width=.72mm]},draw=MTInk!55,line width=.42pt]
+      (#1s\i-east) -- (#1s\j-west);}
+  % Incoming ports are pulled 0.27 left of the pic's own -west anchor. That anchor
+  % lies in the z=0 plane, but the drawn front face is projected down-left by
+  % 0.385*depth/2, so an arrow ending on the raw anchor puts its head INSIDE the
+  % visible block. The offset is x-only, so the runs stay horizontal.
+  \coordinate (#1-west)  at ($(#1s1-west)+(-.27,0)$);
+  \coordinate (#1-westu) at ($(#1s1-west)+(-.27,.25)$);
+  \coordinate (#1-westl) at ($(#1s1-west)+(-.27,-.25)$);
+  \coordinate (#1-east)  at (#1s5-east);
+  \coordinate (#1-eastu) at ($(#1s5-east)+(0,.25)$);
+  \coordinate (#1-eastl) at ($(#1s5-east)+(0,-.25)$);
+  % The waist of the U is the only clear vertical corridor through the glyph.
+  % Same projection correction, vertically: these are arrowhead targets for the
+  % EMA and gradient routes, so they must clear the drawn faces.
+  \coordinate (#1-waistn) at ($(#1s3-north)+(0,.20)$);
+  \coordinate (#1-waists) at ($(#1s3-south)+(0,-.20)$);
+}
+
+% Local input / output tiles retain the established semantics.
+\tikzset{pics/mt flow ct/.style args={#1}{code={
+  \path[draw=MTMuted!65,fill=black!7,line width=.55pt] (0,0) rectangle (1.05,.86);
+  \path[draw=MTMuted!65,fill=black!2,line width=.55pt]
+    (0,.86) -- (.16,1.00) -- (1.21,1.00) -- (1.05,.86) -- cycle;
+  \path[draw=MTMuted!65,fill=black!18,line width=.55pt]
+    (1.05,0) -- (1.21,.14) -- (1.21,1.00) -- (1.05,.86) -- cycle;
+  \fill[black!72] (.36,.46) ellipse (.20 and .29);
+  \fill[black!72] (.70,.46) ellipse (.20 and .29);
+  \draw[white!84,line width=.52pt,line cap=round] (.525,.69) -- (.525,.51) -- (.42,.39) (.525,.51) -- (.64,.39);
+  \node[font=\MTFlowBody,text=MTInk] at (.525,-.27) {#1};
+  \coordinate (-west) at (0,.50); \coordinate (-east) at (1.21,.50);
+  \coordinate (-north) at (.605,1.00); \coordinate (-south) at (.525,0);
+}}}
+
+\tikzset{pics/mt flow probability/.style args={#1}{code={
+  \path[draw=MTProbabilityMid!55,fill=MTProbabilityMid!14,line width=.45pt] (.08,.08) rectangle (1.06,.88);
+  \path[draw=MTProbabilityDark!90,fill=MTProbabilityDark,line width=.58pt] (0,0) rectangle (.98,.80);
+  \draw[MTProbabilityMid,line width=4.1pt,line cap=round,line join=round,opacity=.66]
+    (.49,.69) -- (.49,.50) -- (.32,.35) -- (.22,.17) (.49,.50) -- (.67,.35) -- (.81,.17);
+  \draw[MTProbabilityHot,line width=2.25pt,line cap=round,line join=round]
+    (.49,.69) -- (.49,.50) -- (.32,.35) -- (.22,.17) (.32,.35) -- (.16,.30)
+    (.49,.50) -- (.67,.35) -- (.81,.17) (.67,.35) -- (.86,.30);
+  \draw[MTProbabilityPeak,line width=.72pt,line cap=round,line join=round]
+    (.49,.69) -- (.49,.50) -- (.32,.35) -- (.22,.17) (.49,.50) -- (.67,.35) -- (.81,.17);
+  \node[font=\MTFlowBody,text=MTInk] at (.49,-.27) {#1};
+  \coordinate (-west) at (0,.40); \coordinate (-east) at (1.06,.40);
+  \coordinate (-north) at (.53,.88); \coordinate (-south) at (.49,0);
+}}}
+
+\tikzset{pics/mt flow skeleton/.style args={#1}{code={
+  \path[draw=MTLoss!28,fill=MTLoss!4,line width=.45pt] (.08,.08) rectangle (1.02,.88);
+  \path[draw=MTLoss!72,fill=white,line width=.58pt] (0,0) rectangle (.94,.80);
+  \draw[MTLoss!26,line width=2.9pt,line cap=round,line join=round]
+    (.47,.69) -- (.47,.50) -- (.31,.35) -- (.21,.17) (.47,.50) -- (.64,.35) -- (.78,.17);
+  \draw[MTLoss,line width=1.02pt,line cap=round,line join=round]
+    (.47,.69) -- (.47,.50) -- (.31,.35) -- (.21,.17) (.31,.35) -- (.15,.30)
+    (.47,.50) -- (.64,.35) -- (.78,.17) (.64,.35) -- (.84,.30);
+  \node[font=\MTFlowBody,text=MTInk] at (.47,-.27) {#1};
+  \coordinate (-west) at (0,.40); \coordinate (-east) at (1.02,.40);
+  \coordinate (-north) at (.51,.88); \coordinate (-south) at (.47,0);
+}}}
+
+\tikzset{pics/mt flow mask/.style args={#1}{code={
+  \path[draw=MTLabel!28,fill=MTLabel!5,line width=.45pt] (.08,.08) rectangle (1.02,.88);
+  \path[draw=MTLabel!72,fill=MTLabelLight,line width=.58pt] (0,0) rectangle (.94,.80);
+  \draw[MTLabel,line width=1.75pt,line cap=round,line join=round]
+    (.47,.69) -- (.47,.50) -- (.31,.35) -- (.21,.17) (.31,.35) -- (.15,.30)
+    (.47,.50) -- (.64,.35) -- (.78,.17) (.64,.35) -- (.84,.30);
+  \node[font=\MTFlowBody,text=MTInk] at (.47,-.27) {#1};
+  \coordinate (-west) at (0,.40); \coordinate (-east) at (1.02,.40);
+  \coordinate (-north) at (.51,.88); \coordinate (-south) at (.47,0);
+}}}
+
+\begin{document}
+\begin{tikzpicture}[x=1cm,y=1cm]
+  \path[use as bounding box] (.00,-.55) rectangle (28.90,9.55);
+
+  % ---------------------------------------------------------------------------
+  % Row heights.  Teacher 7.70, student 4.10; the student's two ports sit at
+  % 4.35 (unlabelled) and 3.85 (labelled).  Every downstream tile is placed so
+  % its anchor lands on exactly one of these lines.
+  % ---------------------------------------------------------------------------
+
+  % Role banners stay short: the dataset marking rides on the input tiles instead,
+  % which is where the sampling actually happens and keeps this column clear of the
+  % perturbation blocks on the risers.
+  \node[anchor=south west,font=\MTFlowRole,text=MTInk] at (.20,8.32) {Unlabelled};
+  \node[anchor=south west,font=\MTFlowRole,text=MTInk] at (.20,2.32) {Labelled};
+
+  \pic (xu) at (.28,7.20) {mt flow ct={$x_U\in\mathcal D_U$}};
+  \pic (xl) at (.28,1.20) {mt flow ct={$x_L\in\mathcal D_L$}};
+
+  \MTUNet{tch}{4.10}{7.70}{\MTTeacherFill}{\MTTeacherBand}
+  \MTUNet{stu}{4.10}{4.10}{\MTStudentFill}{\MTStudentBand}
+  % Role labels start left of their glyphs so the student's cannot be crossed by
+  % the EMA riser running up the waist at x = 5.66.
+  \node[anchor=south west,font=\MTFlowBody\bfseries,text=MTTeacher] at (2.90,8.95)
+    {Teacher $f_{\theta_T}$};
+  \node[anchor=south west,font=\MTFlowBody\bfseries,text=MTStudent] at (2.90,5.35)
+    {Student $f_{\theta_S}$};
+
+  % Data routes.  One x_U sample forks to both networks; the labelled riser is
+  % held at x=3.00 and the unlabelled fork at x=2.30 so the two never cross.
+  \coordinate (ufork) at (2.30,7.70);
+  \fill[MTMuted] (ufork) circle (1.15pt);
+  \draw[mt flow neutral] (xu-east) -- (tch-west);
+  \draw[mt flow neutral] (ufork) -- (2.30,4.35) -- (stu-westu);
+  \draw[mt flow neutral] (xl-east) -- (3.00,1.70) -- (3.00,3.85) -- (stu-westl);
+
+  % The student's additional intensity perturbation, applied to its whole input.
+  % Labelled with the operator itself rather than with eta alone: the transform is a
+  % per-sample scale and shift plus per-voxel noise, not noise only.
+  % Collapsed to the figure's existing operator grammar: a circle is an operator,
+  % so the perturbation is one glyph and the transform itself lives in the caption.
+  % pi, not a tilde: the tilde already means "distributed as" in the same equation.
+  \node[mt flow perturb] (pertu) at (2.30,6.05) {$\pi$};
+  \node[mt flow perturb] (pertl) at (3.00,2.65) {$\pi$};
+  \node[anchor=west,font=\MTFlowSmall,text=MTStudent] at (2.42,5.30) {$\tilde x_U$};
+  \node[anchor=west,font=\MTFlowSmall,text=MTStudent] at (3.12,3.30) {$\tilde x_L$};
+
+  % EMA rises through the waist of the two U silhouettes, the one clear corridor.
+  \draw[mt flow ema] (stu-waistn) --
+    node[pos=.42,right=1.2mm,font=\MTFlowSmall,text=MTTeacher,fill=white,inner sep=.35mm] {EMA}
+    (tch-waists);
+
+  % Prediction column.  Each tile's west anchor is on its source's output line, so
+  % these are single horizontal runs.
+  \pic (pt)  at (9.60,7.30) {mt flow probability={$p_{T,U}$}};
+  \pic (psu) at (9.60,3.95) {mt flow probability={$p_{S,U}$}};
+  \pic (psl) at (9.60,1.60) {mt flow probability={$p_{S,L}$}};
+  \draw[mt flow neutral] (tch-east)  -- (pt-west);
+  \draw[mt flow neutral] (stu-eastu) -- (psu-west);
+  \draw[mt flow neutral] (stu-eastl) -- (8.60,3.85) -- (8.60,2.00) -- (psl-west);
+
+  % Teacher target and the two soft-skeleton operators, all on the row lines.
+  % Routing the consistency loss into the TOP of the total-loss node frees the
+  % corridor that used to run between them, and that width is spent here: the
+  % target, operator and skeleton tile each get roughly 0.75 cm of clear air.
+  \node[mt flow target]   (target) at (12.55,7.70) {$\MTTeacherTarget$};
+  \node[mt flow operator] (skt)    at (15.00,7.70) {$S$};
+  \node[mt flow operator] (sks)    at (15.00,4.35) {$S$};
+  \pic (kt) at (16.10,7.30) {mt flow skeleton={$S(T_U)$}};
+  \pic (ks) at (16.10,3.95) {mt flow skeleton={$S(p_{S,U})$}};
+  \draw[mt flow neutral]  (pt-east) -- (target.west);
+  \draw[mt flow topology] (target.east) -- (skt.west);
+  \draw[mt flow topology] (skt.east) -- (kt-west);
+  \draw[mt flow topology] (psu-east) -- (sks.west);
+  \draw[mt flow topology] (sks.east) -- (ks-west);
+
+  % Consistency loss: four operands entering on four ports spaced symmetrically
+  % about the box's centre line, teacher-derived above, student-derived below.
+  \node[mt flow consistency] (lcons) at (21.30,6.00)
+    {\textbf{soft clDice consistency}\\[1.1mm]
+     $T_{\mathrm{prec}}=\dfrac{\sum S(p_{S,U})\,T_U+s}{\sum S(p_{S,U})+s}$\\[1.6mm]
+     $T_{\mathrm{sens}}=\dfrac{\sum S(T_U)\,p_{S,U}+s}{\sum S(T_U)+s}$\\[1.9mm]
+     $\mathcal L_{\mathrm{cons}}
+       =1-\dfrac{2\,T_{\mathrm{prec}}T_{\mathrm{sens}}}
+                {T_{\mathrm{prec}}+T_{\mathrm{sens}}+\varepsilon}$};
+  \coordinate (lcons-kt)  at ([yshift= 8.5mm]lcons.west);
+  \coordinate (lcons-tu)  at ([yshift= 3.5mm]lcons.west);
+  \coordinate (lcons-psu) at ([yshift=-3.5mm]lcons.west);
+  \coordinate (lcons-ks)  at ([yshift=-8.5mm]lcons.west);
+
+  \draw[mt flow topology] (kt-east) -- (17.75,7.70) -- (17.75,6.85) -- (lcons-kt);
+  \draw[mt flow topology] (target.south) -- (12.55,6.35) -- (lcons-tu);
+  \draw[mt flow topology] (11.40,4.35) -- (11.40,5.65) -- (lcons-psu);
+  \fill[MTLoss] (11.40,4.35) circle (1.15pt);
+  \draw[mt flow topology] (ks-east) -- (17.75,4.35) -- (17.75,5.15) -- (lcons-ks);
+
+  % Labelled supervision.  y_L sits clear of the p_{S,L} run rather than on it,
+  % and both operands enter on ports spaced symmetrically about the box centre.
+  \pic (yl) at (11.60,0.70) {mt flow mask={$y_L$}};
+  \node[mt flow supervision] (lsup) at (18.85,1.55)
+    {\textbf{Dice + cross-entropy}\\[-.1mm]
+     $\mathcal L_{\mathrm{sup}}(p_{S,L},y_L)$};
+  \coordinate (lsup-p) at ([yshift= 4.5mm]lsup.west);
+  \coordinate (lsup-y) at ([yshift=-4.5mm]lsup.west);
+  \draw[mt flow supervised] (psl-east) -- (lsup-p);
+  \draw[mt flow supervised] (yl-east)  -- (lsup-y);
+
+  % Total objective.  Moved right to clear the widened consistency block.
+  \node[mt flow total] (total) at (27.00,4.00)
+    {$\mathcal L=\mathcal L_{\mathrm{sup}}$\\
+     $+\,w(e)\,\mathcal L_{\mathrm{cons}}$};
+  % The two losses enter on different faces: consistency from above, supervision
+  % from the west, so they need no shared vertical corridor.
+  \draw[mt flow topology]   (lcons.east) -- (27.00,6.00) -- (total.north);
+  \draw[mt flow supervised] (lsup.east)  -- (24.90,1.55) -- (24.90,4.00) -- (total.west);
+
+  % The gradient returns to the student and to nothing else, so it is drawn as a
+  % closed route rather than a dangling stub with a caption on it.
+  \draw[mt flow grad] (total.south) -- (27.00,-.15) -- (5.66,-.15) -- (stu-waists);
+  \node[font=\MTFlowSmall,text=MTStudent,fill=white,inner xsep=1.0mm,inner ysep=.4mm]
+    at (15.20,-.15) {gradient to $\theta_S$ only};
+\end{tikzpicture}
+\end{document}

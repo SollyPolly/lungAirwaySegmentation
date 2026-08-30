@@ -1,0 +1,416 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{float}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\usepackage{pgfgantt}
+\usepackage{pdflscape}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=black,
+    citecolor=black,
+    urlcolor=blue
+}
+
+\setlength{\parskip}{1em}
+\setlength{\parindent}{0pt}
+
+
+
+
+\setlist[itemize]{leftmargin=*, itemsep=0.2em}
+\setlist[enumerate]{leftmargin=*, itemsep=0.2em}
+
+% Remove before submission — retained here only to flag outstanding items
+\newcommand{\todo}[1]{\textcolor{red}{[TODO: #1]}}
+\newcommand{\projecttitle}{Semi-Supervised 3D Lung Airway Segmentation from Thoracic CT}
+\newcommand{\studentname}{Daniel Lucas}
+\newcommand{\supervisorname}{Guang Yang}
+\newcommand{\gtaname}{Jacob Walker}
+
+\begin{document}
+
+% -------------------------------------------------------------------------
+% Title page is not included in the 4000 word limit.
+% -------------------------------------------------------------------------
+\begin{titlepage}
+
+    \begin{flushleft}
+        \includegraphics[width=4cm]{ICL_logo.png}
+    \end{flushleft}
+
+    \centering
+    \vspace*{2cm}
+
+    \hrule
+    \vspace{0.5cm}
+    {\LARGE \textbf{\projecttitle}\par}
+    \vspace{0.5cm}
+    \hrule
+    \vspace{1.5cm}
+
+    {\large Planning Report for MSc Project\par}
+    \vspace{1cm}
+
+    {\large \textbf{Author name:} \studentname\par}
+    \vspace{0.3cm}
+    {\large \textbf{Supervisor:} \supervisorname\par}
+    \vspace{0.3cm}
+    {\large \textbf{GTA:} \gtaname\par}
+    \vspace{0.3cm}
+    {\large \textbf{Department:} Department of Bioengineering\par}
+    \vspace{0.3cm}
+    {\large \textbf{Date:} \today\par}
+
+    \vfill
+    \begin{flushright}
+        \textit{Word count:} 3752
+    \end{flushright}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+% -------------------------------------------------------------------------
+% Keep the main report below 4000 words. References and one-page appendix do
+% not count towards the limit.
+% -------------------------------------------------------------------------
+
+\section{Project Specification}
+
+\subsection{Project Aim}
+The aim of this project is to develop and evaluate a deep learning pipeline for 3D airway tree segmentation from CT volumes. The project will first establish a reproducible supervised baseline and then extend this framework toward semi-supervised learning, enabling the labelled AeroPath dataset to be combined with additional unlabelled CT scans \cite{Stoverud2024AeroPath}. 
+
+This framing reflects a deliberate narrowing of scope. Although the broader motivation initially involved unsupervised approaches, fully unsupervised airway segmentation is too open-ended. A semi-supervised strategy is therefore adopted as a more feasible route for exploiting unlabelled data while retaining explicit anatomical supervision from voxel-level airway masks.
+
+\subsection{Objectives}
+\begin{enumerate}
+    \item Develop a reproducible preprocessing and data-loading pipeline for CT airway segmentation, including NIfTI loading, spatial consistency checks, cropping, and intensity normalisation.
+    \item Implement and train a supervised 3D airway segmentation baseline using patch-based sampling to address severe foreground--background class imbalance.
+    \item Evaluate the supervised model on whole CT volumes using sliding-window inference and appropriate segmentation metrics, rather than relying only on patch-level performance.
+    \item Characterise the main limitations of the supervised baseline, including optimisation difficulty, severe class imbalance, weak whole-volume generalisation, and reduced performance on distal airways.
+    \item Extend the supervised pipeline into a semi-supervised framework that can incorporate unlabelled CT scans without redesigning the full training and inference stack.
+    \item Compare supervised and semi-supervised strategies to assess whether unlabelled data improves segmentation performance, particularly for structurally difficult distal airways.
+\end{enumerate}
+
+\subsection{Research Questions}
+\begin{itemize}
+    \item What factors account for the gap between improving training performance and weak whole-volume validation performance in supervised 3D airway segmentation, and does patch-based training alleviate this more effectively than full-volume training?
+    \item To what extent can a teacher--student semi-supervised training strategy improve airway segmentation beyond the supervised baseline when additional unlabelled CT scans are incorporated?
+    \item Do topology-aware or airway-specific structural metrics reveal failure modes in distal airway recovery that are not adequately captured by voxel-overlap metrics alone?
+\end{itemize}
+
+% -------------------------------------------------------------------------
+\section{Ethical Analysis}
+% -------------------------------------------------------------------------
+
+This project uses medical imaging data derived from human subjects and therefore involves sensitive health-related information. The AeroPath dataset was collected and released under an open-access licence for research use. All Data will be handled in accordance with that licence and with Imperial College London's data governance and information security policies. Raw data will not be duplicated unnecessarily and will be excluded from version control.
+
+Although the project does not directly affect patients during development, its longer-term motivation is biomedical in nature. Automatic airway segmentation may support quantitative lung analysis and disease monitoring; however, inaccurate segmentation could yield misleading downstream measurements if such tools were adopted without independent validation. The resulting system should therefore be understood as a research prototype rather than a clinically deployable system.
+
+Key risks relate to data privacy, secure handling, and responsible use of shared compute infrastructure. These risks will be mitigated by excluding datasets from version control and ensuring that any reported examples or case-level results do not include identifiable patient information.
+
+% -------------------------------------------------------------------------
+\section{Literature Review}
+% -------------------------------------------------------------------------
+
+Airway tree segmentation is an important task in medical image analysis, with applications in disease assessment and intervention planning. Chronic obstructive pulmonary disease (COPD) alone caused approximately 3.5 million deaths in 2021, accounting for about 5\% of all global deaths, which highlights the clinical importance of quantitative tools for lung analysis \cite{WHO2024COPD}. Accurate airway maps are also required for intervention planning and live guidance during bronchoscopy \cite{Stoverud2024AeroPath}. This is particularly relevant for peripheral pulmonary lesions, which are often beyond direct visualisation with standard flexible bronchoscopes and therefore rely on CT-based pathway planning for diagnosis and navigation \cite{Dhillon2017PeripheralBronchoscopy}.
+
+As illustrated in Figure~\ref{fig:airway_mesh}, the bronchial tree exhibits a complex branching topology with progressively narrowing lumina across around 23 generations of branching \cite{Williamson2009TracheobronchialDimensions}. Omissions in distal regions can therefore leave the recovered structure substantially incomplete even when the central bronchi are segmented correctly.
+
+\begin{figure}[htbp]
+    \centering
+    \begin{minipage}{0.45\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figs/airway.png}
+        \caption{Example 3D rendering of an annotated airway tree from a CT scan in the AeroPath dataset.}
+        \label{fig:airway_mesh}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.45\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figs/airway_challange.png}
+        \caption{Key challenges in airway segmentation: ambiguous airway intensity, discontinuity of thin distal branches, severe foreground--background imbalance, and leakage into surrounding structures. Adapted from Nan et al.\ \cite{Nan2024FANN}.}
+        \label{fig:airway_challenges}
+    \end{minipage}
+\end{figure}
+
+As summarised in Figure~\ref{fig:airway_challenges}, these anatomical properties give rise to several recurring failure modes: weak or ambiguous airway intensity, discontinuity of thin peripheral branches, leakage into adjacent parenchyma, and severe foreground--background imbalance \cite{Nan2024FANN}. Together, these factors complicate both optimisation and structural recovery. More broadly, airway segmentation belongs to the class of tree-like tubular structure segmentation problems in which branch completeness and structural continuity remain persistent difficulties despite substantial methodological progress \cite{Li2022TreelikeReview}.
+
+Before the emergence of deep learning, airway extraction relied on morphological region growing, template matching, and graph-search strategies. Although effective in the trachea and main bronchi, these approaches were limited by sensitivity to local image quality and hand-crafted assumptions about airway appearance. Deep encoder--decoder architectures have since become the dominant paradigm for biomedical image segmentation \cite{Ronneberger2015UNet,Cicek2016_3DUNet}. In particular, U-Net and its volumetric extensions provide a strong foundation for airway segmentation, with skip connections preserving fine spatial detail that is important for thin distal branches \cite{Ronneberger2015UNet,Cicek2016_3DUNet}. Attention U-Net later introduced soft spatial attention gates to suppress irrelevant activations and reduce false positives in highly imbalanced settings \cite{Oktay2018AttentionUNet}, while nnU-Net established a self-configuring baseline that automatically adapts preprocessing, patch size, architecture depth, and batch size to the dataset at hand \cite{Isensee2021nnUNet}. Because nnU-Net outperformed prior benchmark methods across the 23 public biomedical segmentation datasets on which it was evaluated at publication, it has become a useful reference point for assessing whether a new segmentation pipeline offers a genuine methodological improvement. 
+
+Severe foreground--background imbalance is a central optimisation challenge in airway segmentation. Standard cross-entropy is dominated by background voxels and can suppress learning of rare airway signal. Combined overlap-based and voxel-wise losses, such as Dice together with cross-entropy or binary cross-entropy, partially address this problem, but loss design alone is insufficient. Sampling strategy is at least as important: airway-centred foreground patch sampling can provide the model with adequate airway representation during training, whereas uniform full-volume sampling risks overwhelming the optimisation process with non-airway voxels. This trade-off between local foreground learning and whole-volume structural context is directly relevant to the current project.
+
+Representative quantitative results from major airway segmentation benchmarks are summarised in Table~\ref{tab:airway_benchmarks}. The EXACT'09 challenge \cite{Lo2012EXACT09} established an early benchmark for airway extraction and showed that no single algorithm extracted more than approximately 74\% of the total reference branch length on average. The more recent ATM'22 challenge \cite{Zhang2023ATM22} expanded evaluation to 500 multi-site, multi-domain CT scans and introduced topological completeness metrics alongside overlap scores. Top-performing methods now exceed 95\% Tree Length Detection (TLD) in aggregate, although peripheral branch performance remains weaker than central airway performance. AeroPath adds a different form of difficulty by including cases with pulmonary pathology that alter local image appearance and therefore stress-test segmentation beyond cleaner benchmark conditions \cite{Stoverud2024AeroPath}.
+
+\begin{table}[htbp]
+    \centering
+    \caption{Representative quantitative results from major airway segmentation benchmarks.}
+    \begin{tabular}{L{2.5cm} L{1.2cm} L{3.0cm} L{2.1cm} L{2.1cm} L{2.1cm}}
+        \hline
+        \textbf{Benchmark} & \textbf{Scans} & \textbf{Setting} & \textbf{Best DSC} & \textbf{Best TLD} & \textbf{Best BDR} \\
+        \hline
+        EXACT'09 \cite{Lo2012EXACT09} & 20 & Multi-site & -- & $\sim$74\% & -- \\
+        ATM'22 \cite{Zhang2023ATM22} & 500 & Multi-site, multi-domain & -- & $>$95\% & -- \\
+        AeroPath (patch-wise) \cite{Stoverud2024AeroPath} & 27 & Pathological cases & $84.98 \pm 3.24$ & $91.80 \pm 3.50$ & $84.67 \pm 7.11$ \\
+        \hline
+    \end{tabular}
+    \label{tab:airway_benchmarks}
+\end{table}
+
+These benchmark results also show why training regime matters independently of architecture. Garcia-Uceda et al.\ demonstrated that a memory-efficient 3D U-Net trained on large 3D patches with lung-region cropping and sliding-window inference achieved a total detected tree length of 65.4\% on the EXACT'09 test set at a false positive rate of 1.68\% \cite{GarciaUceda2021AirwayCNN}. More recently, the AeroPath benchmark compared full-volume and patch-wise AGU-Net variants and found that patch-wise training outperformed the full-volume model not only in overlap but also, more importantly, in structural metrics: the patch-wise model achieved a Dice Similarity Coefficient (DSC) of $84.98 \pm 3.24$ compared with $83.88 \pm 3.51$ for the full-volume model, while the difference was much larger for detected tree length ($91.80 \pm 3.50$ vs.\ $48.87 \pm 11.21$) and branch detection ($84.67 \pm 7.11$ vs.\ $34.94 \pm 7.59$) \cite{Stoverud2024AeroPath}. These results suggest that U-Net-style models remain a strong supervised baseline, but that resolution handling and sampling strategy are critical for recovering small distal branches. However, these published AeroPath results are not directly comparable to the present project: the AeroPath baseline models were trained on the ATM'22 dataset comprising 500 multi-site CT scans, whereas the present project trains only on the labelled subset of AeroPath's 27 cases. The large difference in training data volume means that performance gaps relative to these benchmarks reflect data scale as much as model quality.
+
+Evaluation requires more than voxel-overlap metrics alone. While metrics such as Dice similarity and intersection-over-union are widely used, they are insensitive to whether the predicted airway tree is connected and anatomically complete. Topology-aware measures, including the centreline Dice (clDice) \cite{Shit2021clDice}, together with airway-specific structural metrics such as Tree Length Detected (TLD) and Branch Detection Rate (BDR), provide a more informative assessment of segmentation quality \cite{Stoverud2024AeroPath,GarciaUceda2021AirwayCNN,Li2022TreelikeReview}. Shit et al.\ further showed that clDice can be used as a topology-preserving regularising loss term, producing more structurally complete tubular reconstructions than Dice-only training \cite{Shit2021clDice}. This is especially important for distal branch recovery, since peripheral airways occupy only a small fraction of the total airway volume and can therefore be missed without causing a large drop in overlap-based scores alone.
+
+For the present project, semi-supervised learning (SSL) is the most relevant use of unlabelled data, since it preserves a clear segmentation objective while remaining substantially more manageable than fully unsupervised airway extraction. SSL is particularly relevant to airway segmentation because voxel-level annotations are expensive to obtain, while unlabelled thoracic CT scans are available in larger quantities. The canonical teacher--student formulation is Mean Teacher, in which a student model is trained to match the predictions of a momentum-averaged teacher on perturbed unlabelled inputs \cite{Tarvainen2017MeanTeacher}. Yu et al. extended this idea to 3D medical image segmentation by introducing uncertainty estimates from Monte Carlo dropout to weight the consistency loss, so that uncertain predictions contribute less strongly to training. On left atrium segmentation with only 20\% labelled scans, this uncertainty-aware approach achieved a Dice score of 88.88\%, outperforming a supervised-only model trained on the same labelled subset by 2.85 percentage points and approaching the fully supervised upper bound of 91.14\% obtained when all available labels were used \cite{Yu2019UncertaintyAwareMT}. An alternative strategy is pseudo-labelling, in which high-confidence predictions on unlabelled images are treated as hard training targets \cite{Lee2013PseudoLabel}; confidence thresholding is especially important in distal regions, where model uncertainty is likely to be highest.
+
+Airway-specific semi-supervised work remains limited. Gu et al. proposed a two-stage feature specialisation mechanism for semi-supervised pulmonary airway segmentation and reported a Dice improvement of 6.75 percentage points over a Mean Teacher semi-supervised baseline trained using only 20\% of the available labels (DSC 0.839 vs.\ 0.772), approaching the fully supervised upper bound of 0.866 \cite{Gu2023TFSM}. A broader but still relevant direction is self-supervised pretraining. Models Genesis, for example, was pretrained on 623 unlabelled chest CT scans using image restoration tasks and reported downstream Dice improvements of approximately 4--8 percentage points across 3D segmentation benchmarks \cite{Zhou2021ModelsGenesis}. A more recent direction is the use of CT foundation model representations for encoder initialisation. CT-FM is a 3D self-supervised foundation model trained on 148{,}000 CT scans and has shown strong transfer performance across multiple radiological tasks \cite{Pai2025CTFM}. This makes CT-FM a plausible architectural extension for the current project, particularly in the low-label setting considered here.
+
+Several conclusions from the literature directly motivate the two-phase structure of the current project. Patch-based training appears to improve foreground learning under severe class imbalance, but does not automatically guarantee good whole-volume structural recovery. Semi-supervised methods such as uncertainty-weighted Mean Teacher also depend critically on the quality of the initial supervised model, since an inaccurate or poorly calibrated teacher will propagate unreliable pseudo-labels. Finally, the small number of published semi-supervised airway studies focus primarily on whole-tree overlap rather than distal branch recovery specifically, which are arguably the most challenging and clinically meaningful structural errors. Together, these observations establish that a well-validated supervised baseline with structural evaluation is a necessary prerequisite for any meaningful semi-supervised extension.
+
+% -------------------------------------------------------------------------
+\section{Implementation Plan}
+% -------------------------------------------------------------------------
+
+The implementation is structured in two phases. The first establishes a reproducible supervised baseline: loading AeroPath CT data, preprocessing it, training a 3D U-Net, running whole-volume inference, and saving results in a form that can be inspected, evaluated, and compared. The second phase extends this pipeline toward semi-supervised learning. The repository already includes scaffolding for teacher--student training and semi-supervised losses, although the end-to-end semi-supervised training entrypoint remains undeveloped. This staged structure is therefore reflected both in the project plan and in the current codebase. The code is organised in the \texttt{LungAirwaySegmentation} repository, available at \url{https://github.com/SollyPolly/lungAirwaySegmentation}.
+
+In practical terms, the semi-supervised phase will focus on a single teacher--student baseline rather than a broad comparison of SSL algorithms. The initial target is a Mean Teacher-style setup using the same U-Net backbone as the supervised model, so that the effect of semi-supervised training can be assessed without confounding architectural changes. Labelled scans will contribute the supervised segmentation loss, while unlabelled scans will contribute a consistency loss between student and teacher predictions under perturbation. Confidence masking or uncertainty weighting will be used to reduce the influence of unreliable pseudo-targets, particularly in thin distal airway regions where false positives and broken branches are most likely. The source of unlabelled scans for the semi-supervised phase has not yet been finalised and the composition of the labelled training set may also evolve. While the current supervised baseline uses only the 27 AeroPath cases, additional labelled data from compatible datasets such as ATM'22 may be incorporated if this is found necessary to establish a sufficiently strong supervised baseline. In either case, the final choices will depend on acquisition compatibility with AeroPath, particularly whether contrast-enhanced versus non-contrast CT introduces a domain gap that degrades pseudo-label quality
+
+\subsection{Work Completed So Far}
+
+The main implementation steps completed to date are:
+
+\begin{itemize}
+    \item A modular Python package has been established, separating I/O, preprocessing, datasets, models, losses, metrics, training, inference, and visualisation into reusable components.
+    \item A dataset layer has been implemented for resolving AeroPath case layouts and loading CT, lung-mask, and airway-mask NIfTI volumes.
+    \item A preprocessing pipeline has been built to check image alignment, crop volumes to the lung region, normalise CT intensities, and generate training targets.
+    \item A config-first supervised training framework has been implemented, supporting both patch-based and full-volume training through YAML-defined experiment settings.
+    \item The supervised baseline includes checkpointing, run-history logging, sliding-window validation, overlap-based evaluation, and case-level inference for saving full-volume predictions.
+    \item Initial patch-based and full-volume runs have been completed on the HPC.
+    \item Unit tests have been added for case layout, dataset splits, preprocessing geometry and intensity, and both segmentation and topology metrics.
+    \item Semi-supervised training infrastructure has been partially scaffolded, including teacher--student training modules and semi-supervised loss definitions, but the end-to-end training entrypoint is not yet complete.
+\end{itemize}
+
+\subsection{Planned Project Timeline}
+
+%Figure~\ref{fig:gantt} summarises the planned schedule from late April to September.
+
+\begin{landscape}
+\thispagestyle{empty}
+\begin{figure}
+\centering
+\begin{ganttchart}[
+    hgrid,
+    vgrid,
+    x unit=2.2cm,
+    y unit title=0.8cm,
+    y unit chart=0.9cm,
+    bar height=0.6,
+    group height=0.75,
+    title height=1,
+    title label font=\bfseries,
+    bar/.append style={fill=gray!60},
+    group/.append style={fill=gray!30, draw=black}
+]{1}{6}
+
+\gantttitle{Apr}{1}
+\gantttitle{May}{1}
+\gantttitle{Jun}{1}
+\gantttitle{Jul}{1}
+\gantttitle{Aug}{1}
+\gantttitle{Sep}{1} \\
+
+\ganttgroup{Phase 1: Baseline \hspace{0.3cm}}{1}{3} \\
+\ganttbar{Stabilise patch baseline \hspace{0.3cm}}{1}{2} \\
+\ganttbar{Compare patch vs full-volume \hspace{0.3cm}}{1}{2} \\
+\ganttbar{Run inference and evaluation \hspace{0.3cm}}{2}{3} \\
+\ganttbar{Add topology-aware metrics \hspace{0.3cm}}{3}{3} \\
+
+\ganttgroup{Phase 2: Refinement and SSL \hspace{0.3cm}}{3}{5} \\
+\ganttbar{Refine sampling and augmentation \hspace{0.3cm}}{3}{4} \\
+\ganttbar{Implement SSL extension \hspace{0.3cm}}{4}{4} \\
+\ganttbar{Compare supervised vs SSL \hspace{0.3cm}}{4}{5} \\
+
+\ganttgroup{Phase 3: Writing \hspace{0.3cm}}{5}{6} \\
+\ganttbar{Consolidate results and figures \hspace{0.3cm}}{5}{5} \\
+\ganttbar{Draft and revise dissertation \hspace{0.3cm}}{5}{6}
+
+\end{ganttchart}
+\caption{Planned project timeline from late April to September, organised across three phases: Phase 1 establishes the supervised baseline, Phase 2 covers semi-supervised extension and refinement, and Phase 3 covers dissertation writing and submission}
+\label{fig:gantt}
+\end{figure}
+\end{landscape}
+
+\subsection{Potential Architectural and Training Extensions}
+
+Beyond the initial supervised baseline, possible extensions include stronger encoder--decoder variants such as attention-based U-Nets or nnU-Net, residual refinement of initial predictions, and combined patch-based and full-volume training strategies. These are not part of the immediate baseline milestone, but they provide plausible directions for improving distal airway recovery once the initial supervised pipeline has been validated.
+
+A further extension under consideration is the use of pretrained CT foundation model representations, such as CT-FM, to initialise part of the segmentation network. CT-FM is a 3D self-supervised foundation model trained on 148{,}000 CT scans and has shown strong transfer performance across multiple radiological tasks \cite{Pai2025CTFM}. 
+
+\subsection{Fallback Positions}
+\begin{itemize}
+    \item If semi-supervised learning is not stable within the project timeframe, the project will deliver a well-validated supervised patch-based baseline with full-volume evaluation and qualitative and structural analysis where feasible.
+    \item If topology metrics are difficult to implement reliably, evaluation will focus on Dice, precision, recall, IoU, and qualitative visual inspection.
+    \item If mixed augmentation degrades performance, the project will fall back to patch sampling without spatial augmentation and tune the foreground/background sampling ratio.
+    \item If HPC runtime becomes limiting---not currently expected---experiments will use fewer validation passes, smaller ablation sets, or reduced model capacity.
+    \item If full-volume training continues to produce unstable artefacts or poor specificity, patch-based training will be retained as the main supervised baseline and full-volume training treated as an ablation condition.
+    \item If the supervised baseline remains too weak for reliable pseudo-labelling, the semi-supervised phase will be reduced to a limited proof-of-concept, and the main contribution of the project will shift toward diagnosing baseline failure modes and establishing a robust supervised evaluation framework.
+\end{itemize}
+
+% -------------------------------------------------------------------------
+\section{Risk Register}
+% -------------------------------------------------------------------------
+
+\begin{table}[H]
+    \centering
+    \small
+    \begin{tabular}{p{0.25\linewidth} p{0.15\linewidth} p{0.13\linewidth} p{0.37\linewidth}}
+        \toprule
+        \textbf{Risk} & \textbf{Likelihood} & \textbf{Impact} & \textbf{Mitigation} \\
+        \midrule
+        Supervised baseline remains substantially below a usable performance level & Medium--High & High & Prioritise diagnosis of preprocessing, target alignment, loss design, sampling strategy, and inference configuration before committing substantial effort to semi-supervised experiments. \\
+        Full-volume validation is too slow for frequent experiments & Medium & Medium & Validate every few epochs; tune sliding-window batch size and overlap. \\
+        Model overfits airway-centred patches and performs poorly on full scans & Medium & High & Use mixed airway/lung-context sampling, full-volume validation, and visual inspection. \\
+        Labels or image orientations are inconsistent & Low--Medium & High & Use alignment checks, metadata logging, and unit tests for NIfTI loading and preprocessing. \\
+        Annotation quality varies in distal regions of AeroPath & Medium & Medium & Report per-generation Dice alongside whole-tree metrics; inspect outlier cases manually. \\
+        Semi-supervised pseudo-labels are noisy & Medium & High & Use confidence filtering, teacher checkpoints, and retain supervised baseline as fallback. \\
+        HPC environment or dependency issues delay experiments & Medium & Medium & Maintain a requirements file, use PBS smoke jobs, and save reproducible run metadata. \\
+        Project scope becomes too broad & Medium & High & Prioritise supervised baseline and full-volume evaluation; treat semi-supervised as a secondary objective. \\
+        External unlabelled CT data differs from AeroPath in contrast enhancement or acquisition distribution & Medium & High & Prefer closely matched thoracic CT sources where possible; inspect intensity distributions and qualitative predictions before using pseudo-labels; restrict SSL claims if domain shift proves substantial. \\
+        \bottomrule
+    \end{tabular}
+    \caption{Main project risks and mitigations.}
+\end{table}
+
+% -------------------------------------------------------------------------
+\section{Evaluation}
+% -------------------------------------------------------------------------
+
+The primary evaluation will be performed on held-out full CT volumes rather than on sampled training patches. The main metric will be whole-volume Dice similarity between the predicted binary airway mask and the ground-truth mask. Secondary overlap metrics will include precision, recall, and intersection-over-union. Recall is particularly important because missing distal airway branches is the most likely failure mode in this task.
+
+Validation during training will use sliding-window inference over full validation scans, preserving the memory advantage of patch-based training while measuring performance on the true target task. Final test evaluation will be performed only after model and hyperparameter choices are fixed, to avoid implicit test-set optimisation. Final testing will use a held-out subset of the 27 AeroPath cases, with model development restricted to a separate training/validation split.
+
+Where feasible, topology-aware metrics will be added to capture structural completeness beyond voxel overlap. Centreline Dice (clDice) and, time permitting, airway-specific measures such as Tree Length Detected and Branch Detection Rate will be computed on held-out cases. These metrics are particularly important for assessing distal branch recovery, since overlap-based scores can remain relatively high even when peripheral branches are systematically missed.
+
+The planned experimental comparisons include:
+\begin{itemize}
+    \item full-volume training versus patch-based training;
+    \item airway-only patch sampling versus mixed airway/lung-context sampling;
+    \item no augmentation versus MONAI patch augmentation;
+    \item different foreground sampling probabilities and patches-per-case values;
+    \item supervised baseline versus semi-supervised extension, if implemented.
+\end{itemize}
+
+Where relevant, final results will be discussed alongside published AeroPath and ATM'22 results as contextual reference points for task difficulty and desirable structural performance \cite{Stoverud2024AeroPath, Zhang2023ATM22}. However, these comparisons will not be treated as direct like-for-like benchmarks where the underlying training data, label availability, or evaluation protocol differs from the present project.
+
+Given the small dataset size, final results will be reported on a per-case basis as well as through mean and standard deviation across the evaluation split. Where a direct supervised versus semi-supervised comparison is available on the same cases, the comparison will be made using paired case-level metrics rather than mean Dice alone. This is intended to reduce over-interpretation of small absolute differences on a limited number of scans.
+
+The codebase will also be validated computationally using unit tests for path resolution, geometry, intensity normalisation, patch extraction, dataset behaviour, and metrics. Qualitative evaluation will include visual inspection of predicted airway masks against CT slices and ground-truth masks for representative cases, including cases where quantitative performance is weakest.
+
+% -------------------------------------------------------------------------
+\section{Preliminary Results}
+% -------------------------------------------------------------------------
+
+Two supervised baseline runs have now been completed on the HPC, each trained for 50 epochs using a cosine annealing schedule with a linear warmup to a peak learning rate of $3 \times 10^{-4}$. One run used patch-based training with airway-centred foreground sampling, while the other used full-volume training. Both models were evaluated using whole-volume sliding-window inference every fifth epoch on the same validation split.
+
+\subsection{Quantitative Summary}
+
+Table~\ref{tab:prelim_results} summarises the best whole-volume validation Dice achieved by each supervised baseline. The patch-based model achieved the stronger result, reaching a best validation Dice of 0.0629 at epoch 45, compared with 0.0563 for the full-volume model at epoch 50.
+
+As shown in Figure~\ref{fig:baseline_dice_comparison}, the patch-based model remains ahead of the full-volume model at most recorded validation checkpoints.Although the absolute margin is small and the validation set is limited, the current results are sufficient to justify carrying patch-based training forward as the working supervised baseline for further diagnosis and refinement.
+
+\begin{table}[htbp]
+    \centering
+    \caption{Best whole-volume validation Dice for the two supervised baseline runs.}
+    \vspace{0.2cm}
+    \begin{tabular}{lcc}
+        \hline
+        \textbf{Training regime} & \textbf{Best val.\ Dice} & \textbf{Epoch} \\
+        \hline
+        Patch-based             & 0.0629                    & 45             \\
+        Full-volume             & 0.0563                    & 50             \\
+        \hline
+    \end{tabular}
+    \label{tab:prelim_results}
+\end{table}
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.78\linewidth]{figs/dice_comparison.png}
+    \caption{Training and whole-volume validation Dice for the patch-based and
+    full-volume supervised baseline runs. Blue denotes the patch-based run and orange
+    denotes the full-volume run. Solid lines show training Dice, while dashed lines
+    show whole-volume validation Dice measured every fifth epoch.}
+    \label{fig:baseline_dice_comparison}
+\end{figure}
+
+This advantage is also visible at the case level. Figure~\ref{fig:per_case_dice} shows whole-volume Dice for each validation scan at the best recorded checkpoint of each model, with the patch-based model scoring higher on all four validation cases. However, this should be interpreted as an early directional signal rather than a robust comparative conclusion, since the validation set is small and absolute Dice values remain low for both regimes.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.78\linewidth]{figs/per_case_dice_comparison.png}
+    \caption{Per-case whole-volume Dice on the validation set for the patch-based and
+    full-volume supervised baseline runs. Dashed lines indicate the mean Dice for
+    each regime.}
+    \label{fig:per_case_dice}
+\end{figure}
+
+\subsection{Training Dynamics}
+
+The two runs exhibit different optimisation behaviour. Figure~\ref{fig:baseline_loss_comparison} shows that the patch-based model is easier to optimise during training: its loss decreases more rapidly and reaches a lower final value than the full-volume model (1.49 vs.\ 1.61 at epoch 50). The corresponding training Dice curves in Figure~\ref{fig:baseline_dice_comparison} show the same pattern. The patch-based run rises from approximately 0.10 at epoch 1 to 0.42 by epoch 50, whereas the full-volume run improves more gradually and reaches only 0.25 by the end of training.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.78\linewidth]{figs/training_loss_comparison.png}
+    \caption{Training loss for the patch-based and full-volume baseline runs. The
+    patch-based run is shown in blue and the full-volume run in orange.}
+    \label{fig:baseline_loss_comparison}
+\end{figure}
+
+This behaviour is consistent with the intuition that airway-centred patch sampling reduces the optimisation difficulty caused by extreme foreground sparsity. By presenting the model with more airway-containing regions, patch-based training makes the positive class easier to learn than full-volume training, in which airway voxels occupy only a very small fraction of the input volume.
+
+However, the stronger training fit of the patch-based model does not yet translate into strong whole-volume generalisation. Figure~\ref{fig:baseline_dice_comparison} shows that the gap between training and validation Dice remains large throughout training. At epoch 50, the patch-based run still shows a substantial difference between training and validation Dice (0.418 vs.\ 0.0615), suggesting that the model is learning useful local airway structure without yet achieving robust scan-level performance. This indicates that the current limitation is not simply optimisation, but also the difficulty of converting improved local airway detection into reliable whole-volume segmentation quality.
+
+\subsection{Qualitative Comparison}
+
+A representative qualitative comparison is shown in Figure~\ref{fig:qual_case20_slice254}. In this slice from validation case 20, the patch-based prediction recovers the main annotated airway region more cleanly than the full-volume model, which exhibits extensive scattered false positives across the scan. As seen in Figure~\ref{fig:qual_case20_slice254}, the patch-based prediction is still imperfect and includes some leakage, but it is substantially more anatomically focused than the full-volume result. This visual difference is consistent with the quantitative case-level result in Figure~\ref{fig:per_case_dice}, where the patch-based model also achieves a higher Dice on this case (0.101 vs.\ 0.043).
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\linewidth]{figs/qualitative_case_comparison.png}
+    \caption{Qualitative comparison for validation case 20, slice 254. Left: CT slice
+    with ground-truth airway annotation. Middle: patch-based prediction. Right:
+    full-volume prediction. The patch-based model recovers the annotated airway region
+    more selectively, whereas the full-volume model produces more widespread false
+    positive activations.}
+    \label{fig:qual_case20_slice254}
+\end{figure}
+
+\subsection{Interpretation}
+
+Taken together, Figures~\ref{fig:baseline_dice_comparison}--\ref{fig:qual_case20_slice254} suggest that patch-based training is currently the stronger supervised regime. The clearest validation improvements appear only after approximately epochs 25--30, once the learning rate has passed the warmup phase and begun to decay from its peak value. This suggests that the peak learning rate of $3 \times 10^{-4}$ may be too aggressive during the early stages of optimisation, and that a lower peak learning rate or a longer warmup may produce more stable progress.
+
+The two regimes also differ in their apparent convergence behaviour. The full-volume run attains its best validation Dice at the final checkpoint, suggesting that it has not yet converged. The patch-based run peaks slightly earlier at epoch 45 and then declines marginally by epoch 50, which suggests that it may be beginning to plateau, although the change is small and validation is only measured every five epochs.
+
+Overall, the current results justify retaining patch-based training as the main supervised baseline for the next phase of the project, while also showing that substantial further improvement is still required before strong claims can be made about practical airway segmentation performance. The patch-based regime appears preferable in terms of validation Dice (Figure~\ref{fig:baseline_dice_comparison}), per-case behaviour (Figure~\ref{fig:per_case_dice}), training dynamics (Figure~\ref{fig:baseline_loss_comparison}), and qualitative appearance (Figure~\ref{fig:qual_case20_slice254}), but the absolute whole-volume results remain low. The current priority is therefore diagnostic and stabilisation-focused: verifying preprocessing and target alignment, refining sampling and augmentation, tuning optimisation, and improving whole-volume generalisation. Semi-supervised learning remains a planned extension, but it will only be meaningful once the supervised baseline produces predictions of sufficient quality to act as a reliable teacher.
+
+
+
+% -------------------------------------------------------------------------
+\bibliography{ref}
+\bibliographystyle{IEEEtran}
+
+\newpage
+
+
+
+
+
+\end{document}

@@ -1,0 +1,159 @@
+{
+  "generated": "2026-08-25T09:02:45+00:00",
+  "script": "dissertation/scripts/render_qualitative_plate.py",
+  "case_id": "087",
+  "cohort": "val",
+  "patient_selection": {
+    "rule": "largest paired TLD gain",
+    "rank": 20,
+    "cohort_size": 20,
+    "paired_tld_difference": 0.04262052959172902
+  },
+  "region_selection": {
+    "definition": "largest 26-connected reference-supported treatment-only component meeting the pre-render thinness, elongation, size and centreline criteria",
+    "component_max_radius_mm": 1.0,
+    "component_min_elongation": 3.0,
+    "component_min_voxels": 12,
+    "context_mm": 16.0,
+    "ct_context_mm": 10.0,
+    "selected_component": {
+      "component_id": 210,
+      "size": 83,
+      "mean_radius_mm": 0.7155151433721981,
+      "long_axis_span_mm": 12.313617506434557,
+      "elongation": 7.123274182766256,
+      "recovered_centreline_voxels": 18,
+      "eligible": true,
+      "eligible_component_count": 38,
+      "all_added_component_count": 894
+    }
+  },
+  "ct_view": {
+    "axis": 0,
+    "orientation": "Sagittal",
+    "stored_slice": 174,
+    "component_voxels_on_slice": 41,
+    "window_hu": [
+      -1350,
+      150
+    ],
+    "isotropic_display_mm": 0.5,
+    "component_bbox_pixels": [
+      22.0,
+      20.0,
+      37.0,
+      40.0
+    ]
+  },
+  "recovery_counts": {
+    "Found by both arms": 8371,
+    "Missed by both arms": 556,
+    "Lost by the Mean Teacher": 74,
+    "Recovered by the Mean Teacher": 478,
+    "basis": "centreline",
+    "reference_total": 9479,
+    "implied_delta": 0.04262052959172909
+  },
+  "prediction_dirs": {
+    "control": "Dataset126_val_mt240_control_final_teacher",
+    "soft_f0": "Dataset126_val_mt240_softcldice_final_teacher"
+  },
+  "render": {
+    "whole": {
+      "Reference": {
+        "voxels": 288118,
+        "voxel_retention": 1.0,
+        "components_before": 1,
+        "components_after": 1,
+        "surface_samples": 1994326,
+        "samples_without_class": 0
+      },
+      "Control prediction": {
+        "voxels": 281226,
+        "voxel_retention": 1.0,
+        "components_before": 55,
+        "components_after": 55,
+        "surface_samples": 1836891,
+        "samples_without_class": 0
+      },
+      "+ Soft-clDice prediction": {
+        "voxels": 274473,
+        "voxel_retention": 1.0,
+        "components_before": 100,
+        "components_after": 100,
+        "surface_samples": 1853342,
+        "samples_without_class": 0
+      },
+      "frame": {
+        "render_pixels": [
+          1938,
+          1420
+        ],
+        "px_mm_final": 0.32,
+        "supersample": 2,
+        "azimuth_deg": -30.0,
+        "elevation_deg": 10.0,
+        "smooth_mm": 0.25,
+        "taubin_iterations": 16,
+        "splat_radius_px": 2
+      },
+      "annotations": {
+        "A": [
+          278.8844082358819,
+          853.6038787937614,
+          289.8707363608819,
+          887.5282753655811
+        ]
+      }
+    },
+    "local_3d": {
+      "Reference annotation": {
+        "voxels": 1596,
+        "voxel_retention": 1.0,
+        "components_before": 4,
+        "components_after": 4,
+        "surface_samples": 28456,
+        "samples_without_class": 0
+      },
+      "Control prediction": {
+        "voxels": 1325,
+        "voxel_retention": 1.0,
+        "components_before": 4,
+        "components_after": 4,
+        "surface_samples": 22948,
+        "samples_without_class": 0
+      },
+      "+ Soft-clDice prediction": {
+        "voxels": 1367,
+        "voxel_retention": 1.0,
+        "components_before": 5,
+        "components_after": 5,
+        "surface_samples": 24829,
+        "samples_without_class": 0
+      },
+      "frame": {
+        "render_pixels": [
+          920,
+          534
+        ],
+        "px_mm_final": 0.1,
+        "supersample": 2,
+        "azimuth_deg": -30.0,
+        "elevation_deg": 10.0,
+        "smooth_mm": 0.25,
+        "taubin_iterations": 16,
+        "splat_radius_px": 5
+      },
+      "annotations": {
+        "selected": [
+          139.70367131501666,
+          180.50404001799484,
+          174.85992131501666,
+          289.0621090478178
+        ]
+      }
+    }
+  },
+  "figure": "qualitative_plate_val_087.pdf",
+  "seconds": 143.0
+}

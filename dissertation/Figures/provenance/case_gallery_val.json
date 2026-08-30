@@ -1,0 +1,241 @@
+{
+  "generated": "2026-08-24T19:52:12+00:00",
+  "script": "dissertation/scripts/render_case_gallery.py",
+  "cohort": "val",
+  "treatment": "soft_f0",
+  "comparator": "control",
+  "selection": {
+    "rule": "median,best",
+    "ranked_by": "paired td_raw difference, treatment minus comparator",
+    "ranking": [
+      {
+        "case_id": "044",
+        "difference": 0.004020677771395698,
+        "treatment": 0.9847788627225732,
+        "comparator": 0.9807581849511775,
+        "rank": 1
+      },
+      {
+        "case_id": "043",
+        "difference": 0.005133470225872738,
+        "treatment": 0.9396303901437372,
+        "comparator": 0.9344969199178644,
+        "rank": 2
+      },
+      {
+        "case_id": "028",
+        "difference": 0.006394153916419287,
+        "treatment": 0.9604932633021238,
+        "comparator": 0.9540991093857045,
+        "rank": 3
+      },
+      {
+        "case_id": "033",
+        "difference": 0.010040160642570184,
+        "treatment": 0.9871987951807228,
+        "comparator": 0.9771586345381527,
+        "rank": 4
+      },
+      {
+        "case_id": "016",
+        "difference": 0.010980138866462097,
+        "treatment": 0.937187146778621,
+        "comparator": 0.9262070079121589,
+        "rank": 5
+      },
+      {
+        "case_id": "078",
+        "difference": 0.01108609042092501,
+        "treatment": 0.929845834055084,
+        "comparator": 0.918759743634159,
+        "rank": 6
+      },
+      {
+        "case_id": "027",
+        "difference": 0.01133786848072571,
+        "treatment": 0.9319727891156463,
+        "comparator": 0.9206349206349206,
+        "rank": 7
+      },
+      {
+        "case_id": "150",
+        "difference": 0.01601281024819856,
+        "treatment": 0.9039231385108086,
+        "comparator": 0.8879103282626101,
+        "rank": 8
+      },
+      {
+        "case_id": "056",
+        "difference": 0.017608217168011753,
+        "treatment": 0.9458914159941306,
+        "comparator": 0.9282831988261189,
+        "rank": 9
+      },
+      {
+        "case_id": "068",
+        "difference": 0.017825311942959,
+        "treatment": 0.9760631525337408,
+        "comparator": 0.9582378405907818,
+        "rank": 10
+      },
+      {
+        "case_id": "034",
+        "difference": 0.020825721592985014,
+        "treatment": 0.9601753744976251,
+        "comparator": 0.9393496529046401,
+        "rank": 11
+      },
+      {
+        "case_id": "126",
+        "difference": 0.022104466313398907,
+        "treatment": 0.9654806964420893,
+        "comparator": 0.9433762301286904,
+        "rank": 12
+      },
+      {
+        "case_id": "125",
+        "difference": 0.023978545511910365,
+        "treatment": 0.9162328442972077,
+        "comparator": 0.8922542987852974,
+        "rank": 13
+      },
+      {
+        "case_id": "116",
+        "difference": 0.02416263956007325,
+        "treatment": 0.8663556073987668,
+        "comparator": 0.8421929678386936,
+        "rank": 14
+      },
+      {
+        "case_id": "152",
+        "difference": 0.02541054451166813,
+        "treatment": 0.9408815903197926,
+        "comparator": 0.9154710458081244,
+        "rank": 15
+      },
+      {
+        "case_id": "046",
+        "difference": 0.028377942599161488,
+        "treatment": 0.8745565946468881,
+        "comparator": 0.8461786520477266,
+        "rank": 16
+      },
+      {
+        "case_id": "147",
+        "difference": 0.030355731225296445,
+        "treatment": 0.9223715415019763,
+        "comparator": 0.8920158102766799,
+        "rank": 17
+      },
+      {
+        "case_id": "081",
+        "difference": 0.03050397877984079,
+        "treatment": 0.9505305039787798,
+        "comparator": 0.920026525198939,
+        "rank": 18
+      },
+      {
+        "case_id": "151",
+        "difference": 0.03314012096774199,
+        "treatment": 0.9679939516129032,
+        "comparator": 0.9348538306451613,
+        "rank": 19
+      },
+      {
+        "case_id": "087",
+        "difference": 0.04262052959172902,
+        "treatment": 0.9335372929633927,
+        "comparator": 0.8909167633716637,
+        "rank": 20
+      }
+    ],
+    "chosen": [
+      {
+        "case_id": "034",
+        "rule": "median"
+      },
+      {
+        "case_id": "087",
+        "rule": "best"
+      }
+    ]
+  },
+  "cases": [
+    {
+      "case_id": "034",
+      "cohort": "val",
+      "selection_rule": "median",
+      "reference": "data\\ATM22\\labelsTr\\ATM_034_0000.nii.gz",
+      "prediction_dirs": {
+        "control": "Dataset126_val_mt240_control_final_teacher",
+        "soft_f0": "Dataset126_val_mt240_softcldice_final_teacher"
+      },
+      "figures": {
+        "comparison": "qualitative_comparison_val_034.pdf",
+        "recovery": "distal_recovery_val_034.pdf",
+        "error_classes": "error_classes_val_control_soft_f0_034.pdf"
+      },
+      "recovery_counts": {
+        "Found by both arms": 5128,
+        "Missed by both arms": 204,
+        "Lost by the Mean Teacher": 14,
+        "Recovered by the Mean Teacher": 128,
+        "basis": "centreline",
+        "reference_total": 5474,
+        "implied_delta": 0.02082572159298502
+      },
+      "render": {
+        "render_pixels": [
+          1853,
+          1576
+        ],
+        "px_mm_final": 0.32,
+        "supersample": 2,
+        "azimuth_deg": -30.0,
+        "elevation_deg": 10.0,
+        "smooth_mm": 0.25,
+        "taubin_iterations": 16,
+        "splat_radius_px": 2
+      },
+      "seconds": 153.3
+    },
+    {
+      "case_id": "087",
+      "cohort": "val",
+      "selection_rule": "best",
+      "reference": "data\\ATM22\\labelsTr\\ATM_087_0000.nii.gz",
+      "prediction_dirs": {
+        "control": "Dataset126_val_mt240_control_final_teacher",
+        "soft_f0": "Dataset126_val_mt240_softcldice_final_teacher"
+      },
+      "figures": {
+        "comparison": "qualitative_comparison_val_087.pdf",
+        "recovery": "distal_recovery_val_087.pdf",
+        "error_classes": "error_classes_val_control_soft_f0_087.pdf"
+      },
+      "recovery_counts": {
+        "Found by both arms": 8371,
+        "Missed by both arms": 556,
+        "Lost by the Mean Teacher": 74,
+        "Recovered by the Mean Teacher": 478,
+        "basis": "centreline",
+        "reference_total": 9479,
+        "implied_delta": 0.04262052959172909
+      },
+      "render": {
+        "render_pixels": [
+          1938,
+          1420
+        ],
+        "px_mm_final": 0.32,
+        "supersample": 2,
+        "azimuth_deg": -30.0,
+        "elevation_deg": 10.0,
+        "smooth_mm": 0.25,
+        "taubin_iterations": 16,
+        "splat_radius_px": 2
+      },
+      "seconds": 148.3
+    }
+  ]
+}

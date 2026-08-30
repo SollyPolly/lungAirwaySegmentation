@@ -1,0 +1,105 @@
+{
+  "case_id": "ATM_044",
+  "purpose": "Mechanism illustration; intentionally selected because thresholding breaks an annotated bronchial connector.",
+  "provenance": {
+    "dataset": "Dataset126_ATM22MT240LungCrop",
+    "trainer": "nnUNetTrainer_MeanTeacher_WarmStart_TwoStream_NoDeepSupervision_NoMirroring",
+    "fold": 0,
+    "checkpoint": "checkpoint_final.pth",
+    "network_role": "final EMA teacher",
+    "inference": "deterministic held-out full-volume sliding-window inference with TTA disabled",
+    "important_limitation": "This is not a saved stochastic U-stream training crop and is not the output of a separately trained probability-target model."
+  },
+  "inputs": {
+    "ct": "D:\\Code\\Imperial\\lungAirwaySegmentation\\data\\ATM22\\imagesTr\\ATM_044_0000.nii.gz",
+    "ground_truth": "D:\\Code\\Imperial\\lungAirwaySegmentation\\data\\ATM22\\labelsTr\\ATM_044_0000.nii.gz",
+    "probabilities": "D:\\Code\\Imperial\\lungAirwaySegmentation\\.codex_tmp\\cldice_real_patch\\d126_final_teacher\\ATM_044.npz",
+    "hard_mask": "D:\\Code\\Imperial\\lungAirwaySegmentation\\.codex_tmp\\cldice_real_patch\\d126_final_teacher\\ATM_044.nii.gz"
+  },
+  "array_conventions": {
+    "nnunet_npz": "(class, z, y, x); foreground airway is channel 1",
+    "nifti_via_nibabel": "(x, y, z)"
+  },
+  "operator": {
+    "hard_target": "H = 1[p_T > 0.5] (strict greater-than)",
+    "soft_skeleton_iterations": 10,
+    "soft_erosion": "minimum over centre plus six face-connected neighbours",
+    "opening_dilation": "3x3x3 maximum pool",
+    "implementation": "nnunet_trainers/nnUNetTrainer_MeanTeacher_NoDeepSupervision_NoMirroring.py::_soft_skeleton3d"
+  },
+  "geometry": {
+    "voxel_spacing_xyz_mm": [
+      0.8203125,
+      0.8203125,
+      0.5
+    ],
+    "compute_bounds_xyz_half_open": [
+      [
+        205,
+        310
+      ],
+      [
+        265,
+        318
+      ],
+      [
+        360,
+        460
+      ]
+    ],
+    "display_bounds_xyz_half_open": [
+      [
+        225,
+        285
+      ],
+      [
+        289,
+        294
+      ],
+      [
+        385,
+        445
+      ]
+    ],
+    "display_projection": "max over coronal y=289:294 after 3-D computation; CT is y=291",
+    "profile_skeleton_bounds_xyz_half_open": [
+      [
+        238,
+        271
+      ],
+      [
+        282,
+        300
+      ],
+      [
+        390,
+        436
+      ]
+    ],
+    "profile_keep_bounds_xyz_half_open": [
+      [
+        245,
+        267
+      ],
+      [
+        285,
+        298
+      ],
+      [
+        395,
+        429
+      ]
+    ]
+  },
+  "validation": {
+    "thresholded_probability_vs_exported_hard_mask_mismatched_voxels_in_compute_crop": 0,
+    "profile_points": 34,
+    "profile_points_below_0.5": 13,
+    "profile_probability_min": 3.8983082049526274e-05,
+    "profile_probability_max": 0.9999985694885254,
+    "profile_soft_skeleton_mass": 8.331679344177246,
+    "profile_hard_skeleton_mass": 9.0,
+    "display_soft_skeleton_mass_where_hard_zero": 0.05823133885860443
+  },
+  "interpretation": "S(p_T) is graded centreline evidence. Retaining faint evidence is not proof that it is a real airway."
+}
