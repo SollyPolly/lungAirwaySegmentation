@@ -1,0 +1,35 @@
+#!/bin/bash
+#PBS -N nnLCLowCtrl
+#PBS -J 130-131
+#PBS -l select=1:ncpus=6:mem=64gb:ngpus=1
+#PBS -l walltime=15:00:00
+#PBS -j oe
+#PBS -o /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation/logs/nnLCLowCtrl.o^array_index^
+
+# No-consistency control for the reduced-label rungs. The array index IS the
+# nnU-Net dataset id: 130 = @10, 131 = @5.
+#
+# WHY THIS ARM EXISTS. It is the same warm start, the same 500 epochs at LR 1e-3,
+# the same 1-GT-plus-1-unlabelled loader, the same strong view from epoch 5 and the
+# same final-EMA deployment as the soft-clDice arm -- with consistency_max = 0. So
+# (soft-clDice minus control) at a rung isolates the consistency gradient, whereas
+# (soft-clDice minus seed) would also contain 500 epochs of continued training that
+# has nothing to do with consistency. Without this arm neither rung's number is
+# attributable, and the @20 rung's published causal claim was made against exactly
+# this control.
+#
+# 500 epochs at ~58 s/epoch is ~8 h; 15 h matches the @20 arm's allowance.
+
+set -euo pipefail
+PROJECT=/rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation
+cd "$PROJECT"
+EXPECTED_RUNNER_BLOB=b6137933e976265f91bf9787223da5d909987fa8
+ACTUAL_RUNNER_BLOB=$(git hash-object scripts/run_nnunet_lowlabel_mt.sh)
+HEAD_RUNNER_BLOB=$(git rev-parse HEAD:scripts/run_nnunet_lowlabel_mt.sh)
+test "$ACTUAL_RUNNER_BLOB" = "$EXPECTED_RUNNER_BLOB" && \
+    test "$HEAD_RUNNER_BLOB" = "$EXPECTED_RUNNER_BLOB" || {
+    echo "Refusing low-label control launch: shared runner changed"
+    echo "expected=$EXPECTED_RUNNER_BLOB working_tree=$ACTUAL_RUNNER_BLOB HEAD=$HEAD_RUNNER_BLOB"
+    exit 1
+}
+LOWLABEL_ARM=control bash scripts/run_nnunet_lowlabel_mt.sh

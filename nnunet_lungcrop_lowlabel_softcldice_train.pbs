@@ -1,0 +1,30 @@
+#!/bin/bash
+#PBS -N nnLCLowSoft
+#PBS -J 130-131
+#PBS -l select=1:ncpus=6:mem=64gb:ngpus=1
+#PBS -l walltime=15:00:00
+#PBS -j oe
+#PBS -o /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation/logs/nnLCLowSoft.o^array_index^
+
+# soft-clDice Mean Teacher at w_max=0.10 on the reduced-label rungs.
+# The array index IS the nnU-Net dataset id: 130 = @10, 131 = @5. Each rung is a
+# single-fold dataset of its own, so Dataset126 is never touched. Both members
+# warm-start from the matching low-label seed (Dataset128/129), which
+# nnunet_lungcrop_lowlabel_seed_train.pbs must have finished first -- the runner
+# refuses to start without it.
+#
+# 500 epochs at ~58 s/epoch is ~8 h; 15 h matches the @20 arm's allowance.
+
+set -euo pipefail
+PROJECT=/rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation
+cd "$PROJECT"
+EXPECTED_RUNNER_BLOB=b6137933e976265f91bf9787223da5d909987fa8
+ACTUAL_RUNNER_BLOB=$(git hash-object scripts/run_nnunet_lowlabel_mt.sh)
+HEAD_RUNNER_BLOB=$(git rev-parse HEAD:scripts/run_nnunet_lowlabel_mt.sh)
+test "$ACTUAL_RUNNER_BLOB" = "$EXPECTED_RUNNER_BLOB" && \
+    test "$HEAD_RUNNER_BLOB" = "$EXPECTED_RUNNER_BLOB" || {
+    echo "Refusing low-label soft-clDice launch: shared runner changed"
+    echo "expected=$EXPECTED_RUNNER_BLOB working_tree=$ACTUAL_RUNNER_BLOB HEAD=$HEAD_RUNNER_BLOB"
+    exit 1
+}
+LOWLABEL_ARM=softcldice_w010 bash scripts/run_nnunet_lowlabel_mt.sh

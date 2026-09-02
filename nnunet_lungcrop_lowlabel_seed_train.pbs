@@ -1,0 +1,147 @@
+#!/bin/bash
+#PBS -N nnLCLowSeed
+#PBS -J 128-129
+#PBS -l select=1:ncpus=6:mem=64gb:ngpus=1
+#PBS -l walltime=18:00:00
+#PBS -j oe
+#PBS -o /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation/logs/nnLCLowSeed.o^array_index^
+
+# Reduced-label supervised seeds for the @10 and @5 rungs of the label curve.
+# The array index IS the nnU-Net dataset id: 128 = @10 (8 train + 2 val),
+# 129 = @5 (4 train + 1 val). Each rung is a single-fold dataset of its own, so
+# Dataset123 is never touched -- see scripts/prepare_lowlabel_rungs.py for why
+# the rungs are not extra folds of it.
+#
+# These are the warm-start checkpoints the matching MT and control arms load, and
+# they are also the "seed" row of each rung in their own right -- the same role
+# Dataset123 fold 0 plays for the @20 rung.
+#
+# Protocol-matched to the @20 seed on purpose: same trainer, same Dataset111-derived
+# plans, same stock 1000 epochs, same LR. Only the labelled pool differs, so the
+# @20 -> @10 -> @5 curve has one moving part. DO NOT shorten num_epochs to fit the
+# walltime; nnU-Net's polynomial LR schedule is parameterised by it, so a truncated
+# run is a different recipe rather than a shorter one. Epoch time is set by the
+# 250 iterations per epoch, not by the number of training cases, so these cost the
+# same ~35 s/epoch as the @20 seed (~10 h). If a member is walltime-killed, re-qsub;
+# finished ones exit in seconds and unfinished ones resume from checkpoint_latest.
+#
+# Requires scripts/prepare_lowlabel_rungs.py --apply to have built the datasets.
+
+set -euo pipefail
+
+PROJECT=/rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation
+cd "$PROJECT"
+
+module load miniforge/3
+source "$HOME/miniforge3/etc/profile.d/conda.sh"
+conda activate ctfm
+
+export nnUNet_raw="$PROJECT/data/nnunet/nnUNet_raw"
+export nnUNet_preprocessed="$PROJECT/data/nnunet/nnUNet_preprocessed"
+export nnUNet_results="$PROJECT/data/nnunet/nnUNet_results"
+export TORCH_HOME="$HOME/.torchcache"
+export nnUNet_n_proc_DA=4
+
+DATASET="$PBS_ARRAY_INDEX"
+FOLD=0
+TRAINER=nnUNetTrainer_NoDeepSupervision_NoMirroring
+
+case "$DATASET" in
+    128) RUNG=L10; SEED_DATASET=Dataset128_ATM22L10LungCrop; EXPECTED_TRAIN=8; EXPECTED_VAL=2 ;;
+    129) RUNG=L5;  SEED_DATASET=Dataset129_ATM22L5LungCrop;  EXPECTED_TRAIN=4; EXPECTED_VAL=1 ;;
+    *) echo "Unsupported low-label dataset '$DATASET'; this array covers 128 (@10) and 129 (@5) only"; exit 1 ;;
+esac
+
+RESULT_DIR="$nnUNet_results/${SEED_DATASET}/${TRAINER}__nnUNetPlans__3d_fullres/fold_${FOLD}"
+
+NNUNET_PACKAGE=$(python -c 'from pathlib import Path; import nnunetv2; print(Path(nnunetv2.__file__).resolve().parent)')
+TRAINER_DIR="$NNUNET_PACKAGE/training/nnUNetTrainer/variants/network_architecture"
+test -d "$TRAINER_DIR" || {
+    echo "Cannot find nnU-Net trainer directory: $TRAINER_DIR"
+    exit 1
+}
+test -f "$PROJECT/nnunet_trainers/${TRAINER}.py" || {
+    echo "Missing repository trainer: $PROJECT/nnunet_trainers/${TRAINER}.py"
+    exit 1
+}
+
+# The seed recipe must be the one the @20 rung was trained with, or the curve
+# compares two different supervised baselines.
+ACTUAL_SEED_BLOB=$(git hash-object "nnunet_trainers/${TRAINER}.py")
+test "$ACTUAL_SEED_BLOB" = 23af9756e44a5f63d7e136b2177276c8a9299ae0 || {
+    echo "Refusing low-label seed launch: ${TRAINER}.py changed"
+    echo "expected=23af9756e44a5f63d7e136b2177276c8a9299ae0 found=$ACTUAL_SEED_BLOB"
+    exit 1
+}
+
+ln -sfn "$PROJECT/nnunet_trainers/${TRAINER}.py" "$TRAINER_DIR/${TRAINER}.py"
+
+test -d "$nnUNet_preprocessed/${SEED_DATASET}/nnUNetPlans_3d_fullres" || {
+    echo "${SEED_DATASET} is not built; run scripts/prepare_lowlabel_rungs.py --apply first."
+    exit 1
+}
+
+SEED_DATASET="$SEED_DATASET" RUNG="$RUNG" EXPECTED_TRAIN="$EXPECTED_TRAIN" \
+EXPECTED_VAL="$EXPECTED_VAL" python - <<'PY'
+import json
+import os
+from pathlib import Path
+
+rung = os.environ["RUNG"]
+expected_train = int(os.environ["EXPECTED_TRAIN"])
+expected_val = int(os.environ["EXPECTED_VAL"])
+root = Path(os.environ["nnUNet_preprocessed"]) / os.environ["SEED_DATASET"]
+
+splits = json.loads((root / "splits_final.json").read_text())
+assert len(splits) == 1, f"{root.name} must hold exactly one fold, got {len(splits)}"
+
+# The plans must point at THIS dataset. If they still name Dataset123, the
+# trainer would read Dataset123's split and train on all 16 labels.
+plans = json.loads((root / "nnUNetPlans.json").read_text())
+assert plans["dataset_name"] == root.name, (
+    f"{root.name}/nnUNetPlans.json names {plans['dataset_name']!r}; the trainer would "
+    "read another dataset's splits_final.json"
+)
+
+entry = splits[0]
+train, val = entry["train"], entry["val"]
+assert len(train) == expected_train, (len(train), expected_train)
+assert len(val) == expected_val, (len(val), expected_val)
+assert len(set(train)) == len(train) and len(set(val)) == len(val)
+assert not set(train) & set(val)
+
+manifest = json.loads((root / "lowlabel_rung_manifest.json").read_text())
+assert manifest["rung"] == rung, (manifest["rung"], rung)
+assert sorted(manifest["labelled_train"]) == sorted(train)
+assert sorted(manifest["labelled_val"]) == sorted(val)
+
+print(f"{root.name} ({rung}) preflight OK: {len(train)} train / {len(val)} val, plans self-named")
+print(f"  train: {sorted(train)}")
+print(f"  val:   {sorted(val)}")
+PY
+
+if test -f "$RESULT_DIR/checkpoint_final.pth"; then
+    echo "$SEED_DATASET ($RUNG) seed is already complete"
+    exit 0
+fi
+
+if test -f "$RESULT_DIR/checkpoint_latest.pth"; then
+    nnUNetv2_train "$DATASET" 3d_fullres "$FOLD" \
+        -tr "$TRAINER" \
+        -p nnUNetPlans \
+        --c
+else
+    if test -d "$RESULT_DIR" && test -n "$(find "$RESULT_DIR" -mindepth 1 -print -quit)"; then
+        echo "Refusing a fresh start in non-empty incomplete result directory: $RESULT_DIR"
+        exit 1
+    fi
+    nnUNetv2_train "$DATASET" 3d_fullres "$FOLD" \
+        -tr "$TRAINER" \
+        -p nnUNetPlans
+fi
+
+test -s "$RESULT_DIR/checkpoint_final.pth" || {
+    echo "Training returned without a final checkpoint"
+    exit 1
+}
+echo "$SEED_DATASET ($RUNG) seed completed"
