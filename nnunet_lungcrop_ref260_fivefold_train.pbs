@@ -1,0 +1,77 @@
+#!/bin/bash
+#PBS -N nnLCRef2605F
+#PBS -J 0-4
+#PBS -l select=1:ncpus=6:mem=64gb:ngpus=1
+#PBS -l walltime=18:00:00
+#PBS -j oe
+#PBS -o /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation/logs/nnLCRef2605F.o^array_index^
+
+# Best-effort supervised reference, five folds over all 260 labelled lung-ROI
+# cases. Deliberately UNMATCHED to MT240: no -tr, so this is the stock
+# nnUNetTrainer with deep supervision and mirroring enabled, and no -p, so it
+# uses the plans nnU-Net derived for this dataset rather than Dataset123's.
+#
+# This arm is a reference level on VAL20 and the sealed TEST20. It is NOT
+# subtractable from MT240 fold-for-fold -- the trainer, the plans and the folds
+# all differ. Dataset127 remains the paired ceiling for that comparison.
+#
+# DO NOT shorten num_epochs to fit the walltime. nnU-Net's polynomial LR
+# schedule is parameterised by it, so a truncated run is a different recipe, not
+# a shorter one. Dataset111's stock folds ran at ~35 s/epoch, so budget ~10-12 h;
+# 18 h leaves room for the unpack and the end-of-training validation. If a fold
+# is walltime-killed, re-qsub this array -- finished folds exit in seconds and
+# unfinished ones resume from checkpoint_latest.
+
+set -euo pipefail
+
+PROJECT=/rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation
+cd "$PROJECT"
+
+module load miniforge/3
+source "$HOME/miniforge3/etc/profile.d/conda.sh"
+conda activate ctfm
+
+export nnUNet_raw="$PROJECT/data/nnunet/nnUNet_raw"
+export nnUNet_preprocessed="$PROJECT/data/nnunet/nnUNet_preprocessed"
+export nnUNet_results="$PROJECT/data/nnunet/nnUNet_results"
+export TORCH_HOME="$HOME/.torchcache"
+export nnUNet_n_proc_DA=4
+
+FOLD="$PBS_ARRAY_INDEX"
+TRAINER=nnUNetTrainer
+RESULT_DIR="$nnUNet_results/Dataset132_ATM22REF260LungCrop/${TRAINER}__nnUNetPlans__3d_fullres/fold_${FOLD}"
+
+test -d "$nnUNet_preprocessed/Dataset132_ATM22REF260LungCrop/nnUNetPlans_3d_fullres" || {
+    echo "Dataset132 is not preprocessed; run nnunet_lungcrop_ref260_prepare.pbs first."
+    exit 1
+}
+
+python -c "
+import json
+from pathlib import Path
+root = Path('$nnUNet_preprocessed') / 'Dataset132_ATM22REF260LungCrop'
+folds = json.loads((root / 'splits_final.json').read_text())
+assert len(folds) == 5, f'Expected five Dataset132 folds, got {len(folds)}'
+fold = folds[$FOLD]
+assert len(fold['train']) == 208 and len(fold['val']) == 52, (len(fold['train']), len(fold['val']))
+
+labels = json.loads((root / 'dataset.json').read_text())['labels']
+assert labels == {'background': 0, 'airway': 1}, f'Dataset132 must be fully labelled, got {labels}'
+
+contract = json.loads((root / 'dataset.json').read_text())['reference_arm']
+assert contract['comparable_to_mt240'] is False
+print('Dataset132 fold $FOLD preflight OK; unconstrained reference, val cases:', len(fold['val']))
+"
+
+if test -f "$RESULT_DIR/checkpoint_final.pth"; then
+    echo "Dataset132 REF260 fold $FOLD is already complete"
+    exit 0
+fi
+
+if test -f "$RESULT_DIR/checkpoint_latest.pth"; then
+    nnUNetv2_train 132 3d_fullres "$FOLD" --c
+else
+    nnUNetv2_train 132 3d_fullres "$FOLD"
+fi
+
+echo "Dataset132 REF260 fold $FOLD completed"

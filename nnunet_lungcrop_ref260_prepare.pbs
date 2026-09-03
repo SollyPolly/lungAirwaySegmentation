@@ -1,0 +1,92 @@
+#!/bin/bash
+#PBS -N nnLCRef260Prep
+#PBS -l select=1:ncpus=6:mem=96gb
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -o /rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation/logs/nnLCRef260Prep.out
+
+# Unconstrained best-effort supervised reference on the 260 labelled lung-ROI
+# cases. Unlike Dataset127 this one is NOT protocol-matched to MT240: nnU-Net
+# plans it for itself, the stock trainer runs it, and the split is an ordinary
+# five-fold over all 260. Dataset127 raw must survive, because the images and
+# labels here are hardlinks into it.
+
+set -euo pipefail
+
+PROJECT=/rds/general/user/dl525/home/projects/dissertation/LungAirwaySegmentation
+cd "$PROJECT"
+
+module load miniforge/3
+source "$HOME/miniforge3/etc/profile.d/conda.sh"
+conda activate ctfm
+
+export nnUNet_raw="$PROJECT/data/nnunet/nnUNet_raw"
+export nnUNet_preprocessed="$PROJECT/data/nnunet/nnUNet_preprocessed"
+export nnUNet_results="$PROJECT/data/nnunet/nnUNet_results"
+
+SOURCE_DATASET="$nnUNet_raw/Dataset127_ATM22SUP260LungCrop"
+RAW_DATASET="$nnUNet_raw/Dataset132_ATM22REF260LungCrop"
+PREPROCESSED_DATASET="$nnUNet_preprocessed/Dataset132_ATM22REF260LungCrop"
+
+test -f "$SOURCE_DATASET/dataset.json" || {
+    echo "Missing source Dataset127 raw dataset: $SOURCE_DATASET"
+    echo "Dataset132 hardlinks its voxels; run nnunet_lungcrop_sup260_prepare.pbs first."
+    exit 1
+}
+
+test ! -e "$RAW_DATASET" || {
+    echo "Dataset132 raw directory already exists: $RAW_DATASET"
+    echo "Move an incomplete build aside, or skip preparation if it already completed."
+    exit 1
+}
+
+test ! -e "$PREPROCESSED_DATASET" || {
+    echo "Dataset132 preprocessed directory already exists: $PREPROCESSED_DATASET"
+    echo "Move an incomplete build aside, or skip preparation if it already completed."
+    exit 1
+}
+
+python -u -m scripts.build_lungcrop_reference260_nnunet --nnunet-raw "$nnUNet_raw"
+
+# nnU-Net fingerprints and plans this dataset for itself. That is the whole
+# point of the arm, so do NOT move plans in from Dataset123 here.
+nnUNetv2_plan_and_preprocess \
+    -d 132 \
+    -c 3d_fullres \
+    --verify_dataset_integrity \
+    -np 6
+
+cp "$RAW_DATASET/dataset.json" "$PREPROCESSED_DATASET/dataset.json"
+cp "$RAW_DATASET/label_provenance.json" "$PREPROCESSED_DATASET/label_provenance.json"
+
+# The builder froze the five-fold split so five concurrent fold jobs cannot race
+# to create it. Install it before any training starts.
+cp "$RAW_DATASET/splits_final.json" "$PREPROCESSED_DATASET/splits_final.json"
+
+test -d "$PREPROCESSED_DATASET/nnUNetPlans_3d_fullres" || {
+    echo "Dataset132 preprocessing did not produce nnUNetPlans_3d_fullres"
+    exit 1
+}
+
+python -c "
+import json
+from pathlib import Path
+target = json.loads(Path('$PREPROCESSED_DATASET/nnUNetPlans.json').read_text())
+matched = json.loads(Path('$nnUNet_preprocessed/Dataset123_ATM22L20LungCrop/nnUNetPlans.json').read_text())
+a = target['configurations']['3d_fullres']
+b = matched['configurations']['3d_fullres']
+print('Dataset132 planned itself; Dataset123 (the matched-arm plans) shown for contrast:')
+for field in ('spacing', 'patch_size', 'batch_size', 'normalization_schemes'):
+    flag = 'same' if a[field] == b[field] else 'DIFFERS'
+    print(f'  {field}: {a[field]}  vs Dataset123 {b[field]}  [{flag}]')
+
+labels = json.loads(Path('$PREPROCESSED_DATASET/dataset.json').read_text())['labels']
+assert labels == {'background': 0, 'airway': 1}, labels
+folds = json.loads(Path('$PREPROCESSED_DATASET/splits_final.json').read_text())
+assert len(folds) == 5, len(folds)
+for index, fold in enumerate(folds):
+    assert len(fold['train']) == 208 and len(fold['val']) == 52, index
+print('Dataset132 split installed: five folds of 208 train / 52 val')
+"
+
+echo "Dataset132 ready: 260 labelled lung-ROI cases, self-planned, stock five-fold reference"
